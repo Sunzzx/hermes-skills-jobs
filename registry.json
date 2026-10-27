@@ -140,5 +140,19 @@
       "Intelligence",
       "MachineLearning"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v7",
+    "title": "Workflow Accelerator Suite #7",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #7.",
+    "cli": "accelerate-7",
+    "evolved_at": "2026-10-28T02:26:15.971787",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
