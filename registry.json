@@ -62,5 +62,21 @@
       "SQLite",
       "Health"
     ]
+  },
+  {
+    "id": "opportunity-scout",
+    "title": "Autonomous Opportunity & Bounty Scout",
+    "category": "finance",
+    "type": "job+tool",
+    "description": "Scouts high-yield digital revenue opportunities: Kaggle cash prize pools, Algora GitHub bounties, and security research programs. Compiles actionable dossiers.",
+    "cli": "opportunity-scout",
+    "evolved_at": "2026-10-27T22:37:03.975623",
+    "tags": [
+      "Finance",
+      "Bounties",
+      "Kaggle",
+      "Revenue",
+      "OpportunityScout"
+    ]
   }
 ]
