@@ -94,5 +94,20 @@
       "Payouts",
       "Billing"
     ]
+  },
+  {
+    "id": "port-sentinel",
+    "title": "Port Sentinel \u2014 Dev Port Conflict Manager",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely.",
+    "cli": "ports",
+    "evolved_at": "2026-10-27T23:18:15.827330",
+    "tags": [
+      "DevOps",
+      "Networking",
+      "DeveloperTools",
+      "Productivity"
+    ]
   }
 ]

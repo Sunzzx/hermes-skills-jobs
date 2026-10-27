@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+import sys
+import os
+import subprocess
+import signal
+
+DEV_PORTS = [3000, 8000, 8080, 5000, 5173, 8501, 4200, 8888, 9000]
+
+def get_process_on_port(port):
+    cmd = f"lsof -nP -iTCP:{port} -sTCP:LISTEN"
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    lines = p.stdout.strip().split("\n")
+    if len(lines) > 1:
+        parts = lines[1].split()
+        return {"command": parts[0], "pid": int(parts[1]), "user": parts[2], "port": port}
+    return None
+
+def check_all():
+    print("==================================================")
+    print("🛡️  PORT SENTINEL: ACTIVE LISTENING PORTS")
+    print("==================================================")
+    active = []
+    for port in DEV_PORTS:
+        info = get_process_on_port(port)
+        if info:
+            active.append(info)
+            print(f"  🔴 Port {info['port']:<5} -> PID {info['pid']:<6} ({info['command']}) [User: {info['user']}]")
+        else:
+            print(f"  🟢 Port {port:<5} -> FREE")
+    if not active:
+        print("\n✨ All standard development ports are clean and free!")
+
+def free_port(port):
+    info = get_process_on_port(port)
+    if not info:
+        print(f"Port {port} is already free.")
+        return
+    print(f"Terminating PID {info['pid']} ({info['command']}) holding port {port}...")
+    try:
+        os.kill(info['pid'], signal.SIGTERM)
+        print(f"✅ Successfully released port {port} (SIGTERM).")
+    except Exception as e:
+        print(f"⚠️ Failed to kill process: {e}")
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] == "check":
+        check_all()
+    elif sys.argv[1] == "free" and len(sys.argv) >= 3:
+        try:
+            p = int(sys.argv[2])
+            free_port(p)
+        except ValueError:
+            print("Please provide a valid integer port number.")
+    else:
+        print("Usage: ports [check | free <port_number>]")
+
+if __name__ == "__main__":
+    main()
