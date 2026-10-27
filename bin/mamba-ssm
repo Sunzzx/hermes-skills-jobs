@@ -218,7 +218,7 @@ def verify_mathematics():
     y_step_list = []
     for t in range(L_test):
         y_t, h_step = block.step(x_test[:, t:t+1], h_step)
-        y_step_list.append(y_t[:, 0])
+        y_step_list.append(y_t)
     y_stepped = np.stack(y_step_list, axis=1)
     step_diff = np.max(np.abs(y_full - y_stepped))
     step_passed = step_diff < 1e-10
