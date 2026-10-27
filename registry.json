@@ -109,5 +109,20 @@
       "DeveloperTools",
       "Productivity"
     ]
+  },
+  {
+    "id": "git-autopilot",
+    "title": "Git Autopilot & Smart Commit Synthesizer",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "High-velocity Git workflow assistant: analyzes staged/unstaged diffs, synthesizes Conventional Commits, audits branch hygiene, and automates synchronization.",
+    "cli": "git-auto",
+    "evolved_at": "2026-10-28T00:20:15.934294",
+    "tags": [
+      "Git",
+      "GitHub",
+      "DeveloperSuperpowers",
+      "Productivity"
+    ]
   }
 ]
