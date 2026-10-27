@@ -171,5 +171,19 @@
       "Deep-Learning",
       "Research"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v9",
+    "title": "Workflow Accelerator Suite #9",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #9.",
+    "cli": "accelerate-9",
+    "evolved_at": "2026-10-28T03:54:15.926785",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
