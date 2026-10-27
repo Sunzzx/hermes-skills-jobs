@@ -14,3 +14,8 @@
 - **Title**: Git Autopilot & Smart Commit Synthesizer
 - **Category**: software-development
 - **Description**: High-velocity Git workflow assistant: analyzes staged/unstaged diffs, synthesizes Conventional Commits, audits branch hygiene, and automates synchronization.
+
+### [2026-10-28 01:23:15] - Evolved `research-radar`
+- **Title**: ArXiv & AI Research Radar
+- **Category**: research
+- **Description**: Continuous academic and frontier AI radar: fetches daily top papers from arXiv Computer Science & AI, extracts abstracts and breakthrough techniques, and compiles concise briefings.

@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+import urllib.request
+import xml.etree.ElementTree as ET
+
+def fetch_top_papers(category="cs.AI", max_results=5):
+    url = f"http://export.arxiv.org/api/query?search_query=cat:{category}&sortBy=submittedDate&sortOrder=descending&max_results={max_results}"
+    req = urllib.request.Request(url, headers={"User-Agent": "HermesResearchRadar/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
+        root = ET.fromstring(xml_data)
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        papers = []
+        for entry in root.findall("atom:entry", namespace):
+            title = entry.find("atom:title", namespace).text.strip().replace("\n", " ")
+            summary = entry.find("atom:summary", namespace).text.strip().replace("\n", " ")
+            link = entry.find("atom:id", namespace).text.strip()
+            published = entry.find("atom:published", namespace).text.strip()[:10]
+            papers.append({"title": title, "summary": summary[:200] + "...", "link": link, "date": published})
+        return papers
+    except Exception as e:
+        print(f"Error fetching arXiv papers: {e}")
+        return []
+
+def main():
+    print("==================================================")
+    print("📡 RESEARCH RADAR: LATEST FRONTIER AI PAPERS")
+    print("==================================================")
+    papers = fetch_top_papers("cs.AI", 4)
+    if not papers:
+        papers = fetch_top_papers("cs.LG", 4)
+    for i, p in enumerate(papers, 1):
+        print(f"\n[{i}] {p['title']} ({p['date']})")
+        print(f"    Link: {p['link']}")
+        print(f"    Summary: {p['summary']}")
+
+if __name__ == "__main__":
+    main()

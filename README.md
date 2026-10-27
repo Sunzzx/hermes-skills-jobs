@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-8-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-9-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (8 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (9 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -20,6 +20,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Stripe Payments & Payouts Engine** | `finance` | `stripe-tool` | Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue. | `Finance` `Stripe` `Payments` |
 | **Port Sentinel — Dev Port Conflict Manager** | `software-development` | `ports` | Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely. | `DevOps` `Networking` `DeveloperTools` |
 | **Git Autopilot & Smart Commit Synthesizer** | `software-development` | `git-auto` | High-velocity Git workflow assistant: analyzes staged/unstaged diffs, synthesizes Conventional Commits, audits branch hygiene, and automates synchronization. | `Git` `GitHub` `DeveloperSuperpowers` |
+| **ArXiv & AI Research Radar** | `research` | `research-radar` | Continuous academic and frontier AI radar: fetches daily top papers from arXiv Computer Science & AI, extracts abstracts and breakthrough techniques, and compiles concise briefings. | `Research` `AI` `ArXiv` |
 
 ---
 
@@ -50,4 +51,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 00:20:15*
+*Last Evolved: 2026-10-28 01:23:15*

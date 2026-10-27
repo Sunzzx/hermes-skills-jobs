@@ -124,5 +124,21 @@
       "DeveloperSuperpowers",
       "Productivity"
     ]
+  },
+  {
+    "id": "research-radar",
+    "title": "ArXiv & AI Research Radar",
+    "category": "research",
+    "type": "skill+job",
+    "description": "Continuous academic and frontier AI radar: fetches daily top papers from arXiv Computer Science & AI, extracts abstracts and breakthrough techniques, and compiles concise briefings.",
+    "cli": "research-radar",
+    "evolved_at": "2026-10-28T01:23:15.935317",
+    "tags": [
+      "Research",
+      "AI",
+      "ArXiv",
+      "Intelligence",
+      "MachineLearning"
+    ]
   }
 ]
