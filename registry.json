@@ -185,5 +185,21 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "raft-consensus",
+    "title": "Distributed Raft Consensus Engine & Split-Brain Chaos Simulator",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade Raft consensus engine: leader election, log replication, commit safety invariants, split-brain chaos testing, and linearizable KV store.",
+    "cli": "raft-consensus",
+    "evolved_at": "2026-10-28T04:05:00.000000",
+    "tags": [
+      "DistributedSystems",
+      "Raft",
+      "Consensus",
+      "FaultTolerance",
+      "StateMachines"
+    ]
   }
 ]
