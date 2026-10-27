@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Android TV CLI Remote & Bridge Control.
+
+Control Android TV (Basement TV @ 172.20.10.3:5555) from macOS terminal.
+"""
+
+import sys
+import subprocess
+import argparse
+import time
+
+DEFAULT_TARGET = "172.20.10.3:5555"
+
+KEYCODES = {
+    # Power & Sleep
+    "power": 26,
+    "sleep": 223,
+    "wake": 224,
+    # Navigation
+    "home": 3,
+    "back": 4,
+    "up": 19,
+    "down": 20,
+    "left": 21,
+    "right": 22,
+    "enter": 66,
+    "select": 66,
+    "menu": 82,
+    # Volume
+    "volume_up": 24,
+    "volume_down": 25,
+    "mute": 164,
+    # Media
+    "play": 126,
+    "pause": 127,
+    "play_pause": 85,
+    "stop": 86,
+    "next": 87,
+    "prev": 88,
+    "rewind": 89,
+    "fast_forward": 90,
+}
+
+APPS = {
+    "youtube": "com.google.android.youtube.tv/com.google.android.apps.youtube.tv.activity.MainActivity",
+    "netflix": "com.netflix.ninja/.MainActivity",
+    "prime": "com.amazon.amazonvideo.livingroom/com.amazon.ignition.IgnitionActivity",
+    "settings": "com.android.tv.settings/.MainSettings",
+    "sonyliv": "com.sonyliv/.ui.splash.SplashActivity",
+    "cloudstream": "com.lagradost.cloudstream3/.MainActivity",
+    "crunchyroll": "com.crunchyroll.crunchyroid/.main.ui.MainActivity",
+    "hotstar": "in.startv.hotstar/com.hotstar.MainActivity",
+    "appletv": "com.apple.atve.androidtv.appletv/.MainActivity",
+    "stremio": "com.stremio.one",
+    "jiotv": "com.jio.media.jiotvplus/com.jio.jioplay.jiotvplustwo.MainActivity",
+    "browser": "android.intent.action.VIEW",
+}
+
+
+CACHE_FILE = "/Users/ayu/.hermes/state/tv_target.txt"
+
+
+def get_active_target():
+    """Detect current connected TV target, or auto-discover on new Wi-Fi."""
+    # 1. Check if an adb device is already connected
+    res = subprocess.run(["adb", "devices"], capture_output=True, text=True)
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "device" and ":" in parts[0]:
+            return parts[0]
+
+    # 2. Check cached IP
+    try:
+        import os
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r") as f:
+                cached = f.read().strip()
+                if cached:
+                    subprocess.run(["adb", "connect", cached], capture_output=True, timeout=1.5)
+                    return cached
+    except Exception:
+        pass
+
+    # 3. Dynamic mDNS discovery across the current Wi-Fi network
+    print("[*] TV not connected on current IP. Scanning Wi-Fi network via mDNS...")
+    try:
+        sys.path.insert(0, "/Users/ayu/.hermes/scripts")
+        from android_discovery import get_cast_devices, resolve_ip, is_adb_port_open
+        devices = get_cast_devices()
+        for d in devices:
+            ip = resolve_ip(d)
+            if ip and is_adb_port_open(ip, 5555):
+                target = f"{ip}:5555"
+                subprocess.run(["adb", "connect", target], capture_output=True)
+                os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+                with open(CACHE_FILE, "w") as f:
+                    f.write(target)
+                print(f"[+] Found TV at {target} on current Wi-Fi!")
+                return target
+    except Exception:
+        pass
+
+    return DEFAULT_TARGET
+
+
+def run_adb(cmd, target=None):
+    if not target or target == DEFAULT_TARGET:
+        target = get_active_target()
+    full_cmd = ["adb", "-s", target] + cmd
+    res = subprocess.run(full_cmd, capture_output=True, text=True)
+    if res.returncode != 0 and ("device offline" in res.stderr or "not found" in res.stderr):
+        target = get_active_target()
+        full_cmd = ["adb", "-s", target] + cmd
+        res = subprocess.run(full_cmd, capture_output=True, text=True)
+    return res.stdout.strip(), res.stderr.strip(), res.returncode
+
+
+def connect(target=DEFAULT_TARGET):
+    res = subprocess.run(["adb", "connect", target], capture_output=True, text=True)
+    print(res.stdout.strip())
+    return "connected to" in res.stdout
+
+
+def send_key(key, target=DEFAULT_TARGET):
+    code = KEYCODES.get(key.lower())
+    if code is None:
+        try:
+            code = int(key)
+        except ValueError:
+            print(f"Unknown key: {key}. Available: {list(KEYCODES.keys())}")
+            return False
+    stdout, stderr, ret = run_adb(["shell", "input", "keyevent", str(code)], target)
+    if ret == 0:
+        print(f"Sent key: {key} (keycode {code})")
+        return True
+    else:
+        print(f"Error sending key: {stderr}")
+        return False
+
+
+def launch_app(app_name, target=DEFAULT_TARGET):
+    pkg = APPS.get(app_name.lower(), app_name)
+    if "/" in pkg:
+        stdout, stderr, ret = run_adb(["shell", "am", "start", "-n", pkg], target)
+    else:
+        stdout, stderr, ret = run_adb(
+            ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+            target,
+        )
+    if ret == 0:
+        print(f"Launched {app_name}")
+    else:
+        print(f"Error launching {app_name}: {stderr}")
+
+
+def open_url(url, target=DEFAULT_TARGET):
+    stdout, stderr, ret = run_adb(
+        ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url], target
+    )
+    if ret == 0:
+        print(f"Opened URL on TV: {url}")
+    else:
+        print(f"Error opening URL: {stderr}")
+
+
+def type_text(text, target=DEFAULT_TARGET):
+    escaped = text.replace(" ", "%s")
+    stdout, stderr, ret = run_adb(["shell", "input", "text", escaped], target)
+    if ret == 0:
+        print(f"Typed text: {text}")
+    else:
+        print(f"Error typing: {stderr}")
+
+
+def take_screenshot(output_path="/tmp/tv_screen.png", target=DEFAULT_TARGET):
+    run_adb(["shell", "screencap", "-p", "/sdcard/tv_shot.png"], target)
+    run_adb(["pull", "/sdcard/tv_shot.png", output_path], target)
+    run_adb(["shell", "rm", "/sdcard/tv_shot.png"], target)
+    print(f"Screenshot saved to {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Android TV Remote & Bridge")
+    parser.add_argument("--target", default=DEFAULT_TARGET, help="ADB target host:port")
+    subparsers = parser.add_subparsers(dest="action")
+
+    subparsers.add_parser("connect", help="Connect to TV via ADB")
+    key_parser = subparsers.add_parser("key", help="Send a key event")
+    key_parser.add_argument("name", help=f"Key name: {list(KEYCODES.keys())}")
+
+    app_parser = subparsers.add_parser("app", help="Launch an app")
+    app_parser.add_argument("name", help=f"App: {list(APPS.keys())} or package/activity")
+
+    url_parser = subparsers.add_parser("url", help="Open a URL/video on TV")
+    url_parser.add_argument("link", help="URL link")
+
+    type_parser = subparsers.add_parser("type", help="Type text on TV")
+    type_parser.add_argument("text", help="Text to type")
+
+    subparsers.add_parser("shot", help="Take screenshot of TV")
+    subparsers.add_parser("status", help="Get TV power & display state")
+
+    args = parser.parse_args()
+
+    if args.action == "connect":
+        connect(args.target)
+    elif args.action == "key":
+        send_key(args.name, args.target)
+    elif args.action == "app":
+        launch_app(args.name, args.target)
+    elif args.action == "url":
+        open_url(args.link, args.target)
+    elif args.action == "type":
+        type_text(args.text, args.target)
+    elif args.action == "shot":
+        take_screenshot(target=args.target)
+    elif args.action == "status":
+        out, _, _ = run_adb(["shell", "dumpsys", "power | grep mWakefulness"], args.target)
+        print("Wakefulness:", out or "Offline/Unauthorized")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

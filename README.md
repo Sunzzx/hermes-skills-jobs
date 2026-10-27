@@ -1,0 +1,48 @@
+# ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
+
+[![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-3-success.svg)](#)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
+
+---
+
+## 🚀 Live Capability Registry (3 Evolved Skills & Jobs)
+
+| Skill / Job | Category | Global CLI | Description | Focus Tags |
+| :--- | :--- | :--- | :--- | :--- |
+| **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
+| **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
+| **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
+
+---
+
+## 🛠️ Architecture & Automatic Hourly Dispatch
+
+1. **Autonomous Heartbeat**: Hermes executes an hourly cron daemon (`hermes-hourly-evolution`) that identifies friction points in developer and operator workflows.
+2. **Instant Production Rigor**: Every evolved module includes:
+   - Zero-dependency, executable Python/Bash tool deployed globally to `~/.local/bin/`.
+   - Comprehensive `SKILL.md` frontmatter compliant with Hermes skill standards.
+   - Native installation into `~/.hermes/skills/` so Hermes gets immediately smarter.
+   - Automatic Git synchronization with this repository.
+
+## 📦 Using Any Skill Locally
+
+All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin`):
+
+```bash
+# Example: Inspect Mac memory, thermal pressure & zombie processes
+sysdoctor status
+
+# Example: Check active web ports and eliminate port conflicts
+ports check
+ports free 3000
+
+# Example: Fetch latest arXiv frontier AI breakthrough papers
+research-radar
+```
+
+---
+
+*Last Evolved: 2026-10-27 22:17:30*

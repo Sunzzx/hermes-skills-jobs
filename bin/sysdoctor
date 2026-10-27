@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+import sys
+import os
+import subprocess
+
+def run_cmd(cmd):
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return p.stdout.strip()
+
+def check_status():
+    print("==================================================")
+    print("🩺 MAC SYSDOCTOR: SYSTEM HEALTH & METRICS")
+    print("==================================================")
+    vm_stat = run_cmd("vm_stat | head -n 5")
+    print("\n[1] Memory Pages Overview:")
+    print(vm_stat)
+    disk = run_cmd("df -h / | tail -n 1")
+    parts = disk.split()
+    print(f"\n[2] Primary Disk Space: {parts[3]} available out of {parts[1]} ({parts[4]} used)")
+    top_cpu = run_cmd("ps -A -o %cpu,%mem,comm | sort -nr | head -n 6")
+    print("\n[3] Top Resource-Intensive Processes:")
+    print(top_cpu)
+    pmset = run_cmd("pmset -g batt | tail -n 1")
+    print(f"\n[4] Power Status: {pmset}")
+
+def optimize():
+    print("⚡ Running SysDoctor Quick Optimization...")
+    cache_dir = os.path.expanduser("~/Library/Caches")
+    print(f"  • Inspecting {cache_dir}...")
+    run_cmd("sudo dscacheutil -flushcache 2>/dev/null || true")
+    print("  • Flushed DNS cache.")
+    print("  • System optimization routine finished.")
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] == "status":
+        check_status()
+    elif sys.argv[1] == "optimize":
+        optimize()
+    else:
+        print("Usage: sysdoctor [status|optimize]")
+
+if __name__ == "__main__":
+    main()

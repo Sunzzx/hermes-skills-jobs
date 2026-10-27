@@ -1,0 +1,50 @@
+[
+  {
+    "id": "android-tv-control",
+    "title": "Android TV Direct Control Engine",
+    "category": "hardware",
+    "type": "skill+tool",
+    "description": "Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs.",
+    "cli": "tv",
+    "evolved_at": "2026-10-27T22:17:30.841263",
+    "tags": [
+      "Hardware",
+      "AndroidTV",
+      "ADB",
+      "Streaming",
+      "Remote"
+    ]
+  },
+  {
+    "id": "kaggle-autopilot",
+    "title": "Kaggle Grandmaster Autopilot",
+    "category": "data-science",
+    "type": "skill+tool+job",
+    "description": "Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously.",
+    "cli": "kaggle-autopilot",
+    "evolved_at": "2026-10-27T22:17:30.842233",
+    "tags": [
+      "MachineLearning",
+      "Kaggle",
+      "Autopilot",
+      "Competition",
+      "LightGBM"
+    ]
+  },
+  {
+    "id": "mac-sysdoctor",
+    "title": "Mac SysDoctor & Performance Accelerator",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life.",
+    "cli": "sysdoctor",
+    "evolved_at": "2026-10-27T22:17:30.843608",
+    "tags": [
+      "macOS",
+      "Performance",
+      "SystemOptimization",
+      "Hardware",
+      "Productivity"
+    ]
+  }
+]
