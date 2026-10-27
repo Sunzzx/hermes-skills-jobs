@@ -146,13 +146,30 @@
     "title": "Workflow Accelerator Suite #7",
     "category": "productivity",
     "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #7.",
+    "description": "High-performance workflow automation, filesystem indexing & context cache accelerator for Hermes cycle #7.",
     "cli": "accelerate-7",
-    "evolved_at": "2026-10-28T02:26:15.971787",
+    "evolved_at": "2026-10-28T02:26:15.688172",
     "tags": [
       "Automation",
       "Productivity",
       "Evolution"
+    ]
+  },
+  {
+    "id": "mamba-ssm",
+    "title": "Selective State Space Mamba Engine & Blelloch Parallel Scan",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Frontier AI Selective State Space Model (Mamba) with Blelloch associative parallel scan, continuous ZOH discretization, and O(1) inference.",
+    "cli": "mamba-ssm",
+    "evolved_at": "2026-10-28T02:40:00.000000",
+    "tags": [
+      "Frontier-AI",
+      "Mamba",
+      "State-Space-Models",
+      "Blelloch-Scan",
+      "Deep-Learning",
+      "Research"
     ]
   }
 ]

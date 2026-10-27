@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-28 02:40:00] - Evolved `mamba-ssm`
+- **Title**: Selective State Space Mamba Engine & Blelloch Parallel Scan
+- **Category**: research
+- **Description**: Frontier AI Selective State Space Model (Mamba) from scratch featuring continuous Zero-Order Hold (ZOH) discretization, HiPPO continuous state initialization, Blelloch associative parallel prefix scan with $O(\log L)$ depth, and $O(1)$ token step inference.
+- **CLI**: `mamba-ssm` (`verify`, `benchmark`, `run`, `info`)
+
 ### [2026-10-27 22:17:30] - Evolved `mac-sysdoctor`
 - **Title**: Mac SysDoctor & Performance Accelerator
 - **Category**: productivity
