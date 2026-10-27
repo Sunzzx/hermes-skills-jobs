@@ -196,7 +196,8 @@ def verify_mathematics():
     err_B = np.abs(B_bar[0, 0, 0, 0] - expected_B_bar)
     zoh_passed = (err_A < 1e-12) and (err_B < 1e-12)
     all_passed = all_passed and zoh_passed
-    print(f"  • Analytical A_bar error: {err_A:.2e} | B_bar error: {err_B:.2e} [{\"PASS\" if zoh_passed else \"FAIL\"}]")
+    tag_zoh = 'PASS' if zoh_passed else 'FAIL'
+    print(f"  • Analytical A_bar error: {err_A:.2e} | B_bar error: {err_B:.2e} [{tag_zoh}]")
 
     # 3. HiPPO Hurwitz Stability Verification
     print("\n[3/4] HiPPO-LegS Transition Matrix Hurwitz Stability:")
@@ -205,7 +206,8 @@ def verify_mathematics():
     max_real_eig = np.max(np.real(eigvals))
     hippo_passed = max_real_eig < 0.0
     all_passed = all_passed and hippo_passed
-    print(f"  • Maximum Real Eigenvalue: {max_real_eig:.4f} (Strictly Negative Spectrum) [{\"PASS\" if hippo_passed else \"FAIL\"}]")
+    tag_hippo = 'PASS' if hippo_passed else 'FAIL'
+    print(f"  • Maximum Real Eigenvalue: {max_real_eig:.4f} (Strictly Negative Spectrum) [{tag_hippo}]")
 
     # 4. Step-by-Step O(1) Token Autoregressive Parity
     print("\n[4/4] O(1) Autoregressive Step Inference vs Full Sequence Output:")
@@ -221,7 +223,8 @@ def verify_mathematics():
     step_diff = np.max(np.abs(y_full - y_stepped))
     step_passed = step_diff < 1e-10
     all_passed = all_passed and step_passed
-    print(f"  • Max Token Step Parity Error: {step_diff:.2e} [{\"PASS\" if step_passed else \"FAIL\"}]")
+    tag_step = 'PASS' if step_passed else 'FAIL'
+    print(f"  • Max Token Step Parity Error: {step_diff:.2e} [{tag_step}]")
 
     print("-" * 72)
     if all_passed:
