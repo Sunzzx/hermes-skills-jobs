@@ -201,5 +201,19 @@
       "FaultTolerance",
       "StateMachines"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v11",
+    "title": "Workflow Accelerator Suite #11",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #11.",
+    "cli": "accelerate-11",
+    "evolved_at": "2026-10-28T05:07:15.843884",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]

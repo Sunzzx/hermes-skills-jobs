@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-13-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-14-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (13 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (14 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -25,6 +25,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Selective State Space Mamba Engine & Blelloch Parallel Scan** | `research` | `mamba-ssm` | Frontier AI Selective State Space Model (Mamba) with Blelloch associative parallel scan, continuous ZOH discretization, and O(1) inference. | `Frontier-AI` `Mamba` `State-Space-Models` |
 | **Workflow Accelerator Suite #9** | `productivity` | `accelerate-9` | Automated filesystem indexing & context cache accelerator for Hermes cycle #9. | `Automation` `Productivity` `Evolution` |
 | **Distributed Raft Consensus Engine & Split-Brain Chaos Simulator** | `systems` | `raft-consensus` | Production-grade Raft consensus engine: leader election, log replication, commit safety invariants, split-brain chaos testing, and linearizable KV store. | `DistributedSystems` `Raft` `Consensus` |
+| **Workflow Accelerator Suite #11** | `productivity` | `accelerate-11` | Automated filesystem indexing & context cache accelerator for Hermes cycle #11. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -55,4 +56,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 04:05:15*
+*Last Evolved: 2026-10-28 05:07:15*
