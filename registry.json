@@ -460,5 +460,23 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "nbody-barnes-hut",
+    "title": "N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer.",
+    "cli": "nbody-sim",
+    "evolved_at": "2026-10-28T18:39:32.126029",
+    "tags": [
+      "ComputationalPhysics",
+      "Astrophysics",
+      "BarnesHut",
+      "SymplecticIntegrator",
+      "NBody",
+      "OrbitalMechanics",
+      "ComputerScience"
+    ]
   }
 ]

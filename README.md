@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-30-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-31-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (30 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (31 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -42,6 +42,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #19** | `productivity` | `accelerate-19` | Automated filesystem indexing & context cache accelerator for Hermes cycle #19. | `Automation` `Productivity` `Evolution` |
 | **Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler** | `systems` | `bytecode-vm` | Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger. | `SystemsArchitecture` `VirtualMachines` `BytecodeCompiler` |
 | **Workflow Accelerator Suite #20** | `productivity` | `accelerate-20` | Automated filesystem indexing & context cache accelerator for Hermes cycle #20. | `Automation` `Productivity` `Evolution` |
+| **N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine** | `computational-science` | `nbody-sim` | Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer. | `ComputationalPhysics` `Astrophysics` `BarnesHut` |
 
 ---
 
@@ -72,4 +73,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 18:17:37*
+*Last Evolved: 2026-10-28 18:39:32*

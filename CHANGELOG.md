@@ -112,3 +112,8 @@
 - **Title**: Workflow Accelerator Suite #20
 - **Category**: productivity
 - **Description**: Automated filesystem indexing & context cache accelerator for Hermes cycle #20.
+
+### [2026-10-28 18:39:32] - Evolved `nbody-barnes-hut`
+- **Title**: N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine
+- **Category**: computational-science
+- **Description**: Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer.

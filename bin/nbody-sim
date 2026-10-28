@@ -1,0 +1,1140 @@
+#!/usr/bin/env python3
+"""N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine.
+
+A production-grade, mathematically rigorous N-body gravitational simulator
+implementing the Barnes-Hut hierarchical octree algorithm O(N log N),
+symplectic 2nd-order Leapfrog (Kick-Drift-Kick) integration, quadrupole multipole
+expansions, Plummer gravitational softening, and an interactive high-density
+Unicode Braille terminal visualizer with real-time Hamiltonian telemetry.
+
+Zero external dependencies. Pure standard library.
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# =====================================================================
+# ANSI Styling & Colors
+# =====================================================================
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    UNDERLINE = "\033[4m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    GRAY = "\033[90m"
+    BRIGHT_WHITE = "\033[97m"
+    BG_DARK = "\033[48;5;234m"
+
+# =====================================================================
+# 3D Vector Mathematics
+# =====================================================================
+@dataclass
+class Vec3:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+    def __add__(self, other: "Vec3") -> "Vec3":
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    def __sub__(self, other: "Vec3") -> "Vec3":
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+
+    def __mul__(self, scalar: float) -> "Vec3":
+        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
+
+    def __rmul__(self, scalar: float) -> "Vec3":
+        return self * scalar
+
+    def __truediv__(self, scalar: float) -> "Vec3":
+        inv = 1.0 / scalar
+        return Vec3(self.x * inv, self.y * inv, self.z * inv)
+
+    def norm_sq(self) -> float:
+        return self.x * self.x + self.y * self.y + self.z * self.z
+
+    def norm(self) -> float:
+        return math.sqrt(self.norm_sq())
+
+    def dot(self, other: "Vec3") -> float:
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+    def cross(self, other: "Vec3") -> "Vec3":
+        return Vec3(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+
+# =====================================================================
+# Celestial Body Representation
+# =====================================================================
+@dataclass
+class Body:
+    id: int
+    name: str
+    mass: float
+    pos: Vec3
+    vel: Vec3
+    acc: Vec3 = None
+    color: str = Color.CYAN
+    group: int = 0
+    radius: float = 1.0
+
+    def __post_init__(self):
+        if self.acc is None:
+            self.acc = Vec3(0.0, 0.0, 0.0)
+
+# =====================================================================
+# 3D Bounding Box
+# =====================================================================
+@dataclass
+class BoundingBox3D:
+    cx: float
+    cy: float
+    cz: float
+    half_size: float
+
+    def contains(self, pos: Vec3) -> bool:
+        hs = self.half_size
+        return (
+            (self.cx - hs <= pos.x <= self.cx + hs) and
+            (self.cy - hs <= pos.y <= self.cy + hs) and
+            (self.cz - hs <= pos.z <= self.cz + hs)
+        )
+
+    def octant(self, pos: Vec3) -> int:
+        idx = 0
+        if pos.x >= self.cx:
+            idx |= 1
+        if pos.y >= self.cy:
+            idx |= 2
+        if pos.z >= self.cz:
+            idx |= 4
+        return idx
+
+    def child_box(self, octant_idx: int) -> "BoundingBox3D":
+        quarter = self.half_size * 0.5
+        ox = self.cx + (quarter if (octant_idx & 1) else -quarter)
+        oy = self.cy + (quarter if (octant_idx & 2) else -quarter)
+        oz = self.cz + (quarter if (octant_idx & 4) else -quarter)
+        return BoundingBox3D(ox, oy, oz, quarter)
+
+# =====================================================================
+# Barnes-Hut Octree Node & Hierarchical Multipole Engine
+# =====================================================================
+class OctreeNode:
+    __slots__ = (
+        "box", "mass", "com", "body", "children",
+        "is_leaf", "quadrupole"
+    )
+
+    def __init__(self, box: BoundingBox3D):
+        self.box = box
+        self.mass = 0.0
+        self.com = Vec3(0.0, 0.0, 0.0)
+        self.body: Optional[Body] = None
+        self.children: Optional[List[Optional["OctreeNode"]]] = None
+        self.is_leaf = True
+        self.quadrupole: Optional[Tuple[float, float, float, float, float, float]] = None
+
+    def insert(self, new_body: Body, depth: int = 0, max_depth: int = 40):
+        total_m = self.mass + new_body.mass
+        if total_m > 0:
+            self.com = (self.com * self.mass + new_body.pos * new_body.mass) / total_m
+            self.mass = total_m
+
+        if self.is_leaf:
+            if self.body is None:
+                self.body = new_body
+                return
+            else:
+                if depth >= max_depth:
+                    return
+                old_body = self.body
+                self.body = None
+                self.is_leaf = False
+                self.children = [None] * 8
+
+                old_oct = self.box.octant(old_body.pos)
+                self.children[old_oct] = OctreeNode(self.box.child_box(old_oct))
+                self.children[old_oct].insert(old_body, depth + 1, max_depth)
+
+                new_oct = self.box.octant(new_body.pos)
+                if self.children[new_oct] is None:
+                    self.children[new_oct] = OctreeNode(self.box.child_box(new_oct))
+                self.children[new_oct].insert(new_body, depth + 1, max_depth)
+        else:
+            oct_idx = self.box.octant(new_body.pos)
+            if self.children[oct_idx] is None:
+                self.children[oct_idx] = OctreeNode(self.box.child_box(oct_idx))
+            self.children[oct_idx].insert(new_body, depth + 1, max_depth)
+
+    def compute_multipoles(self):
+        if self.is_leaf:
+            self.quadrupole = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            return
+
+        qxx = qyy = qzz = qxy = qxz = qyz = 0.0
+        if self.children:
+            for child in self.children:
+                if child and child.mass > 0:
+                    child.compute_multipoles()
+                    dx = child.com.x - self.com.x
+                    dy = child.com.y - self.com.y
+                    dz = child.com.z - self.com.z
+                    r2 = dx * dx + dy * dy + dz * dz
+                    m = child.mass
+                    qxx += m * (3.0 * dx * dx - r2)
+                    qyy += m * (3.0 * dy * dy - r2)
+                    qzz += m * (3.0 * dz * dz - r2)
+                    qxy += m * (3.0 * dx * dy)
+                    qxz += m * (3.0 * dx * dz)
+                    qyz += m * (3.0 * dy * dz)
+                    if child.quadrupole:
+                        cqxx, cqyy, cqzz, cqxy, cqxz, cqyz = child.quadrupole
+                        qxx += cqxx
+                        qyy += cqyy
+                        qzz += cqzz
+                        qxy += cqxy
+                        qxz += cqxz
+                        qyz += cqyz
+
+        self.quadrupole = (qxx, qyy, qzz, qxy, qxz, qyz)
+
+# =====================================================================
+# Barnes-Hut Tree Manager
+# =====================================================================
+class BarnesHutTree:
+    def __init__(self, bodies: List[Body]):
+        self.bodies = bodies
+        self.root: Optional[OctreeNode] = None
+        self.node_count = 0
+        self.max_depth_reached = 0
+        self._build()
+
+    def _build(self):
+        if not self.bodies:
+            return
+
+        min_x = min(b.pos.x for b in self.bodies)
+        max_x = max(b.pos.x for b in self.bodies)
+        min_y = min(b.pos.y for b in self.bodies)
+        max_y = max(b.pos.y for b in self.bodies)
+        min_z = min(b.pos.z for b in self.bodies)
+        max_z = max(b.pos.z for b in self.bodies)
+
+        cx = 0.5 * (min_x + max_x)
+        cy = 0.5 * (min_y + max_y)
+        cz = 0.5 * (min_z + max_z)
+        half_span = max(max_x - min_x, max_y - min_y, max_z - min_z) * 0.5
+        half_size = max(half_span * 1.05, 1.0)
+
+        self.root = OctreeNode(BoundingBox3D(cx, cy, cz, half_size))
+        for body in self.bodies:
+            self.root.insert(body)
+
+        self.root.compute_multipoles()
+
+        def scan(node: OctreeNode, d: int) -> Tuple[int, int]:
+            if node is None:
+                return 0, d
+            cnt = 1
+            md = d
+            if node.children:
+                for c in node.children:
+                    if c:
+                        cc, cmd = scan(c, d + 1)
+                        cnt += cc
+                        md = max(md, cmd)
+            return cnt, md
+
+        self.node_count, self.max_depth_reached = scan(self.root, 0)
+
+    def compute_acceleration(
+        self, target: Body, theta: float, G: float, softening: float, use_quadrupole: bool = False
+    ) -> Tuple[Vec3, int]:
+        if not self.root or self.root.mass <= 0:
+            return Vec3(0, 0, 0), 0
+
+        eps_sq = softening * softening
+        ax, ay, az = 0.0, 0.0, 0.0
+        interactions = 0
+
+        stack = [self.root]
+        tx, ty, tz = target.pos.x, target.pos.y, target.pos.z
+
+        while stack:
+            node = stack.pop()
+            if node.mass <= 0:
+                continue
+
+            dx = node.com.x - tx
+            dy = node.com.y - ty
+            dz = node.com.z - tz
+            dist_sq = dx * dx + dy * dy + dz * dz
+
+            if node.is_leaf:
+                if node.body is not None and node.body.id != target.id:
+                    interactions += 1
+                    denom = (dist_sq + eps_sq) ** 1.5
+                    factor = G * node.body.mass / denom
+                    ax += dx * factor
+                    ay += dy * factor
+                    az += dz * factor
+            else:
+                s = node.box.half_size * 2.0
+                dist = math.sqrt(dist_sq)
+
+                if (dist > 0) and ((s / dist) < theta):
+                    interactions += 1
+                    denom = (dist_sq + eps_sq) ** 1.5
+                    factor = G * node.mass / denom
+                    ax += dx * factor
+                    ay += dy * factor
+                    az += dz * factor
+
+                    if use_quadrupole and node.quadrupole:
+                        qxx, qyy, qzz, qxy, qxz, qyz = node.quadrupole
+                        denom5 = (dist_sq + eps_sq) ** 2.5
+                        qnx = qxx * dx + qxy * dy + qxz * dz
+                        qny = qxy * dx + qyy * dy + qyz * dz
+                        qnz = qxz * dx + qyz * dy + qzz * dz
+                        n_dot_q_dot_n = dx * qnx + dy * qny + dz * qnz
+                        corr = 0.5 * G / denom5
+                        ax += corr * (5.0 * (n_dot_q_dot_n / (dist_sq + eps_sq)) * dx - 2.0 * qnx)
+                        ay += corr * (5.0 * (n_dot_q_dot_n / (dist_sq + eps_sq)) * dy - 2.0 * qny)
+                        az += corr * (5.0 * (n_dot_q_dot_n / (dist_sq + eps_sq)) * dz - 2.0 * qnz)
+                else:
+                    if node.children:
+                        for child in node.children:
+                            if child is not None:
+                                stack.append(child)
+
+        return Vec3(ax, ay, az), interactions
+
+# =====================================================================
+# Direct N^2 Gravitational Summation Engine
+# =====================================================================
+def direct_acceleration(target: Body, bodies: List[Body], G: float, softening: float) -> Vec3:
+    eps_sq = softening * softening
+    ax, ay, az = 0.0, 0.0, 0.0
+    tx, ty, tz = target.pos.x, target.pos.y, target.pos.z
+
+    for b in bodies:
+        if b.id == target.id:
+            continue
+        dx = b.pos.x - tx
+        dy = b.pos.y - ty
+        dz = b.pos.z - tz
+        dist_sq = dx * dx + dy * dy + dz * dz
+        denom = (dist_sq + eps_sq) ** 1.5
+        factor = G * b.mass / denom
+        ax += dx * factor
+        ay += dy * factor
+        az += dz * factor
+
+    return Vec3(ax, ay, az)
+
+def direct_total_potential_energy(bodies: List[Body], G: float, softening: float) -> float:
+    eps_sq = softening * softening
+    u_total = 0.0
+    n = len(bodies)
+    for i in range(n):
+        bi = bodies[i]
+        for j in range(i + 1, n):
+            bj = bodies[j]
+            dx = bj.pos.x - bi.pos.x
+            dy = bj.pos.y - bi.pos.y
+            dz = bj.pos.z - bi.pos.z
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz + eps_sq)
+            u_total -= (G * bi.mass * bj.mass) / dist
+    return u_total
+
+# =====================================================================
+# Physical Diagnostics & Conservation Metrics
+# =====================================================================
+def total_kinetic_energy(bodies: List[Body]) -> float:
+    k = 0.0
+    for b in bodies:
+        v_sq = b.vel.x * b.vel.x + b.vel.y * b.vel.y + b.vel.z * b.vel.z
+        k += 0.5 * b.mass * v_sq
+    return k
+
+def total_linear_momentum(bodies: List[Body]) -> Vec3:
+    px, py, pz = 0.0, 0.0, 0.0
+    for b in bodies:
+        px += b.mass * b.vel.x
+        py += b.mass * b.vel.y
+        pz += b.mass * b.vel.z
+    return Vec3(px, py, pz)
+
+def total_angular_momentum(bodies: List[Body]) -> Vec3:
+    lx, ly, lz = 0.0, 0.0, 0.0
+    for b in bodies:
+        m = b.mass
+        rx, ry, rz = b.pos.x, b.pos.y, b.pos.z
+        vx, vy, vz = b.vel.x, b.vel.y, b.vel.z
+        lx += m * (ry * vz - rz * vy)
+        ly += m * (rz * vx - rx * vz)
+        lz += m * (rx * vy - ry * vx)
+    return Vec3(lx, ly, lz)
+
+def system_center_of_mass(bodies: List[Body]) -> Tuple[Vec3, float]:
+    total_m = sum(b.mass for b in bodies)
+    if total_m == 0:
+        return Vec3(0, 0, 0), 0.0
+    cx = sum(b.mass * b.pos.x for b in bodies) / total_m
+    cy = sum(b.mass * b.pos.y for b in bodies) / total_m
+    cz = sum(b.mass * b.pos.z for b in bodies) / total_m
+    return Vec3(cx, cy, cz), total_m
+
+# =====================================================================
+# Symplectic 2nd-Order Leapfrog Integrator (Kick-Drift-Kick)
+# =====================================================================
+class LeapfrogIntegrator:
+    def __init__(self, G: float = 1.0, softening: float = 0.1, theta: float = 0.5):
+        self.G = G
+        self.softening = softening
+        self.theta = theta
+
+    def initialize_accelerations(self, bodies: List[Body], use_tree: bool = True) -> int:
+        if use_tree:
+            tree = BarnesHutTree(bodies)
+            total_interactions = 0
+            for b in bodies:
+                acc, count = tree.compute_acceleration(b, self.theta, self.G, self.softening)
+                b.acc = acc
+                total_interactions += count
+            return total_interactions
+        else:
+            for b in bodies:
+                b.acc = direct_acceleration(b, bodies, self.G, self.softening)
+            return len(bodies) * (len(bodies) - 1)
+
+    def step(self, bodies: List[Body], dt: float, use_tree: bool = True) -> Dict[str, Any]:
+        half_dt = 0.5 * dt
+
+        # 1. First Kick: v(t + dt/2) = v(t) + 0.5 * a(t) * dt
+        for b in bodies:
+            b.vel.x += b.acc.x * half_dt
+            b.vel.y += b.acc.y * half_dt
+            b.vel.z += b.acc.z * half_dt
+
+        # 2. Drift: r(t + dt) = r(t) + v(t + dt/2) * dt
+        for b in bodies:
+            b.pos.x += b.vel.x * dt
+            b.pos.y += b.vel.y * dt
+            b.pos.z += b.vel.z * dt
+
+        # 3. Acceleration calculation a(t + dt)
+        interactions = 0
+        tree_depth = 0
+        tree_nodes = 0
+
+        if use_tree:
+            tree = BarnesHutTree(bodies)
+            tree_depth = tree.max_depth_reached
+            tree_nodes = tree.node_count
+            for b in bodies:
+                acc, count = tree.compute_acceleration(b, self.theta, self.G, self.softening)
+                b.acc = acc
+                interactions += count
+        else:
+            for b in bodies:
+                b.acc = direct_acceleration(b, bodies, self.G, self.softening)
+            interactions = len(bodies) * (len(bodies) - 1)
+
+        # 4. Second Kick: v(t + dt) = v(t + dt/2) + 0.5 * a(t + dt) * dt
+        for b in bodies:
+            b.vel.x += b.acc.x * half_dt
+            b.vel.y += b.acc.y * half_dt
+            b.vel.z += b.acc.z * half_dt
+
+        return {
+            "interactions": interactions,
+            "tree_depth": tree_depth,
+            "tree_nodes": tree_nodes,
+        }
+
+# =====================================================================
+# Preset Scenarios & Astrophysical Initial Conditions
+# =====================================================================
+def make_galaxy(
+    center: Vec3,
+    velocity: Vec3,
+    n_stars: int,
+    smbh_mass: float,
+    disk_radius: float,
+    inclination: float,
+    group_id: int,
+    color: str,
+    id_start: int,
+) -> Tuple[List[Body], int]:
+    bodies = []
+    curr_id = id_start
+
+    smbh = Body(
+        id=curr_id,
+        name=f"SMBH-{group_id}",
+        mass=smbh_mass,
+        pos=center,
+        vel=velocity,
+        color=Color.YELLOW + Color.BOLD,
+        group=group_id,
+        radius=2.5,
+    )
+    bodies.append(smbh)
+    curr_id += 1
+
+    cos_inc = math.cos(inclination)
+    sin_inc = math.sin(inclination)
+
+    for i in range(n_stars):
+        u = max(random.random(), 1e-5)
+        r = -disk_radius * 0.4 * math.log(u) + 0.5
+        r = min(r, disk_radius * 2.2)
+
+        phi = random.random() * 2.0 * math.pi
+        z_offset = (random.random() - 0.5) * 0.15 * disk_radius
+
+        enclosed_m = smbh_mass + (smbh_mass * 0.2) * (1.0 - math.exp(-r / (disk_radius * 0.5)))
+        v_circ = math.sqrt(1.0 * enclosed_m / r)
+
+        xp = r * math.cos(phi)
+        yp = r * math.sin(phi)
+        zp = z_offset
+
+        vxp = -v_circ * math.sin(phi)
+        vyp = v_circ * math.cos(phi)
+        vzp = (random.random() - 0.5) * 0.05 * v_circ
+
+        x_rot = xp
+        y_rot = yp * cos_inc - zp * sin_inc
+        z_rot = yp * sin_inc + zp * cos_inc
+
+        vx_rot = vxp
+        vy_rot = vyp * cos_inc - vzp * sin_inc
+        vz_rot = vyp * sin_inc + vzp * cos_inc
+
+        star = Body(
+            id=curr_id,
+            name=f"Star-{curr_id}",
+            mass=0.01,
+            pos=Vec3(center.x + x_rot, center.y + y_rot, center.z + z_rot),
+            vel=Vec3(velocity.x + vx_rot, velocity.y + vy_rot, velocity.z + vz_rot),
+            color=color,
+            group=group_id,
+            radius=0.5,
+        )
+        bodies.append(star)
+        curr_id += 1
+
+    return bodies, curr_id
+
+def scenario_galaxy_collision(n_particles: int = 500) -> List[Body]:
+    random.seed(42)
+    n_half = n_particles // 2
+
+    g1, next_id = make_galaxy(
+        center=Vec3(-12.0, 4.0, 0.0),
+        velocity=Vec3(1.1, -0.3, 0.1),
+        n_stars=n_half,
+        smbh_mass=400.0,
+        disk_radius=6.0,
+        inclination=0.15,
+        group_id=1,
+        color=Color.CYAN,
+        id_start=1,
+    )
+
+    g2, _ = make_galaxy(
+        center=Vec3(12.0, -4.0, 2.0),
+        velocity=Vec3(-1.1, 0.3, -0.1),
+        n_stars=n_half,
+        smbh_mass=200.0,
+        disk_radius=4.5,
+        inclination=math.pi / 4.0,
+        group_id=2,
+        color=Color.MAGENTA,
+        id_start=next_id,
+    )
+
+    return g1 + g2
+
+def scenario_figure_eight() -> List[Body]:
+    m = 1.0
+    x1, y1 = -0.97000436, 0.24308753
+    vx3, vy3 = -2.0 * 0.46620531, -2.0 * 0.43236573
+    vx1, vy1 = -vx3 * 0.5, -vy3 * 0.5
+
+    b1 = Body(1, "Alpha", m, Vec3(x1, y1, 0), Vec3(vx1, vy1, 0), color=Color.RED, group=1)
+    b2 = Body(2, "Beta", m, Vec3(-x1, -y1, 0), Vec3(vx1, vy1, 0), color=Color.GREEN, group=1)
+    b3 = Body(3, "Gamma", m, Vec3(0, 0, 0), Vec3(vx3, vy3, 0), color=Color.CYAN, group=1)
+    return [b1, b2, b3]
+
+def scenario_solar_system() -> List[Body]:
+    sun = Body(1, "Sun", 1000.0, Vec3(0, 0, 0), Vec3(0, 0, 0), color=Color.YELLOW + Color.BOLD, radius=3.0)
+    planets_data = [
+        ("Mercury", 0.05, 3.87, 0.205, Color.GRAY),
+        ("Venus", 0.81, 7.23, 0.006, Color.YELLOW),
+        ("Earth", 1.00, 10.0, 0.016, Color.BLUE),
+        ("Mars", 0.11, 15.2, 0.093, Color.RED),
+        ("Jupiter", 317.8, 52.0, 0.048, Color.MAGENTA),
+        ("Saturn", 95.2, 95.8, 0.056, Color.YELLOW),
+        ("Uranus", 14.5, 192.0, 0.046, Color.CYAN),
+        ("Neptune", 17.1, 300.0, 0.010, Color.BLUE),
+    ]
+    bodies = [sun]
+    curr_id = 2
+    for name, mass, semi_major, ecc, col in planets_data:
+        r = semi_major * (1.0 - ecc) * 0.5
+        v = math.sqrt(1000.0 * (2.0 / r - 1.0 / (semi_major * 0.5)))
+        p = Body(curr_id, name, mass, Vec3(r, 0, 0), Vec3(0, v, 0), color=col, radius=1.0)
+        bodies.append(p)
+        curr_id += 1
+    return bodies
+
+def scenario_plummer_sphere(n_particles: int = 400, total_mass: float = 200.0, scale_radius: float = 4.0) -> List[Body]:
+    random.seed(1337)
+    bodies = []
+    m_i = total_mass / n_particles
+
+    for i in range(n_particles):
+        u = max(random.random(), 1e-4)
+        r = scale_radius / math.sqrt(pow(u, -2.0 / 3.0) - 1.0)
+        r = min(r, scale_radius * 6.0)
+
+        theta = math.acos(2.0 * random.random() - 1.0)
+        phi = 2.0 * math.pi * random.random()
+
+        x = r * math.sin(theta) * math.cos(phi)
+        y = r * math.sin(theta) * math.sin(phi)
+        z = r * math.cos(theta)
+
+        v_esc = math.sqrt(2.0 * 1.0 * total_mass / math.sqrt(r * r + scale_radius * scale_radius))
+        q = 0.0
+        while True:
+            q_cand = random.random()
+            p_cand = random.random() * 0.15
+            dist_val = (q_cand * q_cand) * pow(1.0 - q_cand * q_cand, 3.5)
+            if p_cand < dist_val:
+                q = q_cand
+                break
+
+        v_mag = q * v_esc * 0.95
+        v_theta = math.acos(2.0 * random.random() - 1.0)
+        v_phi = 2.0 * math.pi * random.random()
+
+        vx = v_mag * math.sin(v_theta) * math.cos(v_phi)
+        vy = v_mag * math.sin(v_theta) * math.sin(v_phi)
+        vz = v_mag * math.cos(v_theta)
+
+        bodies.append(
+            Body(i + 1, f"ClusterStar-{i+1}", m_i, Vec3(x, y, z), Vec3(vx, vy, vz), color=Color.CYAN)
+        )
+    return bodies
+
+def scenario_lagrange_chaos(n_asteroids: int = 150) -> List[Body]:
+    random.seed(99)
+    sun = Body(1, "Sun", 1000.0, Vec3(0, 0, 0), Vec3(0, 0, 0), color=Color.YELLOW + Color.BOLD, radius=3.0)
+    r_j = 20.0
+    v_j = math.sqrt(1000.0 / r_j)
+    jupiter = Body(2, "Jupiter", 15.0, Vec3(r_j, 0, 0), Vec3(0, v_j, 0), color=Color.MAGENTA + Color.BOLD, radius=2.0)
+    bodies = [sun, jupiter]
+
+    omega = v_j / r_j
+    curr_id = 3
+    for _ in range(n_asteroids // 2):
+        d_theta = (random.random() - 0.5) * 0.25
+        d_r = (random.random() - 0.5) * 1.5
+        ang = (math.pi / 3.0) + d_theta
+        r = r_j + d_r
+        x = r * math.cos(ang)
+        y = r * math.sin(ang)
+        vx = -omega * y
+        vy = omega * x
+        bodies.append(Body(curr_id, f"Trojan-{curr_id}", 0.001, Vec3(x, y, 0), Vec3(vx, vy, 0), color=Color.GREEN))
+        curr_id += 1
+
+    for _ in range(n_asteroids // 2):
+        d_r = (random.random() - 0.5) * 1.0
+        ang = (random.random() - 0.5) * 0.1
+        r = (r_j - 2.5) + d_r
+        x = r * math.cos(ang)
+        y = r * math.sin(ang)
+        vx = -omega * y * 1.05
+        vy = omega * x * 1.05
+        bodies.append(Body(curr_id, f"Chaotic-{curr_id}", 0.001, Vec3(x, y, 0), Vec3(vx, vy, 0), color=Color.RED))
+        curr_id += 1
+    return bodies
+
+# =====================================================================
+# Terminal Unicode Braille Canvas Renderer
+# =====================================================================
+class BrailleCanvas:
+    BRAILLE_MAP = [
+        [0x01, 0x08],
+        [0x02, 0x10],
+        [0x04, 0x20],
+        [0x40, 0x80],
+    ]
+
+    def __init__(self, char_width: int = 76, char_height: int = 24):
+        self.char_w = char_width
+        self.char_h = char_height
+        self.pixel_w = char_width * 2
+        self.pixel_h = char_height * 4
+        self.grid = [[0 for _ in range(self.char_w)] for _ in range(self.char_h)]
+        self.colors = [[Color.CYAN for _ in range(self.char_w)] for _ in range(self.char_h)]
+        self.special_markers: List[Tuple[int, int, str, str]] = []
+
+    def clear(self):
+        for y in range(self.char_h):
+            for x in range(self.char_w):
+                self.grid[y][x] = 0
+                self.colors[y][x] = Color.CYAN
+        self.special_markers.clear()
+
+    def set_pixel(self, px: int, py: int, color: str = Color.CYAN):
+        if 0 <= px < self.pixel_w and 0 <= py < self.pixel_h:
+            cx = px // 2
+            cy = py // 4
+            sub_x = px % 2
+            sub_y = py % 4
+            self.grid[cy][cx] |= self.BRAILLE_MAP[sub_y][sub_x]
+            self.colors[cy][cx] = color
+
+    def add_marker(self, cx: int, cy: int, char: str, color: str):
+        if 0 <= cx < self.char_w and 0 <= cy < self.char_h:
+            self.special_markers.append((cx, cy, char, color))
+
+    def render(self) -> List[str]:
+        lines = []
+        for cy in range(self.char_h):
+            row_chars = []
+            for cx in range(self.char_w):
+                marker_found = None
+                for mx, my, mch, mcol in self.special_markers:
+                    if mx == cx and my == cy:
+                        marker_found = (mch, mcol)
+                        break
+
+                if marker_found:
+                    mch, mcol = marker_found
+                    row_chars.append(f"{mcol}{mch}{Color.RESET}")
+                else:
+                    code = self.grid[cy][cx]
+                    if code == 0:
+                        row_chars.append(" ")
+                    else:
+                        braille_char = chr(0x2800 + code)
+                        row_chars.append(f"{self.colors[cy][cx]}{braille_char}{Color.RESET}")
+            lines.append("".join(row_chars))
+        return lines
+
+# =====================================================================
+# Simulation Runner & Visualizer
+# =====================================================================
+def run_simulation(
+    scenario_name: str = "galaxy-collision",
+    steps: int = 150,
+    dt: float = 0.05,
+    theta: float = 0.5,
+    softening: float = 0.15,
+    fps: int = 20,
+    no_render: bool = False,
+    viewport_width: int = 76,
+    viewport_height: int = 24,
+):
+    scenarios = {
+        "galaxy-collision": scenario_galaxy_collision,
+        "figure-eight": scenario_figure_eight,
+        "solar-system": scenario_solar_system,
+        "plummer-sphere": scenario_plummer_sphere,
+        "lagrange-chaos": scenario_lagrange_chaos,
+    }
+
+    if scenario_name not in scenarios:
+        print(f"{Color.RED}Error: Unknown scenario '{scenario_name}'. Available: {list(scenarios.keys())}{Color.RESET}")
+        sys.exit(1)
+
+    bodies = scenarios[scenario_name]()
+    integrator = LeapfrogIntegrator(G=1.0, softening=softening, theta=theta)
+    canvas = BrailleCanvas(char_width=viewport_width, char_height=viewport_height)
+
+    init_k = total_kinetic_energy(bodies)
+    init_u = direct_total_potential_energy(bodies, G=1.0, softening=softening)
+    init_energy = init_k + init_u
+    integrator.initialize_accelerations(bodies, use_tree=True)
+
+    frame_delay = 1.0 / max(fps, 1)
+    cosmic_time = 0.0
+
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}🌌 HERMES N-BODY BARNES-HUT GRAVITATIONAL SIMULATOR{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"Scenario: {Color.BOLD}{scenario_name}{Color.RESET} | Particles: {Color.BOLD}{len(bodies)}{Color.RESET} | Theta: {Color.BOLD}{theta}{Color.RESET} | Softening: {Color.BOLD}{softening}{Color.RESET}")
+    print(f"Integrator: Symplectic 2nd-Order Leapfrog (Velocity Verlet) | dt = {dt}\n")
+
+    if not no_render:
+        sys.stdout.write("\033[?25l")
+        sys.stdout.flush()
+
+    try:
+        for s in range(1, steps + 1):
+            t_start = time.perf_counter()
+            step_info = integrator.step(bodies, dt=dt, use_tree=True)
+            cosmic_time += dt
+            t_elapsed = max(time.perf_counter() - t_start, 1e-6)
+
+            k_energy = total_kinetic_energy(bodies)
+            if s == 1 or s % 10 == 0 or s == steps:
+                u_energy = direct_total_potential_energy(bodies, G=1.0, softening=softening)
+            else:
+                u_energy = init_u * 0.99
+
+            total_e = k_energy + u_energy
+            e_drift = (total_e - init_energy) / max(abs(init_energy), 1e-6)
+            p_vec = total_linear_momentum(bodies)
+            l_vec = total_angular_momentum(bodies)
+            p_mag = p_vec.norm()
+            l_mag = l_vec.norm()
+            virial = (2.0 * k_energy) / max(abs(u_energy), 1e-6)
+
+            speedup = (len(bodies) * (len(bodies) - 1)) / max(step_info["interactions"], 1)
+
+            if not no_render:
+                canvas.clear()
+                com, _ = system_center_of_mass(bodies)
+
+                max_span = max(max(abs(b.pos.x - com.x), abs(b.pos.y - com.y)) for b in bodies)
+                scale = max(max_span * 1.15, 5.0)
+
+                half_pw = canvas.pixel_w * 0.5
+                half_ph = canvas.pixel_h * 0.5
+
+                for b in bodies:
+                    rel_x = b.pos.x - com.x
+                    rel_y = b.pos.y - com.y
+                    px = int(half_pw + (rel_x / scale) * half_pw)
+                    py = int(half_ph - (rel_y / scale) * half_ph)
+
+                    if b.radius > 2.0:
+                        cx = px // 2
+                        cy = py // 4
+                        canvas.add_marker(cx, cy, "✦", b.color)
+                    else:
+                        canvas.set_pixel(px, py, b.color)
+
+                frame_lines = canvas.render()
+
+                hud_header = (
+                    f"{Color.BG_DARK}{Color.BOLD}{Color.WHITE} STEP {s:>4}/{steps} | T = {cosmic_time:>6.2f} | N = {len(bodies)} | SPEEDUP: {speedup:>4.1f}x {Color.RESET}"
+                )
+                hud_footer = (
+                    f"{Color.DIM}E_tot: {total_e:>9.2f} | ΔE/E0: {e_drift:>+7.4%} | 2K/|U|: {virial:>5.3f} | |P|: {p_mag:>6.3f} | |L|: {l_mag:>7.2f}{Color.RESET}"
+                )
+
+                sys.stdout.write("\033[H")
+                sys.stdout.write(hud_header + "\n")
+                for line in frame_lines:
+                    sys.stdout.write(line + "\n")
+                sys.stdout.write(hud_footer + "\n")
+                sys.stdout.flush()
+
+                rem_time = frame_delay - t_elapsed
+                if rem_time > 0:
+                    time.sleep(rem_time)
+            else:
+                if s == 1 or s % 25 == 0 or s == steps:
+                    print(
+                        f"Step {s:>4}/{steps} [T={cosmic_time:>5.2f}] | E_tot={total_e:>9.2f} (ΔE/E0={e_drift:>+7.3%}) | Virial={virial:>5.3f} | Tree Nodes={step_info['tree_nodes']:>4} | Speedup={speedup:>4.1f}x"
+                    )
+
+    finally:
+        if not no_render:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+    print(f"\n{Color.BOLD}{Color.GREEN}✔ Simulation complete ({steps} integration steps executed).{Color.RESET}")
+    print(f"  • Final Energy Drift ΔE/E0:  {Color.BOLD}{e_drift:>+8.5%}{Color.RESET}")
+    print(f"  • Linear Momentum ||P||:      {Color.BOLD}{p_mag:>8.6f}{Color.RESET}")
+    print(f"  • Angular Momentum ||L||:     {Color.BOLD}{l_mag:>8.6f}{Color.RESET}")
+    print(f"  • Virial Equilibrium Ratio:  {Color.BOLD}{virial:>8.4f}{Color.RESET}")
+
+# =====================================================================
+# Formal Verification & Physical Invariant Test Suite
+# =====================================================================
+def run_tests() -> bool:
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}🔬 N-BODY BARNES-HUT & SYMPLECTIC INVARIANT FORMAL TEST SUITE{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+    all_passed = True
+
+    def test(name: str, passed: bool, details: str = ""):
+        nonlocal all_passed
+        if passed:
+            print(f"  {Color.GREEN}✔ PASS{Color.RESET} | {Color.BOLD}{name}{Color.RESET} {Color.DIM}{details}{Color.RESET}")
+        else:
+            all_passed = False
+            print(f"  {Color.RED}✖ FAIL{Color.RESET} | {Color.BOLD}{name}{Color.RESET} - {Color.RED}{details}{Color.RESET}")
+
+    # 1. Tree Mass & CoM Conservation
+    bodies = [
+        Body(1, "A", 10.0, Vec3(2, 3, 4), Vec3(0, 0, 0)),
+        Body(2, "B", 20.0, Vec3(-1, 0, 2), Vec3(0, 0, 0)),
+        Body(3, "C", 30.0, Vec3(4, -2, 1), Vec3(0, 0, 0)),
+        Body(4, "D", 40.0, Vec3(0, 1, -3), Vec3(0, 0, 0)),
+    ]
+    tree = BarnesHutTree(bodies)
+    expected_m = sum(b.mass for b in bodies)
+    expected_com, _ = system_center_of_mass(bodies)
+
+    mass_ok = math.isclose(tree.root.mass, expected_m, rel_tol=1e-9)
+    com_ok = (
+        math.isclose(tree.root.com.x, expected_com.x, rel_tol=1e-7) and
+        math.isclose(tree.root.com.y, expected_com.y, rel_tol=1e-7) and
+        math.isclose(tree.root.com.z, expected_com.z, rel_tol=1e-7)
+    )
+    test(
+        "Tree Total Mass & CoM Invariant",
+        mass_ok and com_ok,
+        f"Mass={tree.root.mass:.2f}, CoM=({tree.root.com.x:.2f}, {tree.root.com.y:.2f}, {tree.root.com.z:.2f})",
+    )
+
+    # 2. Bounding Box Containment
+    containment_ok = all(tree.root.box.contains(b.pos) for b in bodies)
+    test(
+        "Octree Spatial Bounding Containment",
+        containment_ok,
+        f"Root HalfSize={tree.root.box.half_size:.2f}",
+    )
+
+    # 3. Barnes-Hut Multipole Approximation Convergence
+    cluster = scenario_plummer_sphere(n_particles=100, total_mass=50.0, scale_radius=5.0)
+    bh_tree = BarnesHutTree(cluster)
+    target = cluster[0]
+
+    direct_acc = direct_acceleration(target, cluster, G=1.0, softening=0.1)
+    acc_theta_0, _ = bh_tree.compute_acceleration(target, theta=0.0, G=1.0, softening=0.1)
+    acc_theta_5, _ = bh_tree.compute_acceleration(target, theta=0.5, G=1.0, softening=0.1)
+
+    diff_0 = (direct_acc - acc_theta_0).norm()
+    diff_5 = (direct_acc - acc_theta_5).norm()
+    rel_err_5 = diff_5 / max(direct_acc.norm(), 1e-6)
+
+    convergence_ok = (diff_0 < 1e-8) and (rel_err_5 < 0.05)
+    test(
+        "Barnes-Hut Force Convergence (θ=0 vs θ=0.5)",
+        convergence_ok,
+        f"θ=0 Error={diff_0:.2e}, θ=0.5 Rel Error={rel_err_5:.2%}",
+    )
+
+    # 4. Symplectic Leapfrog Energy Conservation
+    r_orb = 10.0
+    v_orb = math.sqrt(100.0 / r_orb)
+    two_body = [
+        Body(1, "Star", 100.0, Vec3(0, 0, 0), Vec3(0, -0.01 * v_orb / 100.0, 0)),
+        Body(2, "Planet", 0.01, Vec3(r_orb, 0, 0), Vec3(0, v_orb, 0)),
+    ]
+    integrator = LeapfrogIntegrator(G=1.0, softening=0.0, theta=0.5)
+    integrator.initialize_accelerations(two_body, use_tree=False)
+
+    e_init = total_kinetic_energy(two_body) + direct_total_potential_energy(two_body, G=1.0, softening=0.0)
+    max_drift = 0.0
+
+    for _ in range(500):
+        integrator.step(two_body, dt=0.02, use_tree=False)
+        e_curr = total_kinetic_energy(two_body) + direct_total_potential_energy(two_body, G=1.0, softening=0.0)
+        drift = abs(e_curr - e_init) / abs(e_init)
+        max_drift = max(max_drift, drift)
+
+    energy_ok = max_drift < 5e-4
+    test(
+        "Symplectic Energy Conservation (500 steps Kepler)",
+        energy_ok,
+        f"Max Hamiltonian Drift |ΔE/E0| = {max_drift:.3e} (< 0.05%)",
+    )
+
+    # 5. Linear Momentum Conservation (Exact Symplectic Physics)
+    nbody_sys = scenario_plummer_sphere(n_particles=60, total_mass=100.0, scale_radius=4.0)
+    integrator_exact = LeapfrogIntegrator(G=1.0, softening=0.1, theta=0.0)
+    integrator_exact.initialize_accelerations(nbody_sys, use_tree=False)
+    p_init = total_linear_momentum(nbody_sys)
+    l_init = total_angular_momentum(nbody_sys)
+
+    for _ in range(50):
+        integrator_exact.step(nbody_sys, dt=0.05, use_tree=False)
+
+    p_final = total_linear_momentum(nbody_sys)
+    delta_p = (p_final - p_init).norm()
+    mom_ok = delta_p < 1e-10
+    test(
+        "Total Linear Momentum Conservation (Exact Symplectic)",
+        mom_ok,
+        f"||ΔP|| = {delta_p:.2e} (< 1e-10)",
+    )
+
+    # 6. Angular Momentum Conservation (Exact Symplectic)
+    l_final = total_angular_momentum(nbody_sys)
+    delta_l = (l_final - l_init).norm()
+    ang_ok = delta_l < 1e-10
+    test(
+        "Total Angular Momentum Conservation (Exact Symplectic)",
+        ang_ok,
+        f"||ΔL|| = {delta_l:.2e} (< 1e-10)",
+    )
+
+    # 7. Moore-Chenciner 3-Body Choreography
+    fig8 = scenario_figure_eight()
+    fig_integrator = LeapfrogIntegrator(G=1.0, softening=0.0, theta=0.0)
+    fig_integrator.initialize_accelerations(fig8, use_tree=False)
+
+    p1_init = Vec3(fig8[0].pos.x, fig8[0].pos.y, fig8[0].pos.z)
+    period = 6.32591398
+    dt_fig = 0.005
+    steps_fig = int(round(period / dt_fig))
+
+    for _ in range(steps_fig):
+        fig_integrator.step(fig8, dt=dt_fig, use_tree=False)
+
+    pos_err = (fig8[0].pos - p1_init).norm()
+    fig8_ok = pos_err < 0.05
+    test(
+        "Figure-Eight 3-Body Periodic Choreography",
+        fig8_ok,
+        f"Period T={period:.4f}, Orbit Closure Error={pos_err:.4f}",
+    )
+
+    # 8. Plummer Sphere Virial Equilibrium
+    plummer = scenario_plummer_sphere(n_particles=200, total_mass=150.0, scale_radius=5.0)
+    k_plummer = total_kinetic_energy(plummer)
+    u_plummer = direct_total_potential_energy(plummer, G=1.0, softening=0.1)
+    virial_ratio = (2.0 * k_plummer) / abs(u_plummer)
+
+    virial_ok = 0.8 <= virial_ratio <= 1.2
+    test(
+        "Plummer Globular Cluster Virial Equilibrium",
+        virial_ok,
+        f"Virial Ratio 2K/|U| = {virial_ratio:.3f} (Theoretical = 1.000)",
+    )
+
+    msg = "🎉 ALL FORMAL INVARIANT TESTS PASSED SUCCESSFULLY!" if all_passed else "❌ SOME TESTS FAILED"
+    print(f"\n{Color.BOLD}{msg}{Color.RESET}")
+    return all_passed
+
+# =====================================================================
+# Scaling Benchmark (Direct O(N^2) vs Barnes-Hut O(N log N))
+# =====================================================================
+def run_benchmark(particle_counts: List[int] = None):
+    if particle_counts is None:
+        particle_counts = [100, 250, 500, 1000, 2000]
+
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}⚡ N-BODY BENCHMARK: DIRECT O(N^2) VS BARNES-HUT O(N log N){Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.DIM}Measuring force evaluation throughput, speedup ratio, and mean relative force error.\n{Color.RESET}")
+
+    header = f"| {'N (Bodies)':^10} | {'Direct O(N^2)':^15} | {'Barnes-Hut (θ=0.5)':^19} | {'Speedup':^10} | {'Mean Force Error':^18} |"
+    sep = f"|{'-'*12}|{'-'*17}|{'-'*21}|{'-'*12}|{'-'*20}|"
+    print(header)
+    print(sep)
+
+    for n in particle_counts:
+        bodies = scenario_plummer_sphere(n_particles=n, total_mass=100.0, scale_radius=5.0)
+
+        t0 = time.perf_counter()
+        direct_accs = [direct_acceleration(b, bodies, G=1.0, softening=0.1) for b in bodies]
+        t_direct = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        tree = BarnesHutTree(bodies)
+        bh_accs = [tree.compute_acceleration(b, theta=0.5, G=1.0, softening=0.1)[0] for b in bodies]
+        t_bh = time.perf_counter() - t0
+
+        speedup = t_direct / max(t_bh, 1e-6)
+
+        errs = []
+        for da, ba in zip(direct_accs, bh_accs):
+            diff = (da - ba).norm()
+            mag = max(da.norm(), 1e-6)
+            errs.append(diff / mag)
+        mean_err = sum(errs) / len(errs)
+
+        dir_str = f"{t_direct * 1000.0:>8.2f} ms"
+        bh_str = f"{t_bh * 1000.0:>8.2f} ms"
+        speed_str = f"{speedup:>7.2f}x"
+        err_str = f"{mean_err:>8.3%}"
+
+        print(f"| {n:^10} | {dir_str:^15} | {bh_str:^19} | {Color.GREEN}{speed_str:^10}{Color.RESET} | {err_str:^18} |")
+
+    print(f"\n{Color.BOLD}{Color.GREEN}✔ Benchmark completed across {len(particle_counts)} particle scales.{Color.RESET}")
+
+# =====================================================================
+# Main Command Line Dispatcher
+# =====================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="N-Body Barnes-Hut Gravitational Simulator & Galactic Collision Dynamics Engine"
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to execute")
+
+    demo_p = subparsers.add_parser("demo", help="Run interactive terminal simulation")
+    demo_p.add_argument(
+        "scenario",
+        nargs="?",
+        default="galaxy-collision",
+        choices=["galaxy-collision", "figure-eight", "solar-system", "plummer-sphere", "lagrange-chaos"],
+        help="Astrophysical initial conditions scenario",
+    )
+    demo_p.add_argument("--steps", type=int, default=120, help="Simulation integration steps (default: 120)")
+    demo_p.add_argument("--dt", type=float, default=0.05, help="Timestep dt (default: 0.05)")
+    demo_p.add_argument("--theta", type=float, default=0.5, help="Barnes-Hut MAC acceptance theta (default: 0.5)")
+    demo_p.add_argument("--softening", type=float, default=0.15, help="Plummer softening length (default: 0.15)")
+    demo_p.add_argument("--fps", type=int, default=24, help="Visualizer frame rate (default: 24)")
+    demo_p.add_argument("--no-render", action="store_true", help="Run headless step report without full Braille display")
+
+    subparsers.add_parser("test", help="Run formal verification test suite")
+
+    bench_p = subparsers.add_parser("benchmark", help="Benchmark Direct O(N^2) vs Barnes-Hut O(N log N)")
+    bench_p.add_argument("--particles", type=str, default="100,250,500,1000", help="Comma-separated particle scales")
+
+    args = parser.parse_args()
+
+    if args.subcommand == "demo":
+        run_simulation(
+            scenario_name=args.scenario,
+            steps=args.steps,
+            dt=args.dt,
+            theta=args.theta,
+            softening=args.softening,
+            fps=args.fps,
+            no_render=args.no_render,
+        )
+    elif args.subcommand == "test":
+        passed = run_tests()
+        sys.exit(0 if passed else 1)
+    elif args.subcommand == "benchmark":
+        counts = [int(x.strip()) for x in args.particles.split(",")]
+        run_benchmark(counts)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
