@@ -398,5 +398,22 @@
       "Fellowships",
       "Quant"
     ]
+  },
+  {
+    "id": "test-time-mcts",
+    "title": "Test-Time Compute MCTS & Process Reward Model (PRM) Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Frontier AI Test-Time Search implementation featuring Monte Carlo Tree Search with step-level Process Reward Models (PRMs), PUCT exploration, self-correcting backtracking, and ANSI tree visualization.",
+    "cli": "test-time-mcts",
+    "evolved_at": "2026-10-28T13:28:40.000000",
+    "tags": [
+      "Frontier-AI",
+      "Test-Time-Compute",
+      "MCTS",
+      "PRM",
+      "Process-Supervision",
+      "Reasoning"
+    ]
   }
 ]

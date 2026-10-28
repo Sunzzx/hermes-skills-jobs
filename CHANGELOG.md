@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-28 13:30:00] - Evolved `test-time-mcts`
+- **Title**: Test-Time Compute MCTS & Process Reward Model (PRM) Engine
+- **Category**: research
+- **Description**: Frontier AI Test-Time Search implementation featuring Monte Carlo Tree Search with step-level Process Reward Models (PRMs), PUCT exploration, self-correcting backtracking, and ANSI tree visualization.
+- **CLI**: `test-time-mcts` (`solve`, `compare`, `benchmark`, `verify`, `info`)
+
 ### [2026-10-28 02:40:00] - Evolved `mamba-ssm`
 - **Title**: Selective State Space Mamba Engine & Blelloch Parallel Scan
 - **Category**: research

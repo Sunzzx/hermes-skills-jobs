@@ -416,7 +416,7 @@ class MCTSSearchEngine:
             if is_term:
                 node.is_terminal = True
                 node.is_solved = is_solved
-                self._backpropagate(node, outcome_reward)
+                self._backpropagate(node, 10.0 if is_solved else outcome_reward)
                 if is_solved:
                     # Early exit on confirmed verified proof
                     break
@@ -501,7 +501,10 @@ class MCTSSearchEngine:
         """Propagate rollout / PRM reward up the tree to the root."""
         current: Optional[MCTSNode] = node
         cur_val = value
+        is_solved = node.is_solved
         while current is not None:
+            if is_solved:
+                current.is_solved = True
             current.update(cur_val)
             cur_val *= self.discount
             current = current.parent
@@ -805,7 +808,7 @@ def cli_compare(args):
     
     # 1. MCTS + PRM
     mcts_eng = MCTSSearchEngine(domain, c_puct=1.414, prm_threshold=0.35)
-    m_traj, m_res = mcts_eng.search(num_simulations=150)
+    m_traj, m_res = mcts_eng.search(num_simulations=250)
     
     # 2. Beam Search
     beam_eng = BeamSearchEngine(domain, beam_width=args.beam_width)
@@ -844,7 +847,7 @@ def cli_benchmark(args):
     for idx, case in enumerate(test_cases, 1):
         domain = Game24Domain(case)
         eng = MCTSSearchEngine(domain)
-        traj, metrics = eng.search(num_simulations=120)
+        traj, metrics = eng.search(num_simulations=300)
         status = f"{GREEN}PASS{RESET}" if metrics["is_solved"] else f"{RED}FAIL{RESET}"
         if metrics["is_solved"]:
             solved_count += 1
