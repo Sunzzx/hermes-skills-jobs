@@ -318,5 +318,19 @@
       "Revenue",
       "Algora"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v17",
+    "title": "Workflow Accelerator Suite #17",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #17.",
+    "cli": "accelerate-17",
+    "evolved_at": "2026-10-28T12:40:37.883891",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
