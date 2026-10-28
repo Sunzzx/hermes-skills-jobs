@@ -243,5 +243,22 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "fractal-4d",
+    "title": "Hyperdimensional 4D Fractal Raymarcher & Quaternion Julia Engine",
+    "category": "creative",
+    "type": "skill+tool",
+    "description": "Production-grade 4D raymarcher in pure Python: Quaternion Julia sets, Mandelbulbs, Clifford Tori, SO(4) rotations, Blinn-Phong lighting, ambient occlusion, and Truecolor ANSI terminal visualization.",
+    "cli": "fractal-4d",
+    "evolved_at": "2026-10-28T09:33:07.178581",
+    "tags": [
+      "Generative-Aesthetics",
+      "4D-Fractals",
+      "Quaternions",
+      "Raymarching",
+      "Computer-Graphics",
+      "Truecolor-ANSI"
+    ]
   }
 ]
