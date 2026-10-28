@@ -576,5 +576,23 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "molecular-dynamics",
+    "title": "Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Production-grade Molecular Dynamics engine: symplectic 2nd-order Velocity-Verlet, shifted Lennard-Jones (12-6) potential, Periodic Boundary Conditions, Cell Linked-List O(N) spatial acceleration, Berendsen/Andersen canonical thermostats, radial distribution function g(r), virial pressure, MSD, and interactive Unicode Braille visualizer.",
+    "cli": "md-sim",
+    "evolved_at": "2026-10-29T00:15:00.000000",
+    "tags": [
+      "ComputationalPhysics",
+      "MolecularDynamics",
+      "SymplecticIntegrator",
+      "LennardJones",
+      "StatisticalMechanics",
+      "PhaseSpace",
+      "BrailleVisualizer"
+    ]
   }
 ]

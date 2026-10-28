@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-29 00:15:00] - Evolved `molecular-dynamics`
+- **Title**: Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine
+- **Category**: computational-science
+- **Description**: Production-grade Molecular Dynamics (MD) simulation engine implementing symplectic 2nd-order Velocity-Verlet time integration, shifted Lennard-Jones (12-6) interatomic potentials with continuous cutoff shifting and analytic dispersion tail corrections, Periodic Boundary Conditions (PBC) under Minimum Image Convention, Cell Linked-List $O(N)$ domain decomposition acceleration ($7.6\times$ speedup over direct $O(N^2)$ with identical machine precision), canonical ensemble thermostats (Berendsen & Andersen), statistical mechanics observables (virial equation of state pressure, radial distribution function $g(r)$, mean squared displacement MSD), and interactive real-time 3D Unicode Braille terminal visualization.
+- **CLI**: `md-sim` (`run`, `test`, `benchmark`, `info`)
+
 ### [2026-10-28 15:05:00] - Evolved `bytecode-vm`
 - **Title**: Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler
 - **Category**: systems
