@@ -302,5 +302,21 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "bounty-hunter",
+    "title": "Autonomous Cash Bounty Hunter & Revenue Engine",
+    "category": "finance",
+    "type": "job+tool",
+    "description": "Scouts and executes high-yield cash bounties on Algora, Polar, and Kaggle. Embeds automated Stripe monetization into projects.",
+    "cli": "bounty-hunter",
+    "evolved_at": "2026-10-28T11:59:56.538331",
+    "tags": [
+      "Finance",
+      "Bounties",
+      "Stripe",
+      "Revenue",
+      "Algora"
+    ]
   }
 ]
