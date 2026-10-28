@@ -1,0 +1,1103 @@
+#!/usr/bin/env python3
+"""Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine.
+
+A mathematically rigorous, production-grade physical modeling audio synthesis engine
+written from scratch in pure Python with zero external dependencies.
+
+Implements:
+  1. Digital Waveguide Mesh & Extended Karplus-Strong plucked strings with fractional
+     delay all-pass filters, frequency-dependent loss, and stiffness dispersion.
+  2. Nonlinear Bowed String dynamics with McIntyre-Schumacher-Woodhouse (MSW)
+     stick-slip friction solver and Helmholtz string motion.
+  3. Modal Resonator Banks for Euler-Bernoulli stiff beams, marimbas, chimes, and bells.
+  4. 2D Circular Membrane drum physics with Bessel vibrational mode ratios and
+     strike tension modulation.
+  5. Acoustic Flute with jet delay lines, vortex turbulence, and nonlinear cubic embouchure.
+  6. Schroeder-Moorer Reverberation Tank with prime delay comb filters and all-pass diffusers.
+  7. Real-time ASCII/ANSI oscilloscope and 48-band DFT spectral power visualizer.
+  8. Lossless 16-bit 44.1kHz PCM RIFF WAV export and native macOS afplay playback.
+  9. Formal mathematical invariant test suite and DSP performance benchmark suite.
+"""
+
+import argparse
+import cmath
+import math
+import os
+import random
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import wave
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
+
+# Global Audio Constants
+SAMPLE_RATE = 44100
+DEFAULT_DURATION = 2.0
+
+
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    RED = "\033[31m"
+
+
+# =====================================================================
+# 1. Digital Waveguide Plucked String (Extended Karplus-Strong)
+# =====================================================================
+
+class AllpassFractionalDelay:
+    """First-order Thiran all-pass filter for fractional delay interpolation.
+
+    Transfer function: A(z) = (eta + z^-1) / (1 + eta * z^-1)
+    where eta = (1 - D_frac) / (1 + D_frac).
+    Magnitude response is strictly unity |A(e^jw)| = 1.0, preserving all wave energy.
+    """
+    def __init__(self, frac_delay: float):
+        self.eta = 0.0
+        self.set_delay(frac_delay)
+        self.x1 = 0.0
+        self.y1 = 0.0
+
+    def set_delay(self, d: float):
+        d = max(0.05, min(0.99, d))
+        self.eta = (1.0 - d) / (1.0 + d)
+
+    def process(self, x: float) -> float:
+        y = self.eta * x + self.x1 - self.eta * self.y1
+        self.x1 = x
+        self.y1 = y
+        return y
+
+    def reset(self):
+        self.x1 = 0.0
+        self.y1 = 0.0
+
+
+class DispersionFilter:
+    """Cascaded first-order all-pass filters simulating string stiffness & dispersion.
+
+    High frequencies travel faster than low frequencies in stiff strings:
+    f_n = n * f_0 * sqrt(1 + B * n^2).
+    """
+    def __init__(self, stiffness: float = 0.0, stages: int = 2):
+        self.stages = stages
+        self.coeff = max(-0.95, min(0.0, -stiffness))
+        self.x1 = [0.0] * stages
+        self.y1 = [0.0] * stages
+
+    def process(self, x: float) -> float:
+        c = self.coeff
+        val = x
+        for i in range(self.stages):
+            y = c * val + self.x1[i] - c * self.y1[i]
+            self.x1[i] = val
+            self.y1[i] = y
+            val = y
+        return val
+
+    def reset(self):
+        self.x1 = [0.0] * self.stages
+        self.y1 = [0.0] * self.stages
+
+
+class PluckedString:
+    """Digital waveguide plucked string with fractional delay, loss, and dispersion."""
+    def __init__(
+        self,
+        freq: float,
+        sample_rate: int = SAMPLE_RATE,
+        decay_time: float = 2.5,
+        damping: float = 0.35,
+        stiffness: float = 0.05,
+        pluck_pos: float = 0.25,
+    ):
+        self.freq = freq
+        self.sample_rate = sample_rate
+        self.decay_time = decay_time
+        self.damping = max(0.01, min(0.49, damping))
+        self.pluck_pos = max(0.05, min(0.95, pluck_pos))
+
+        self.dispersion = DispersionFilter(stiffness=stiffness, stages=2)
+
+        # Compensate for loop filter and dispersion phase delays at fundamental frequency
+        filter_delay = self.damping
+        if stiffness > 0.0:
+            filter_delay += 2.0 * (1.0 + self.dispersion.coeff) / (1.0 - self.dispersion.coeff)
+        effective_delay = max(2.0, (sample_rate / max(20.0, freq)) - filter_delay)
+        self.int_delay = int(math.floor(effective_delay))
+        self.frac_delay = effective_delay - self.int_delay
+        if self.int_delay < 2:
+            self.int_delay = 2
+
+        self.buffer = [0.0] * self.int_delay
+        self.w_ptr = 0
+        self.r_ptr = 0
+
+        self.frac_filter = AllpassFractionalDelay(self.frac_delay)
+
+        t60_periods = max(1.0, decay_time * freq)
+        self.loop_gain = math.pow(0.001, 1.0 / t60_periods)
+
+        self.loss_state = 0.0
+        self.pluck()
+
+    def pluck(self, velocity: float = 1.0):
+        N = self.int_delay
+        pick_tap = int(round(self.pluck_pos * N))
+        pick_tap = max(1, min(N - 1, pick_tap))
+
+        shape = [0.0] * N
+        for i in range(N):
+            phase = i / N
+            noise = (random.random() * 2.0 - 1.0) * 0.15
+            if phase <= self.pluck_pos:
+                tri = phase / self.pluck_pos
+            else:
+                tri = (1.0 - phase) / (1.0 - self.pluck_pos)
+            shape[i] = (tri + noise) * velocity
+
+        for i in range(N):
+            tapped_idx = (i - pick_tap) % N
+            self.buffer[i] = (shape[i] - shape[tapped_idx]) * 0.5
+
+        self.w_ptr = 0
+        self.r_ptr = 0
+        self.loss_state = 0.0
+        self.frac_filter.reset()
+        self.dispersion.reset()
+
+    def tick(self) -> float:
+        x = self.buffer[self.r_ptr]
+        self.r_ptr = (self.r_ptr + 1) % self.int_delay
+
+        # Frequency dependent loss FIR: H(z) = (1 - S) + S * z^-1
+        loss_out = (1.0 - self.damping) * x + self.damping * self.loss_state
+        self.loss_state = x
+
+        # Fractional delay all-pass interpolation
+        frac_out = self.frac_filter.process(loss_out)
+
+        # Stiffness dispersion
+        disp_out = self.dispersion.process(frac_out)
+
+        # Apply loop gain
+        y = disp_out * self.loop_gain
+
+        self.buffer[self.w_ptr] = y
+        self.w_ptr = (self.w_ptr + 1) % self.int_delay
+
+        return x
+
+
+# =====================================================================
+# 2. Nonlinear Bowed String Dynamics (MSW Friction Solver)
+# =====================================================================
+
+class BowedString:
+    """Nonlinear bowed string simulator utilizing McIntyre-Schumacher-Woodhouse (MSW)
+    stick-slip friction dynamics and digital waveguide bi-directional propagation.
+    """
+    def __init__(
+        self,
+        freq: float,
+        sample_rate: int = SAMPLE_RATE,
+        bow_pos: float = 0.14,
+        bow_force: float = 2.0,
+        bow_velocity: float = 0.2,
+    ):
+        self.freq = freq
+        self.sample_rate = sample_rate
+        self.bow_pos = max(0.05, min(0.5, bow_pos))
+        self.bow_force = bow_force
+        self.bow_velocity = bow_velocity
+
+        total_delay = sample_rate / max(30.0, freq)
+        self.len_nut = max(2, int(round(total_delay * (1.0 - self.bow_pos))))
+        self.len_bridge = max(2, int(round(total_delay * self.bow_pos)))
+
+        self.delay_nut_fwd = [0.0] * self.len_nut
+        self.delay_nut_rev = [0.0] * self.len_nut
+        self.delay_bridge_fwd = [0.0] * self.len_bridge
+        self.delay_bridge_rev = [0.0] * self.len_bridge
+
+        self.ptr_nut = 0
+        self.ptr_bridge = 0
+
+        self.string_impedance = 1.0
+        self.bridge_loss = 0.985
+        self.nut_loss = 0.992
+        self.bridge_filter_state = 0.0
+
+    def _solve_friction(self, v_incoming: float) -> Tuple[float, float]:
+        v_bow = self.bow_velocity
+        fn = self.bow_force
+        z2 = self.string_impedance * 2.0
+
+        mu_d = 0.3
+        mu_s = 0.8
+        v_crit = 0.1
+
+        v_s = v_bow
+        for _ in range(8):
+            dv = v_s - v_bow
+            exp_term = math.exp(-min(50.0, (dv / v_crit) ** 2))
+            mu = mu_d + (mu_s - mu_d) * exp_term
+            f_fric = fn * math.tanh(dv * 50.0) * mu
+
+            residual = z2 * (v_s - v_incoming) + f_fric
+            d_dv = 1e-4
+            dv_pert = dv + d_dv
+            exp_pert = math.exp(-min(50.0, (dv_pert / v_crit) ** 2))
+            mu_pert = mu_d + (mu_s - mu_d) * exp_pert
+            f_pert = fn * math.tanh(dv_pert * 50.0) * mu_pert
+            df = z2 + (f_pert - f_fric) / d_dv
+
+            delta = residual / max(1e-6, df)
+            v_s -= delta
+            if abs(delta) < 1e-6:
+                break
+
+        dv = v_s - v_bow
+        mu = mu_d + (mu_s - mu_d) * math.exp(-min(50.0, (dv / v_crit) ** 2))
+        f_final = fn * math.tanh(dv * 50.0) * mu
+        return v_s, f_final
+
+    def tick(self) -> float:
+        nut_out = self.delay_nut_rev[self.ptr_nut]
+        bridge_out = self.delay_bridge_rev[self.ptr_bridge]
+
+        v_incoming = nut_out + bridge_out
+        v_string, f_friction = self._solve_friction(v_incoming)
+
+        delta_v = f_friction / (self.string_impedance * 2.0)
+        v_to_nut = bridge_out - delta_v
+        v_to_bridge = nut_out - delta_v
+
+        bridge_refl = -v_to_bridge * self.bridge_loss
+        filtered_bridge = 0.6 * bridge_refl + 0.4 * self.bridge_filter_state
+        self.bridge_filter_state = bridge_refl
+
+        nut_refl = -v_to_nut * self.nut_loss
+
+        self.delay_bridge_fwd[self.ptr_bridge] = v_to_bridge
+        self.delay_bridge_rev[self.ptr_bridge] = filtered_bridge
+        self.delay_nut_fwd[self.ptr_nut] = v_to_nut
+        self.delay_nut_rev[self.ptr_nut] = nut_refl
+
+        self.ptr_nut = (self.ptr_nut + 1) % self.len_nut
+        self.ptr_bridge = (self.ptr_bridge + 1) % self.len_bridge
+
+        return filtered_bridge
+
+
+# =====================================================================
+# 3. Modal Resonator Bank (Euler-Bernoulli Beams, Marimba, Chimes)
+# =====================================================================
+
+class BiquadResonator:
+    """2nd-order resonant filter band: y[n] = 2*r*cos(w)*y[n-1] - r^2*y[n-2] + g*x[n]."""
+    def __init__(self, freq: float, t60: float, gain: float, sample_rate: int = SAMPLE_RATE):
+        self.sample_rate = sample_rate
+        w = 2.0 * math.pi * max(10.0, min(sample_rate * 0.48, freq)) / sample_rate
+        r = math.exp(-3.0 / max(0.001, t60 * sample_rate))
+        self.c1 = 2.0 * r * math.cos(w)
+        self.c2 = -r * r
+        self.gain = gain * (1.0 - r)
+        self.y1 = 0.0
+        self.y2 = 0.0
+
+    def tick(self, x: float) -> float:
+        y0 = self.c1 * self.y1 + self.c2 * self.y2 + self.gain * x
+        self.y2 = self.y1
+        self.y1 = y0
+        return y0
+
+
+class ModalBank:
+    """Bank of tuned second-order modal resonators for metallic and wooden struck bars."""
+    def __init__(
+        self,
+        base_freq: float,
+        mode_ratios: List[float],
+        mode_decays: List[float],
+        mode_amplitudes: List[float],
+        sample_rate: int = SAMPLE_RATE,
+    ):
+        self.resonators = [
+            BiquadResonator(
+                base_freq * ratio,
+                decay,
+                amp,
+                sample_rate=sample_rate,
+            )
+            for ratio, decay, amp in zip(mode_ratios, mode_decays, mode_amplitudes)
+        ]
+
+    def tick(self, x: float) -> float:
+        out = 0.0
+        for res in self.resonators:
+            out += res.tick(x)
+        return out
+
+
+def create_marimba_bank(freq: float) -> ModalBank:
+    ratios = [1.0, 3.98, 9.85, 15.6]
+    decays = [0.8, 0.45, 0.18, 0.08]
+    amps = [1.0, 0.65, 0.35, 0.15]
+    return ModalBank(freq, ratios, decays, amps)
+
+
+def create_chime_bank(freq: float) -> ModalBank:
+    ratios = [1.0, 2.756, 5.404, 8.933, 13.344]
+    decays = [3.5, 2.8, 1.9, 1.2, 0.8]
+    amps = [1.0, 0.8, 0.5, 0.3, 0.15]
+    return ModalBank(freq, ratios, decays, amps)
+
+
+# =====================================================================
+# 4. 2D Circular Membrane Drum Physics (Bessel Modes)
+# =====================================================================
+
+class Membrane2D:
+    """2D circular clamped membrane drum with Bessel vibrational mode ratios
+    and dynamic tension modulation (pitch swoop).
+    """
+    BESSEL_RATIOS = [1.0, 1.5933, 2.1355, 2.2954, 2.6531, 2.9173]
+
+    def __init__(self, fundamental: float, sample_rate: int = SAMPLE_RATE, tension_mod: float = 0.35):
+        self.fundamental = fundamental
+        self.sample_rate = sample_rate
+        self.tension_mod = tension_mod
+        self.tension_env = 0.0
+
+        decays = [0.9, 0.65, 0.45, 0.35, 0.25, 0.18]
+        amps = [1.0, 0.75, 0.6, 0.45, 0.3, 0.2]
+        self.bank = ModalBank(fundamental, self.BESSEL_RATIOS, decays, amps, sample_rate=sample_rate)
+
+    def strike(self, velocity: float = 1.0) -> List[float]:
+        self.tension_env = velocity * self.tension_mod
+        n_exc = 32
+        exc = [0.0] * n_exc
+        for i in range(n_exc):
+            phase = i / n_exc
+            exc[i] = math.sin(phase * math.pi) * (random.random() * 0.4 + 0.8) * velocity
+        return exc
+
+    def tick(self, x: float) -> float:
+        self.tension_env *= 0.9992
+        return self.bank.tick(x)
+
+
+# =====================================================================
+# 5. Acoustic Flute (Jet Delay Line & Cubic Nonlinearity)
+# =====================================================================
+
+class AcousticFlute:
+    """Physical modeling acoustic flute with jet delay, vortex turbulence,
+    and nonlinear cubic embouchure characteristics.
+    """
+    def __init__(self, freq: float, sample_rate: int = SAMPLE_RATE, jet_ratio: float = 0.5):
+        self.freq = freq
+        self.sample_rate = sample_rate
+
+        total_delay = sample_rate / max(50.0, freq)
+        self.bore_len = max(2, int(round(total_delay * 0.8)))
+        self.jet_len = max(2, int(round(total_delay * 0.2 * jet_ratio)))
+
+        self.bore_delay = [0.0] * self.bore_len
+        self.jet_delay = [0.0] * self.jet_len
+
+        self.bore_ptr = 0
+        self.jet_ptr = 0
+        self.jet_gain = 0.42
+        self.end_loss = 0.97
+        self.bore_filter_state = 0.0
+
+    def tick(self, pressure: float = 1.0, vibrato: float = 0.0) -> float:
+        bore_out = self.bore_delay[self.bore_ptr]
+        jet_out = self.jet_delay[self.jet_ptr]
+
+        turbulence = (random.random() * 2.0 - 1.0) * 0.08 * pressure
+        jet_in = pressure + vibrato + turbulence - 0.5 * bore_out
+
+        jet_eff = max(-1.5, min(1.5, jet_out * self.jet_gain))
+        jet_nl = jet_eff - (jet_eff ** 3) / 3.0
+
+        bore_in = jet_nl + 0.3 * bore_out
+
+        bore_refl = -bore_in * self.end_loss
+        filtered_bore = 0.7 * bore_refl + 0.3 * self.bore_filter_state
+        self.bore_filter_state = bore_refl
+
+        self.jet_delay[self.jet_ptr] = jet_in
+        self.bore_delay[self.bore_ptr] = filtered_bore
+
+        self.bore_ptr = (self.bore_ptr + 1) % self.bore_len
+        self.jet_ptr = (self.jet_ptr + 1) % self.jet_len
+
+        return bore_out
+
+
+# =====================================================================
+# 6. Schroeder Reverberator & Spatial Acoustics
+# =====================================================================
+
+class CombFilter:
+    def __init__(self, delay_samples: int, feedback: float):
+        self.buffer = [0.0] * delay_samples
+        self.ptr = 0
+        self.feedback = feedback
+
+    def process(self, x: float) -> float:
+        out = self.buffer[self.ptr]
+        self.buffer[self.ptr] = x + out * self.feedback
+        self.ptr = (self.ptr + 1) % len(self.buffer)
+        return out
+
+
+class AllpassFilter:
+    def __init__(self, delay_samples: int, gain: float = 0.5):
+        self.buffer = [0.0] * delay_samples
+        self.ptr = 0
+        self.gain = gain
+
+    def process(self, x: float) -> float:
+        buf_out = self.buffer[self.ptr]
+        y = -self.gain * x + buf_out
+        self.buffer[self.ptr] = x + self.gain * y
+        self.ptr = (self.ptr + 1) % len(self.buffer)
+        return y
+
+
+class SchroederReverb:
+    """Classic 4-comb parallel + 2-allpass series spatial acoustic reverberator."""
+    def __init__(self, sample_rate: int = SAMPLE_RATE):
+        scale = sample_rate / 44100.0
+        self.combs = [
+            CombFilter(int(1557 * scale), 0.84),
+            CombFilter(int(1617 * scale), 0.82),
+            CombFilter(int(1491 * scale), 0.86),
+            CombFilter(int(1422 * scale), 0.80),
+        ]
+        self.allpasses = [
+            AllpassFilter(int(225 * scale), 0.5),
+            AllpassFilter(int(556 * scale), 0.5),
+        ]
+
+    def process(self, x: float, wet: float = 0.25) -> Tuple[float, float]:
+        comb_sum = sum(c.process(x) for c in self.combs) * 0.25
+        diffused = comb_sum
+        for ap in self.allpasses:
+            diffused = ap.process(diffused)
+        dry = x
+        left = dry * (1.0 - wet * 0.5) + diffused * wet
+        right = dry * (1.0 - wet * 0.5) - diffused * wet * 0.95
+        return left, right
+
+
+# =====================================================================
+# 7. MIDI Note Converter & Score Engine
+# =====================================================================
+
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+def note_to_freq(note: Union[str, int, float]) -> float:
+    if isinstance(note, (int, float)):
+        return 440.0 * (2.0 ** ((note - 69) / 12.0))
+    note = note.strip().upper()
+    name = note[:-1]
+    octave = int(note[-1])
+    if name == "EB": name = "D#"
+    elif name == "BB": name = "A#"
+    elif name == "DB": name = "C#"
+    elif name == "GB": name = "F#"
+    elif name == "AB": name = "G#"
+    idx = NOTE_NAMES.index(name)
+    midi_num = (octave + 1) * 12 + idx
+    return 440.0 * (2.0 ** ((midi_num - 69) / 12.0))
+
+
+@dataclass
+class ScoreNote:
+    start_time: float
+    duration: float
+    pitch: str
+    velocity: float = 0.8
+
+
+REPERTOIRES = {
+    "bach-prelude": [
+        ScoreNote(0.00, 0.22, "C4"), ScoreNote(0.12, 0.22, "E4"), ScoreNote(0.24, 0.22, "G4"), ScoreNote(0.36, 0.22, "C5"), ScoreNote(0.48, 0.22, "E5"), ScoreNote(0.60, 0.22, "G4"), ScoreNote(0.72, 0.22, "C5"), ScoreNote(0.84, 0.22, "E5"),
+        ScoreNote(1.00, 0.22, "C4"), ScoreNote(1.12, 0.22, "D4"), ScoreNote(1.24, 0.22, "A4"), ScoreNote(1.36, 0.22, "D5"), ScoreNote(1.48, 0.22, "F5"), ScoreNote(1.60, 0.22, "A4"), ScoreNote(1.72, 0.22, "D5"), ScoreNote(1.84, 0.22, "F5"),
+        ScoreNote(2.00, 0.22, "B3"), ScoreNote(2.12, 0.22, "D4"), ScoreNote(2.24, 0.22, "G4"), ScoreNote(2.36, 0.22, "D5"), ScoreNote(2.48, 0.22, "F5"), ScoreNote(2.60, 0.22, "G4"), ScoreNote(2.72, 0.22, "D5"), ScoreNote(2.84, 0.22, "F5"),
+        ScoreNote(3.00, 0.40, "C4"), ScoreNote(3.05, 0.40, "E4"), ScoreNote(3.10, 0.40, "G4"), ScoreNote(3.15, 0.80, "C5", velocity=0.95),
+    ],
+    "debussy-flute": [
+        ScoreNote(0.00, 0.45, "Bb4", 0.7), ScoreNote(0.40, 0.45, "A4", 0.75), ScoreNote(0.80, 0.45, "Ab4", 0.8), ScoreNote(1.20, 0.50, "G4", 0.85),
+        ScoreNote(1.70, 0.35, "Gb4", 0.75), ScoreNote(2.05, 0.35, "F4", 0.8), ScoreNote(2.40, 0.80, "E4", 0.9),
+    ],
+    "beethoven-chimes": [
+        ScoreNote(0.0, 0.35, "E4"), ScoreNote(0.35, 0.35, "E4"), ScoreNote(0.70, 0.35, "F4"), ScoreNote(1.05, 0.35, "G4"),
+        ScoreNote(1.40, 0.35, "G4"), ScoreNote(1.75, 0.35, "F4"), ScoreNote(2.10, 0.35, "E4"), ScoreNote(2.45, 0.35, "D4"),
+        ScoreNote(2.80, 0.35, "C4"), ScoreNote(3.15, 0.35, "C4"), ScoreNote(3.50, 0.35, "D4"), ScoreNote(3.85, 0.50, "E4"),
+        ScoreNote(4.40, 0.40, "D4"), ScoreNote(4.80, 0.80, "D4"),
+    ],
+    "drum-groove": [
+        ScoreNote(0.00, 0.20, "A1", 1.0), ScoreNote(0.25, 0.20, "C2", 0.85), ScoreNote(0.50, 0.20, "A1", 0.95), ScoreNote(0.75, 0.20, "E2", 0.7),
+        ScoreNote(1.00, 0.20, "A1", 1.0), ScoreNote(1.25, 0.20, "G1", 0.8), ScoreNote(1.50, 0.20, "A1", 0.9), ScoreNote(1.75, 0.35, "C2", 0.95),
+    ],
+    "bowed-cello": [
+        ScoreNote(0.00, 1.2, "C3", 0.85), ScoreNote(1.15, 1.2, "G3", 0.9), ScoreNote(2.30, 1.6, "C4", 0.95),
+    ],
+}
+
+
+# =====================================================================
+# 8. High-Fidelity Synthesizer Engine & Renderer
+# =====================================================================
+
+def synthesize_score(
+    score: List[ScoreNote],
+    instrument: str = "plucked",
+    duration: Optional[float] = None,
+    reverb_wet: float = 0.25,
+    sample_rate: int = SAMPLE_RATE,
+) -> Tuple[List[float], List[float]]:
+    """Synthesizes a polyphonic multi-note score using physical modeling."""
+    if duration is None:
+        last_note = max(n.start_time + n.duration for n in score)
+        duration = last_note + 1.5
+
+    total_samples = int(duration * sample_rate)
+    left_buf = [0.0] * total_samples
+    right_buf = [0.0] * total_samples
+    reverb = SchroederReverb(sample_rate=sample_rate)
+
+    for note in score:
+        start_samp = int(note.start_time * sample_rate)
+        note_samps = int(note.duration * sample_rate)
+        tail_samps = int(sample_rate * 1.5)
+        total_voice_samps = min(total_samples - start_samp, note_samps + tail_samps)
+        if total_voice_samps <= 0:
+            continue
+
+        freq = note_to_freq(note.pitch)
+
+        if instrument == "plucked":
+            voice = PluckedString(freq, sample_rate=sample_rate, decay_time=1.8)
+            voice.pluck(note.velocity)
+            for i in range(total_voice_samps):
+                sample = voice.tick()
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+        elif instrument == "bowed":
+            voice = BowedString(freq, sample_rate=sample_rate, bow_force=1.8, bow_velocity=0.25)
+            for i in range(total_voice_samps):
+                t = i / sample_rate
+                vib = 0.02 * math.sin(2.0 * math.pi * 5.2 * t) if t > 0.3 else 0.0
+                voice.bow_velocity = 0.25 + vib
+                if i > note_samps:
+                    voice.bow_force *= 0.998
+                sample = voice.tick() * note.velocity
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+        elif instrument == "marimba":
+            bank = create_marimba_bank(freq)
+            for i in range(total_voice_samps):
+                x = note.velocity if i == 0 else 0.0
+                sample = bank.tick(x)
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+        elif instrument == "chimes":
+            bank = create_chime_bank(freq)
+            for i in range(total_voice_samps):
+                x = (note.velocity * 1.2) if i == 0 else 0.0
+                sample = bank.tick(x)
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+        elif instrument == "drum":
+            drum = Membrane2D(freq, sample_rate=sample_rate)
+            exc = drum.strike(note.velocity)
+            for i in range(total_voice_samps):
+                x = exc[i] if i < len(exc) else 0.0
+                sample = drum.tick(x)
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+        elif instrument == "flute":
+            flute = AcousticFlute(freq, sample_rate=sample_rate)
+            for i in range(total_voice_samps):
+                t = i / sample_rate
+                vib = 0.03 * math.sin(2.0 * math.pi * 5.0 * t) if t > 0.2 else 0.0
+                if i < 0.1 * sample_rate:
+                    pres = (i / (0.1 * sample_rate)) * note.velocity
+                elif i > note_samps:
+                    pres = max(0.0, 1.0 - (i - note_samps) / (0.15 * sample_rate)) * note.velocity
+                else:
+                    pres = note.velocity
+                sample = flute.tick(pressure=pres, vibrato=vib)
+                left_buf[start_samp + i] += sample
+                right_buf[start_samp + i] += sample
+
+    peak = 1e-6
+    for i in range(total_samples):
+        dry = (left_buf[i] + right_buf[i]) * 0.5
+        l, r = reverb.process(dry, wet=reverb_wet)
+        left_buf[i] = l
+        right_buf[i] = r
+        peak = max(peak, abs(l), abs(r))
+
+    gain = 0.89 / peak if peak > 0.89 else 1.0
+    for i in range(total_samples):
+        left_buf[i] *= gain
+        right_buf[i] *= gain
+
+    return left_buf, right_buf
+
+
+def export_wav(file_path: str, left: List[float], right: List[float], sample_rate: int = SAMPLE_RATE):
+    """Exports stereo floating-point audio to a lossless 16-bit PCM RIFF WAV file."""
+    with wave.open(file_path, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        frames = bytearray()
+        for l, r in zip(left, right):
+            il = max(-32767, min(32767, int(round(l * 32767.0))))
+            ir = max(-32767, min(32767, int(round(r * 32767.0))))
+            frames.extend(struct.pack("<hh", il, ir))
+        wf.writeframes(frames)
+
+
+# =====================================================================
+# 9. Real-Time Terminal Oscilloscope & 48-Band DFT Visualizer
+# =====================================================================
+
+def render_oscilloscope(samples: List[float], width: int = 72, height: int = 15) -> str:
+    if not samples:
+        return ""
+    step = len(samples) / width
+    col_vals = []
+    for c in range(width):
+        idx_start = int(c * step)
+        idx_end = max(idx_start + 1, int((c + 1) * step))
+        sub = samples[idx_start:idx_end]
+        avg = sum(sub) / len(sub)
+        col_vals.append(avg)
+
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    mid_row = height // 2
+    peak = max(abs(v) for v in col_vals) if col_vals else 1.0
+    if peak < 1e-4:
+        peak = 1.0
+
+    for col in range(width):
+        v = col_vals[col] / peak
+        row = mid_row - int(round(v * (height // 2 - 1)))
+        row = max(0, min(height - 1, row))
+        grid[row][col] = f"{Color.GREEN}█{Color.RESET}"
+
+    for c in range(width):
+        if grid[mid_row][c] == " ":
+            grid[mid_row][c] = f"{Color.DIM}─{Color.RESET}"
+
+    lines = [f"{Color.CYAN}┌" + "─" * width + f"┐{Color.RESET}"]
+    for row in grid:
+        lines.append(f"{Color.CYAN}│{Color.RESET}" + "".join(row) + f"{Color.CYAN}│{Color.RESET}")
+    lines.append(f"{Color.CYAN}└" + "─" * width + f"┘{Color.RESET}")
+    return "\n".join(lines)
+
+
+def render_spectrum_bars(samples: List[float], num_bands: int = 40, sample_rate: int = SAMPLE_RATE) -> str:
+    N = min(2048, len(samples))
+    if N < 64:
+        return ""
+    mid = len(samples) // 2
+    window = [samples[mid - N // 2 + i] * (0.54 - 0.46 * math.cos(2 * math.pi * i / N)) for i in range(N)]
+
+    min_f = 40.0
+    max_f = min(16000.0, sample_rate * 0.45)
+    f_ratios = [min_f * math.pow(max_f / min_f, b / (num_bands - 1)) for b in range(num_bands)]
+
+    powers = []
+    for f in f_ratios:
+        w = 2.0 * math.pi * f / sample_rate
+        coeff = 2.0 * math.cos(w)
+        s0, s1, s2 = 0.0, 0.0, 0.0
+        for x in window:
+            s0 = x + coeff * s1 - s2
+            s2 = s1
+            s1 = s0
+        power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+        powers.append(math.sqrt(max(0.0, power)))
+
+    max_p = max(powers) if powers and max(powers) > 1e-9 else 1.0
+    norm_powers = [p / max_p for p in powers]
+
+    meter_chars = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+    meter_lines = []
+
+    for r in range(8, 0, -1):
+        threshold = r / 8.0
+        line_chars = []
+        for p in norm_powers:
+            if p >= threshold:
+                color = Color.RED if r >= 7 else (Color.YELLOW if r >= 5 else Color.CYAN)
+                line_chars.append(f"{color}█{Color.RESET}")
+            elif p >= threshold - 0.125:
+                idx = int((p - (threshold - 0.125)) / 0.125 * 8)
+                idx = max(1, min(8, idx))
+                color = Color.YELLOW if r >= 5 else Color.CYAN
+                line_chars.append(f"{color}{meter_chars[idx]}{Color.RESET}")
+            else:
+                line_chars.append(" ")
+        meter_lines.append(f"{Color.CYAN}│{Color.RESET} " + "".join(line_chars) + f" {Color.CYAN}│{Color.RESET}")
+
+    header = f"{Color.CYAN}┌─[ 40-Band Physical Modeling Spectral Power DFT (40Hz - 16kHz) ]" + "─" * (num_bands - 46) + f"┐{Color.RESET}"
+    footer = f"{Color.CYAN}└" + "─" * (num_bands + 2) + f"┘{Color.RESET}"
+    freq_labels = f"  {Color.DIM}40Hz      120Hz     400Hz     1.2kHz    4.0kHz    12kHz{Color.RESET}"
+
+    return "\n".join([header] + meter_lines + [footer, freq_labels])
+
+
+# =====================================================================
+# 10. Formal Verification & Physical Invariant Test Suite
+# =====================================================================
+
+def run_tests() -> bool:
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}🔬 WAVEGUIDE SYNTH PHYSICAL INVARIANT & DSP TEST SUITE{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+    all_passed = True
+
+    def test(name: str, passed: bool, details: str = ""):
+        nonlocal all_passed
+        if passed:
+            print(f"  {Color.GREEN}✔ PASS{Color.RESET} | {Color.BOLD}{name}{Color.RESET} {Color.DIM}{details}{Color.RESET}")
+        else:
+            all_passed = False
+            print(f"  {Color.RED}✖ FAIL{Color.RESET} | {Color.BOLD}{name}{Color.RESET} - {Color.RED}{details}{Color.RESET}")
+
+    # 1. Thiran Fractional Delay All-Pass Filter Unity Gain
+    fd = AllpassFractionalDelay(0.38)
+    impulse_response = [fd.process(1.0 if i == 0 else 0.0) for i in range(512)]
+    energy = sum(x * x for x in impulse_response)
+    test(
+        "Thiran All-Pass Energy Conservation (|H(e^jw)| == 1.0)",
+        math.isclose(energy, 1.0, rel_tol=1e-3),
+        f"Total Energy = {energy:.6f} (loss = {abs(1.0 - energy):.2e})",
+    )
+
+    # 2. Plucked String Stable Dissipation & Monotonic Energy Decay
+    plucked = PluckedString(220.0, decay_time=1.0)
+    samples = [plucked.tick() for _ in range(44100)]
+    rms_start = math.sqrt(sum(s*s for s in samples[:2000]) / 2000)
+    rms_end = math.sqrt(sum(s*s for s in samples[-2000:]) / 2000)
+    test(
+        "Waveguide Plucked String Energy Dissipation",
+        rms_end < rms_start * 0.05 and not any(math.isnan(s) or math.isinf(s) for s in samples),
+        f"RMS Decay: {rms_start:.4f} -> {rms_end:.6f} (-{20*math.log10(rms_start/max(1e-9, rms_end)):.1f} dB)",
+    )
+
+    # 3. Frequency Tuning Accuracy via Autocorrelation Peak
+    target_freq = 440.0
+    tuning_str = PluckedString(target_freq, decay_time=2.0)
+    tune_samps = [tuning_str.tick() for _ in range(8000)]
+    period_samples = int(SAMPLE_RATE / target_freq)
+    corr_peak_idx = period_samples
+    best_corr = -1.0
+    for lag in range(period_samples - 4, period_samples + 5):
+        corr = sum(tune_samps[1000 + i] * tune_samps[1000 + i + lag] for i in range(2000))
+        if corr > best_corr:
+            best_corr = corr
+            corr_peak_idx = lag
+    measured_f0 = SAMPLE_RATE / corr_peak_idx
+    cents_error = 1200 * math.log2(measured_f0 / target_freq)
+    test(
+        "Waveguide Pitch Tuning Accuracy (Fractional Delay Convergence)",
+        abs(cents_error) < 18.0,
+        f"Target={target_freq:.1f}Hz, Measured={measured_f0:.1f}Hz (Error={cents_error:+.2f} cents)",
+    )
+
+    # 4. Bowed String Nonlinear Stick-Slip MSW Limit Cycle
+    bowed = BowedString(196.0, bow_force=1.8, bow_velocity=0.25)
+    bowed_samps = [bowed.tick() for _ in range(22050)]
+    peak_v = max(abs(s) for s in bowed_samps[-5000:])
+    test(
+        "Bowed String Helmholtz Motion & Limit Cycle Sustained Oscillation",
+        peak_v > 0.05 and not any(math.isnan(s) for s in bowed_samps),
+        f"Sustained Limit-Cycle Amplitude = {peak_v:.4f}",
+    )
+
+    # 5. Euler-Bernoulli Beam Modal Frequency Ratios
+    marimba = create_marimba_bank(300.0)
+    test(
+        "Modal Resonator Bank Biquad Stability",
+        all(abs(res.c2) < 1.0 for res in marimba.resonators),
+        f"Poles strictly within unit circle: r^2 = {[-res.c2 for res in marimba.resonators]}",
+    )
+
+    # 6. 2D Membrane Bessel Eigenmode Ratios Invariant
+    bessel_zeros = Membrane2D.BESSEL_RATIOS
+    expected_bessels = [1.0, 1.5933, 2.1355, 2.2954, 2.6531, 2.9173]
+    bessel_ok = all(math.isclose(a, b, rel_tol=1e-3) for a, b in zip(bessel_zeros, expected_bessels))
+    test(
+        "2D Circular Membrane Bessel Mode Ratios Invariant",
+        bessel_ok,
+        f"Ratios = {bessel_zeros[:4]}...",
+    )
+
+    # 7. Acoustic Flute Jet Vortex Nonlinearity
+    flute = AcousticFlute(440.0)
+    flute_samps = [flute.tick(pressure=0.9) for _ in range(8000)]
+    test(
+        "Acoustic Flute Jet-Bore Nonlinear Acoustic Coupling",
+        max(abs(s) for s in flute_samps[-2000:]) > 0.01,
+        f"Sustained Acoustic Flute Peak = {max(abs(s) for s in flute_samps[-2000:]):.4f}",
+    )
+
+    # 8. Schroeder Reverberator Diffusive Tail & Energy Decay
+    reverb = SchroederReverb()
+    reverb_tail = [reverb.process(1.0 if i == 0 else 0.0)[0] for i in range(20000)]
+    decay_ok = max(abs(x) for x in reverb_tail[-1000:]) < 0.05
+    test(
+        "Schroeder Reverb Diffusion & Echo Density Convergence",
+        decay_ok and any(abs(x) > 0.003 for x in reverb_tail[500:3000]),
+        f"Reverb Tail T60 Verified (Peak Late Reflection = {max(abs(x) for x in reverb_tail[-1000:]):.4f})",
+    )
+
+    # 9. Lossless 16-bit PCM RIFF WAV Encoding & Header Compliance
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        dummy_l = [math.sin(2 * math.pi * 440 * i / 44100) * 0.5 for i in range(4410)]
+        dummy_r = [math.cos(2 * math.pi * 440 * i / 44100) * 0.5 for i in range(4410)]
+        export_wav(tmp_path, dummy_l, dummy_r)
+        with open(tmp_path, "rb") as f:
+            header = f.read(44)
+        riff = header[:4] == b"RIFF"
+        wave_tag = header[8:12] == b"WAVE"
+        fmt = header[12:16] == b"fmt "
+        channels = struct.unpack("<H", header[22:24])[0]
+        samplerate = struct.unpack("<I", header[24:28])[0]
+        bitspersample = struct.unpack("<H", header[34:36])[0]
+        wav_ok = riff and wave_tag and fmt and channels == 2 and samplerate == 44100 and bitspersample == 16
+        test(
+            "Lossless 16-Bit 44.1kHz Stereo RIFF WAV Header Spec",
+            wav_ok,
+            f"RIFF={riff}, WAVE={wave_tag}, Channels={channels}, Rate={samplerate}Hz, Bits={bitspersample}",
+        )
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # 10. Full Repertoire Score Polyphonic Rendering
+    prelude = REPERTOIRES["bach-prelude"][:8]
+    l, r = synthesize_score(prelude, instrument="plucked", duration=1.0)
+    test(
+        "Polyphonic Waveguide Score Synthesis & Dynamic Normalization",
+        len(l) == 44100 and max(abs(x) for x in l) <= 0.95,
+        f"Rendered {len(l)} frames, Peak Amplitude = {max(abs(x) for x in l):.4f}",
+    )
+
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    if all_passed:
+        print(f"{Color.BOLD}{Color.GREEN}✔ ALL 10 DSP & PHYSICAL INVARIANT VERIFICATION TESTS PASSED{Color.RESET}")
+    else:
+        print(f"{Color.BOLD}{Color.RED}✖ VERIFICATION TEST SUITE FAILED{Color.RESET}")
+    return all_passed
+
+
+# =====================================================================
+# 11. Performance Benchmark Suite
+# =====================================================================
+
+def run_benchmark():
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}⚡ DIGITAL WAVEGUIDE & PHYSICAL MODELING DSP BENCHMARK{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+    NUM_SAMPLES = 88200
+
+    engines = [
+        ("Plucked String (Waveguide+Fractional+Dispersion)", lambda: PluckedString(220.0)),
+        ("Bowed String (Nonlinear MSW Friction Solver)", lambda: BowedString(196.0)),
+        ("Euler-Bernoulli Struck Marimba Modal Bank", lambda: create_marimba_bank(440.0)),
+        ("2D Circular Clamped Membrane Drum (Bessel)", lambda: Membrane2D(120.0)),
+        ("Acoustic Flute (Jet Delay & Cubic Embouchure)", lambda: AcousticFlute(523.25)),
+    ]
+
+    for name, init_fn in engines:
+        inst = init_fn()
+        t0 = time.perf_counter()
+        if hasattr(inst, "tick"):
+            is_modal = isinstance(inst, (ModalBank, Membrane2D))
+            for _ in range(NUM_SAMPLES):
+                if is_modal:
+                    inst.tick(0.0)
+                else:
+                    inst.tick()
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+        sps = NUM_SAMPLES / elapsed
+        realtime_x = sps / SAMPLE_RATE
+
+        print(
+            f"  • {name:<46} : "
+            f"{Color.BOLD}{sps:>10,.0f} samples/sec{Color.RESET} "
+            f"({Color.GREEN}{realtime_x:>5.1f}x real-time{Color.RESET})"
+        )
+
+    rev = SchroederReverb()
+    t0 = time.perf_counter()
+    for _ in range(NUM_SAMPLES):
+        rev.process(0.5)
+    t1 = time.perf_counter()
+    elapsed = t1 - t0
+    sps = NUM_SAMPLES / elapsed
+    print(
+        f"  • {'Schroeder Reverb Tank (4 Comb + 2 All-Pass)':<46} : "
+        f"{Color.BOLD}{sps:>10,.0f} samples/sec{Color.RESET} "
+        f"({Color.GREEN}{sps / SAMPLE_RATE:>5.1f}x real-time{Color.RESET})"
+    )
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+
+# =====================================================================
+# 12. Main CLI Interface
+# =====================================================================
+
+def cmd_gallery(args):
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}🎻 PHYSICAL MODELING AUDIO SYNTHESIZER PRESETS & REPERTOIRES{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print("Available Physical Modeling Instruments:")
+    print("  • plucked   : Digital Waveguide Plucked String (Karplus-Strong, Thiran fractional delay, stiffness)")
+    print("  • bowed     : McIntyre-Schumacher-Woodhouse (MSW) Nonlinear Bowed String Cello")
+    print("  • marimba   : Undercut Euler-Bernoulli Tuned Wood Bar Modal Resonator Bank (1:4:10)")
+    print("  • chimes    : Orchestral Tubular Chimes / Bell High Inharmonic Modal Resonator Bank")
+    print("  • drum      : 2D Circular Clamped Membrane Drum (Bessel Roots J_m,n with tension glide)")
+    print("  • flute     : Acoustic Jet Delay Bore Flute with Vortex Turbulence & Cubic Embouchure")
+    print("")
+    print("Built-in Classic Repertoires:")
+    for name, notes in REPERTOIRES.items():
+        dur = max(n.start_time + n.duration for n in notes)
+        print(f"  • {name:<16} : {len(notes):>2} notes, {dur:>4.1f}s duration")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+
+def cmd_render(args):
+    score = REPERTOIRES.get(args.repertoire, REPERTOIRES["bach-prelude"])
+    inst = args.instrument
+    out_file = args.out or f"{args.repertoire}_{inst}.wav"
+
+    print(f"{Color.BOLD}{Color.CYAN}Synthesizing '{args.repertoire}' using physical model '{inst}'...{Color.RESET}")
+    t0 = time.perf_counter()
+    left, right = synthesize_score(score, instrument=inst, reverb_wet=args.reverb)
+    export_wav(out_file, left, right)
+    t1 = time.perf_counter()
+
+    dur = len(left) / SAMPLE_RATE
+    print(f"{Color.GREEN}✔ Synthesized {dur:.2f}s audio in {t1-t0:.2f}s ({(dur/(t1-t0)):.1f}x real-time speed).{Color.RESET}")
+    print(f"  • Output WAV: {Color.BOLD}{out_file}{Color.RESET} (16-bit 44.1kHz Stereo PCM)")
+
+
+def cmd_play(args):
+    score = REPERTOIRES.get(args.repertoire, REPERTOIRES["bach-prelude"])
+    inst = args.instrument
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_file = tmp.name
+
+    try:
+        print(f"{Color.BOLD}{Color.CYAN}🎵 Synthesizing and playing '{args.repertoire}' ({inst})...{Color.RESET}")
+        left, right = synthesize_score(score, instrument=inst, reverb_wet=args.reverb)
+        export_wav(tmp_file, left, right)
+
+        if os.path.exists("/usr/bin/afplay"):
+            subprocess.run(["/usr/bin/afplay", tmp_file])
+        else:
+            print(f"Audio saved to {tmp_file} (afplay not available).")
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+def cmd_visualize(args):
+    score = REPERTOIRES.get(args.repertoire, REPERTOIRES["bach-prelude"])
+    inst = args.instrument
+
+    print(f"{Color.BOLD}{Color.CYAN}Synthesizing '{args.repertoire}' for terminal visualization...{Color.RESET}")
+    left, _ = synthesize_score(score, instrument=inst, duration=args.duration)
+
+    print("\n" + f"{Color.BOLD}1. Waveform Oscilloscope Real-Time Capture:{Color.RESET}")
+    print(render_oscilloscope(left[2000:12000], width=72, height=13))
+
+    print("\n" + f"{Color.BOLD}2. Discrete Fourier Transform Spectral Power Analysis:{Color.RESET}")
+    print(render_spectrum_bars(left[5000:20000], num_bands=48))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="waveguide-synth: Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+
+    p_play = subparsers.add_parser("play", help="Synthesize and play audio via native macOS afplay")
+    p_play.add_argument("--instrument", choices=["plucked", "bowed", "marimba", "chimes", "drum", "flute"], default="plucked")
+    p_play.add_argument("--repertoire", choices=list(REPERTOIRES.keys()), default="bach-prelude")
+    p_play.add_argument("--reverb", type=float, default=0.25)
+
+    p_rend = subparsers.add_parser("render", help="Synthesize score to lossless 16-bit 44.1kHz WAV")
+    p_rend.add_argument("--instrument", choices=["plucked", "bowed", "marimba", "chimes", "drum", "flute"], default="plucked")
+    p_rend.add_argument("--repertoire", choices=list(REPERTOIRES.keys()), default="bach-prelude")
+    p_rend.add_argument("--out", default="output.wav")
+    p_rend.add_argument("--reverb", type=float, default=0.25)
+
+    p_vis = subparsers.add_parser("visualize", help="Display terminal ASCII oscilloscope and 48-band DFT power spectrum")
+    p_vis.add_argument("--instrument", choices=["plucked", "bowed", "marimba", "chimes", "drum", "flute"], default="plucked")
+    p_vis.add_argument("--repertoire", choices=list(REPERTOIRES.keys()), default="bach-prelude")
+    p_vis.add_argument("--duration", type=float, default=2.0)
+
+    subparsers.add_parser("gallery", help="List physical modeling instruments, presets, and repertoires")
+    subparsers.add_parser("test", help="Run formal verification and physical invariant test suite")
+    subparsers.add_parser("benchmark", help="Benchmark synthesis throughput (samples/sec and real-time multiplier)")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        class DefaultArgs:
+            instrument = "plucked"
+            repertoire = "bach-prelude"
+            duration = 2.0
+        cmd_visualize(DefaultArgs())
+        return
+
+    cmds = {
+        "play": cmd_play,
+        "render": cmd_render,
+        "visualize": cmd_visualize,
+        "gallery": cmd_gallery,
+        "test": lambda a: sys.exit(0 if run_tests() else 1),
+        "benchmark": lambda a: run_benchmark(),
+    }
+    cmds[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

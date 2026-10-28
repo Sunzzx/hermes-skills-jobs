@@ -74,6 +74,18 @@ PREEXISTING_SKILLS = [
         "source_skill_path": HERMES_DIR / "skills" / "data-science" / "kaggle-autopilot" / "SKILL.md",
         "source_bin_path": BIN_DIR / "kaggle-autopilot",
     },
+    {
+        "id": "waveguide-synth",
+        "category": "creative",
+        "name": "waveguide-synth",
+        "title": "Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine",
+        "type": "skill+tool",
+        "description": "Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, McIntyre-Schumacher-Woodhouse (MSW) nonlinear stick-slip friction solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python.",
+        "tags": ["AudioDSP", "PhysicalModeling", "DigitalWaveguides", "Acoustics", "GenerativeAesthetics", "KarplusStrong"],
+        "cli_name": "waveguide-synth",
+        "source_skill_path": HERMES_DIR / "skills" / "creative" / "waveguide-synth" / "SKILL.md",
+        "source_bin_path": BIN_DIR / "waveguide-synth",
+    },
 ]
 
 # Continuous curriculum of new capabilities to build & evolve hourly

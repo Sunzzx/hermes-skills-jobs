@@ -122,3 +122,9 @@
 - **Title**: Workflow Accelerator Suite #21
 - **Category**: productivity
 - **Description**: Automated filesystem indexing & context cache accelerator for Hermes cycle #21.
+
+### [2026-10-28 20:12:00] - Evolved `waveguide-synth`
+- **Title**: Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine
+- **Category**: creative
+- **Description**: Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, McIntyre-Schumacher-Woodhouse (MSW) nonlinear stick-slip friction solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python.
+- **CLI**: `waveguide-synth` (`visualize`, `play`, `render`, `gallery`, `test`, `benchmark`)
