@@ -236,6 +236,15 @@ def run_pipeline():
     print(f"✓ Pipeline updated: {PIPELINE_FILE}")
     print("==================================================")
 
+    # Deliver summary to WhatsApp
+    try:
+        from notifier import notify_job_summary
+        jobs_summary = "\n".join([f"• *{j['position']}* at {j['company']}\n  Link: {j['url']}" for j in target_jobs])
+        msg = f"Processed {len(target_jobs)} new contract applications and engineered full assessment solutions:\n\n{jobs_summary}\n\nSolutions ready in ~/.hermes/assessments/"
+        notify_job_summary("auto-application-pipeline-25m", msg)
+    except Exception as e:
+        print(f"WhatsApp notification note: {e}")
+
 
 def main():
     run_pipeline()

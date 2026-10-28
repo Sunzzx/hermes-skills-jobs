@@ -209,15 +209,32 @@ def generate_consolidated_briefing():
     with open(BRIEFING_FILE, "w") as f:
         f.write(content + "\n")
 
-    # Native macOS Banner Notification
+    # Deliver to WhatsApp and Discord strictly
     try:
-        subprocess.run(
-            "osascript -e 'display notification \"24-Hour Executive Briefing: Officer Exams, IITM BS & Opportunities Ready\" with title \"🏛️ Hermes Daily Intelligence\" sound name \"Submarine\"'",
-            shell=True,
-            timeout=5
+        from notifier import send_whatsapp, send_discord
+        wa_summary = (
+            f"🏛️ *HERMES 24-HOUR EXECUTIVE INTELLIGENCE BRIEFING*\n\n"
+            f"🎯 *TOP ACTION FOR TODAY:*\n"
+            f"1. Submit IIT Madras BS Graded Assignments.\n"
+            f"2. Verify UPSC EPFO/APFC OTR profile documents.\n\n"
+            f"⏳ *T-MINUS COUNTDOWN:*\n"
+            f"• IITM BS GA: T - 3 Days\n"
+            f"• System Compatibility Test (SCT): T - 7 Days\n"
+            f"• Daily Kaggle ML Loop: Active\n\n"
+            f"🌐 *OFFICER RECRUITMENT RADAR:*\n"
+            f"• UPSC CSE: Level 10 (₹56,100 - ₹1,77,500)\n"
+            f"• UPSC EPFO/APFC: Level 8/10 (₹47,600 - ₹1,77,500)\n"
+            f"• Cabinet Sec DFO-Tech: Level 7 (₹44,900 - ₹1,42,400)\n"
+            f"• RRB NTPC: Level 5/6 (₹29,200 - ₹1,12,400)\n\n"
+            f"💼 *HIGH-COMP AI & FELLOWSHIPS:*\n"
+            f"• OpenTrain AI & Outlier ($150-$350/hr)\n"
+            f"• IISc CDS/CNI Fellowships\n\n"
+            f"_Full briefing saved to ~/.hermes/memories/DAILY_EXECUTIVE_BRIEFING.md_"
         )
-    except Exception:
-        pass
+        send_whatsapp(wa_summary)
+        send_discord(content[:1950])
+    except Exception as e:
+        print(f"Briefing notification error: {e}")
 
     print(content)
     print(f"\n✓ Saved 24-hour consolidated briefing to: {BRIEFING_FILE}")

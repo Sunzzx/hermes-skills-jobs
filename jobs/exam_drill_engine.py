@@ -126,21 +126,19 @@ def dispatch_next_drill():
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 1. Trigger macOS native banner notification
-    exam_tag = drill["exam"].split("(")[0].strip()
-    topic_tag = drill["topic"]
-    notif_title = f"🏛️ [{exam_tag}] {topic_tag}"
-    notif_msg = drill["fact"][:120] + "..."
-    # Escape single quotes for osascript
-    safe_title = notif_title.replace("'", "").replace('"', "")
-    safe_msg = notif_msg.replace("'", "").replace('"', "")
+    # 1. Deliver to WhatsApp and Discord strictly (No desktop banners)
     try:
-        subprocess.run(
-            f"osascript -e 'display notification \"{safe_msg}\" with title \"{safe_title}\" sound name \"Glass\"'",
-            shell=True,
-            timeout=5
+        from notifier import notify_exam_drill
+        notify_exam_drill(
+            exam=drill["exam"],
+            topic=drill["topic"],
+            fact=drill["fact"],
+            question=drill["question"],
+            answer=drill["answer"],
+            explanation=drill["explanation"]
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Notification error: {e}")
 
     # 2. Append to living EXAM_FEED.md
     feed_entry = f"""

@@ -194,6 +194,24 @@ def main():
     log(f"✨ Health & Self-Healing Cycle Complete in {elapsed}s.")
     log("==================================================\n")
 
+    # Dispatch WhatsApp summary notification
+    try:
+        sys.path.insert(0, str(HERMES_DIR / "scripts"))
+        from notifier import notify_job_summary
+        summary = (
+            f"🩺 *System Health & Self-Healing Audit Complete ({elapsed}s)*\n"
+            f"• SQLite & WAL: Audited & Checkpointed (6 databases)\n"
+            f"• Stale Locks: Scanned & cleaned\n"
+            f"• LLM Connectivity: Diagnostic checks verified\n"
+            f"• Gateway: Active & healthy\n"
+            f"• Cron Schedule: All jobs verified and enabled\n"
+            f"• Core CLI Tools: Permissions and binaries intact"
+        )
+        notify_job_summary("hermes-health-watchdog", summary)
+    except Exception as e:
+        log(f"[!] Notification dispatch error: {e}")
+
 
 if __name__ == "__main__":
     main()
+

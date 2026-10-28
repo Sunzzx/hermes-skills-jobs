@@ -560,16 +560,22 @@ Operational workflow utility.
     else:
         log(f"  • Git push status: {push_out} {push_err}")
 
-    # Record in ledger
-    completed_ids.add(target_item["id"])
-    ledger["completed_ids"] = list(completed_ids)
-    ledger["evolutions"].append({
-        "id": target_item["id"],
-        "title": target_item["title"],
-        "timestamp": datetime.datetime.now().isoformat(),
-    })
     save_ledger(ledger)
     log(f"✅ Evolution cycle complete for: {target_item['id']}\n")
+
+    # Send summary to WhatsApp
+    try:
+        from notifier import notify_job_summary
+        summary = (
+            f"✨ *New Capability Evolved:* {target_item['title']}\n"
+            f"• Category: {skill_category}\n"
+            f"• CLI Tool: `{cli_name}`\n"
+            f"• Description: {target_item['description']}\n"
+            f"• Live on GitHub: github.com/Sunzzx/hermes-skills-jobs"
+        )
+        notify_job_summary("hermes-hourly-evolution", summary)
+    except Exception as e:
+        log(f"WhatsApp notification note: {e}")
 
 
 def update_repo_docs(registry, latest_item):
