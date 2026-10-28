@@ -512,20 +512,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v22",
-    "title": "Workflow Accelerator Suite #22",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #22.",
-    "cli": "accelerate-22",
-    "evolved_at": "2026-10-28T21:16:37.971385",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "sparse-autoencoders",
     "title": "Sparse Autoencoders & Mechanistic Interpretability Engine",
     "category": "research",
@@ -541,6 +527,20 @@
       "Superposition",
       "FeatureSteering",
       "NeuralActivations"
+    ]
+  },
+  {
+    "id": "workflow-accelerator-v22",
+    "title": "Workflow Accelerator Suite #22",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #22.",
+    "cli": "accelerate-22",
+    "evolved_at": "2026-10-28T22:40:38.059387",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
     ]
   }
 ]

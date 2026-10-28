@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-34-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-35-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (34 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (35 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -45,6 +45,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine** | `computational-science` | `nbody-sim` | Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer. | `ComputationalPhysics` `Astrophysics` `BarnesHut` |
 | **Workflow Accelerator Suite #21** | `productivity` | `accelerate-21` | Automated filesystem indexing & context cache accelerator for Hermes cycle #21. | `Automation` `Productivity` `Evolution` |
 | **Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine** | `creative` | `waveguide-synth` | Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, McIntyre-Schumacher-Woodhouse (MSW) nonlinear stick-slip friction solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python. | `AudioDSP` `PhysicalModeling` `DigitalWaveguides` |
+| **Sparse Autoencoders & Mechanistic Interpretability Engine** | `research` | `sae-lens` | Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation. | `FrontierAI` `MechanisticInterpretability` `SparseAutoencoders` |
 | **Workflow Accelerator Suite #22** | `productivity` | `accelerate-22` | Automated filesystem indexing & context cache accelerator for Hermes cycle #22. | `Automation` `Productivity` `Evolution` |
 
 ---
@@ -76,4 +77,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 21:16:37*
+*Last Evolved: 2026-10-28 22:40:38*
