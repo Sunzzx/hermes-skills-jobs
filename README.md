@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-14-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-15-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (14 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (15 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -26,6 +26,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #9** | `productivity` | `accelerate-9` | Automated filesystem indexing & context cache accelerator for Hermes cycle #9. | `Automation` `Productivity` `Evolution` |
 | **Distributed Raft Consensus Engine & Split-Brain Chaos Simulator** | `systems` | `raft-consensus` | Production-grade Raft consensus engine: leader election, log replication, commit safety invariants, split-brain chaos testing, and linearizable KV store. | `DistributedSystems` `Raft` `Consensus` |
 | **Workflow Accelerator Suite #11** | `productivity` | `accelerate-11` | Automated filesystem indexing & context cache accelerator for Hermes cycle #11. | `Automation` `Productivity` `Evolution` |
+| **Workflow Accelerator Suite #12** | `productivity` | `accelerate-12` | Automated filesystem indexing & context cache accelerator for Hermes cycle #12. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -56,4 +57,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 05:07:15*
+*Last Evolved: 2026-10-28 08:10:42*
