@@ -332,5 +332,21 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "contract-hunter",
+    "title": "Autonomous Contract & Remote Job Hunter",
+    "category": "finance",
+    "type": "job+tool",
+    "description": "Scans live remote tech contracts (Python, AI/ML, Distributed Systems), filters top matches, and compiles tailored proposals citing verified GitHub proof-of-work.",
+    "cli": "contract-hunter",
+    "evolved_at": "2026-10-28T12:54:15.683081",
+    "tags": [
+      "Finance",
+      "Contracts",
+      "Jobs",
+      "RemoteWork",
+      "Proposals"
+    ]
   }
 ]
