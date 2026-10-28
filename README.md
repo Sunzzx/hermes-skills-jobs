@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-22-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-28-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (22 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (28 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -34,6 +34,12 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #16** | `productivity` | `accelerate-16` | Automated filesystem indexing & context cache accelerator for Hermes cycle #16. | `Automation` `Productivity` `Evolution` |
 | **Autonomous Cash Bounty Hunter & Revenue Engine** | `finance` | `bounty-hunter` | Scouts and executes high-yield cash bounties on Algora, Polar, and Kaggle. Embeds automated Stripe monetization into projects. | `Finance` `Bounties` `Stripe` |
 | **Workflow Accelerator Suite #17** | `productivity` | `accelerate-17` | Automated filesystem indexing & context cache accelerator for Hermes cycle #17. | `Automation` `Productivity` `Evolution` |
+| **Autonomous Contract & Remote Job Hunter** | `finance` | `contract-hunter` | Scans live remote tech contracts (Python, AI/ML, Distributed Systems), filters top matches, and compiles tailored proposals citing verified GitHub proof-of-work. | `Finance` `Contracts` `Jobs` |
+| **Autonomous 25-Min Application & Assessment Pipeline** | `finance` | `auto-apply` | Continuous 25-minute engine: scouts developer contracts, pre-engineers full assessment/take-home solutions, auto-creates missing skills on the fly, and packages instant submissions. | `Finance` `Jobs` `Assessments` |
+| **10-Minute Officer Exam Drill Engine (UPSC & CAT Focus)** | `education` | `exam-drill` | Continuous 10-minute micro-learning engine: delivers high-yield facts, prelims/CAT/GATE questions, answers, and deep explanations across Indian Polity, History, Economy, QA, and DILR. | `Education` `UPSC` `CAT` |
+| **24-Hour Executive Intelligence & Academic Surveillance Briefing** | `education` | `daily-briefing` | Daily 4-section executive briefing: top actions, T-minus countdown (IITM BS milestones, exams), inbox/security watchdog, and universal opportunity radar (Government Officer recruitments, Quant, Remote AI roles). | `ExecutiveBriefing` `UPSC` `IITM-BS` |
+| **Test-Time Compute MCTS & Process Reward Model (PRM) Engine** | `research` | `test-time-mcts` | Frontier AI Test-Time Search implementation featuring Monte Carlo Tree Search with step-level Process Reward Models (PRMs), PUCT exploration, self-correcting backtracking, and ANSI tree visualization. | `Frontier-AI` `Test-Time-Compute` `MCTS` |
+| **Workflow Accelerator Suite #19** | `productivity` | `accelerate-19` | Automated filesystem indexing & context cache accelerator for Hermes cycle #19. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -64,4 +70,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 12:40:37*
+*Last Evolved: 2026-10-28 14:32:37*

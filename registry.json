@@ -415,5 +415,19 @@
       "Process-Supervision",
       "Reasoning"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v19",
+    "title": "Workflow Accelerator Suite #19",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #19.",
+    "cli": "accelerate-19",
+    "evolved_at": "2026-10-28T14:32:37.958327",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
