@@ -274,5 +274,19 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v15",
+    "title": "Workflow Accelerator Suite #15",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #15.",
+    "cli": "accelerate-15",
+    "evolved_at": "2026-10-28T10:36:45.153672",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
