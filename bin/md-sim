@@ -1014,22 +1014,25 @@ def run_tests() -> bool:
         f"||P_total|| = {mom_diff:.2e} (< 1e-10)",
     )
 
-    # 7. Berendsen Thermostat Temperature Relaxation
+    # 7. Berendsen Thermostat Canonical Relaxation
     t_target = 1.35
     nvt_atoms, nvt_box = create_fcc_lattice(n_cells=3, density=0.84, target_temp=0.6)
     nvt_ff = LennardJonesForceField(box=nvt_box, rc=2.5, use_cell_list=True)
-    nvt_thermo = Thermostat(mode="berendsen", target_temp=t_target, tau=0.2)
+    nvt_thermo = Thermostat(mode="berendsen", target_temp=t_target, tau=0.1)
     nvt_integrator = VelocityVerletIntegrator(box=nvt_box, force_field=nvt_ff, thermostat=nvt_thermo)
     nvt_ff.compute_forces(nvt_atoms)
     for a in nvt_atoms:
         a.acc = a.force / a.mass
 
-    for _ in range(200):
+    t_samples = []
+    for s in range(300):
         nvt_integrator.step(nvt_atoms, dt=0.005)
+        if s >= 200:
+            ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in nvt_atoms)
+            t_samples.append((2.0 * ke) / (3.0 * (len(nvt_atoms) - 1)))
 
-    ke_final = sum(0.5 * a.mass * a.vel.norm_sq() for a in nvt_atoms)
-    t_final = (2.0 * ke_final) / (3.0 * (len(nvt_atoms) - 1))
-    t_relax_ok = abs(t_final - t_target) / t_target < 0.08
+    t_final = sum(t_samples) / len(t_samples)
+    t_relax_ok = abs(t_final - t_target) / t_target < 0.06
     test(
         "Berendsen Thermostat Canonical Relaxation (T* = 0.6 -> 1.35)",
         t_relax_ok,
