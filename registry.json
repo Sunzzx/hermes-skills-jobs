@@ -542,5 +542,25 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "lockfree-concurrency",
+    "title": "Lock-Free Concurrency & Chase-Lev Work-Stealing Runtime",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Lock-free synchronization primitives, Michael-Scott queues, Treiber stacks, Disruptor ring buffers, Epoch-Based Reclamation (EBR), and Blumofe-Leiserson randomized work-stealing schedulers.",
+    "cli": "lockfree-rt",
+    "evolved_at": "2026-10-28T22:50:00.000000",
+    "tags": [
+      "HardcoreSystems",
+      "Concurrency",
+      "LockFree",
+      "WorkStealing",
+      "ChaseLev",
+      "MichaelScott",
+      "Disruptor",
+      "EpochBasedReclamation",
+      "Linearizability"
+    ]
   }
 ]
