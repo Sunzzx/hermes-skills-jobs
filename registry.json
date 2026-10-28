@@ -260,5 +260,19 @@
       "Computer-Graphics",
       "Truecolor-ANSI"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v14",
+    "title": "Workflow Accelerator Suite #14",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #14.",
+    "cli": "accelerate-14",
+    "evolved_at": "2026-10-28T10:34:38.110796",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
