@@ -446,5 +446,19 @@
       "GarbageCollection",
       "ComputerScience"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v20",
+    "title": "Workflow Accelerator Suite #20",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #20.",
+    "cli": "accelerate-20",
+    "evolved_at": "2026-10-28T16:11:37.999823",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
