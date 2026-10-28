@@ -364,5 +364,22 @@
       "Automation",
       "Contracts"
     ]
+  },
+  {
+    "id": "officer-exam-drills-10m",
+    "title": "10-Minute Officer Exam Drill Engine (UPSC & CAT Focus)",
+    "category": "education",
+    "type": "job+tool",
+    "description": "Continuous 10-minute micro-learning engine: delivers high-yield facts, prelims/CAT/GATE questions, answers, and deep explanations across Indian Polity, History, Economy, QA, and DILR.",
+    "cli": "exam-drill",
+    "evolved_at": "2026-10-28T13:05:44.692630",
+    "tags": [
+      "Education",
+      "UPSC",
+      "CAT",
+      "GATE-DA",
+      "IIT-JAM",
+      "IndianGovtExams"
+    ]
   }
 ]
