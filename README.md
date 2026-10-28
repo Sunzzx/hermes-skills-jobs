@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-35-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-37-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (35 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (37 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -47,6 +47,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine** | `creative` | `waveguide-synth` | Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, McIntyre-Schumacher-Woodhouse (MSW) nonlinear stick-slip friction solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python. | `AudioDSP` `PhysicalModeling` `DigitalWaveguides` |
 | **Sparse Autoencoders & Mechanistic Interpretability Engine** | `research` | `sae-lens` | Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation. | `FrontierAI` `MechanisticInterpretability` `SparseAutoencoders` |
 | **Workflow Accelerator Suite #22** | `productivity` | `accelerate-22` | Automated filesystem indexing & context cache accelerator for Hermes cycle #22. | `Automation` `Productivity` `Evolution` |
+| **Lock-Free Concurrency & Chase-Lev Work-Stealing Runtime** | `systems` | `lockfree-rt` | Lock-free synchronization primitives, Michael-Scott queues, Treiber stacks, Disruptor ring buffers, Epoch-Based Reclamation (EBR), and Blumofe-Leiserson randomized work-stealing schedulers. | `HardcoreSystems` `Concurrency` `LockFree` |
+| **Workflow Accelerator Suite #23** | `productivity` | `accelerate-23` | Automated filesystem indexing & context cache accelerator for Hermes cycle #23. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -77,4 +79,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 22:40:38*
+*Last Evolved: 2026-10-28 23:56:37*

@@ -562,5 +562,19 @@
       "EpochBasedReclamation",
       "Linearizability"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v23",
+    "title": "Workflow Accelerator Suite #23",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #23.",
+    "cli": "accelerate-23",
+    "evolved_at": "2026-10-28T23:56:37.946992",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
