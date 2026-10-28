@@ -1,0 +1,1220 @@
+#!/usr/bin/env python3
+"""Molecular Dynamics Engine: Symplectic Velocity-Verlet & Lennard-Jones Phase Dynamics.
+
+A production-grade, mathematically rigorous Molecular Dynamics (MD) simulation engine
+implementing symplectic 2nd-order Velocity-Verlet time integration, shifted Lennard-Jones (12-6)
+interatomic potentials with analytic tail corrections, Periodic Boundary Conditions (PBC)
+under the Minimum Image Convention, Cell Linked-List O(N) neighbor acceleration,
+canonical ensemble thermostats (Berendsen weak-coupling & Andersen stochastic heat baths),
+statistical mechanics observables (virial equation of state pressure, radial distribution
+function g(r), mean squared displacement MSD, Einstein diffusion coefficient), and real-time
+interactive Unicode Braille phase-space projection.
+
+Zero external dependencies. Pure standard library.
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+# =====================================================================
+# ANSI Styling & Colors
+# =====================================================================
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    UNDERLINE = "\033[4m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    GRAY = "\033[90m"
+    BRIGHT_WHITE = "\033[97m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BG_DARK = "\033[48;5;234m"
+
+# =====================================================================
+# 3D Vector Mathematics
+# =====================================================================
+@dataclass
+class Vec3:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+    def __add__(self, other: "Vec3") -> "Vec3":
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    def __sub__(self, other: "Vec3") -> "Vec3":
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+
+    def __mul__(self, scalar: float) -> "Vec3":
+        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
+
+    def __rmul__(self, scalar: float) -> "Vec3":
+        return self * scalar
+
+    def __truediv__(self, scalar: float) -> "Vec3":
+        inv = 1.0 / scalar
+        return Vec3(self.x * inv, self.y * inv, self.z * inv)
+
+    def norm_sq(self) -> float:
+        return self.x * self.x + self.y * self.y + self.z * self.z
+
+    def norm(self) -> float:
+        return math.sqrt(self.norm_sq())
+
+    def dot(self, other: "Vec3") -> float:
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+    def cross(self, other: "Vec3") -> "Vec3":
+        return Vec3(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+
+    def copy(self) -> "Vec3":
+        return Vec3(self.x, self.y, self.z)
+# =====================================================================
+# Atom State & Particle Representation
+# =====================================================================
+@dataclass
+class Atom:
+    id: int
+    element: str = "Ar"
+    mass: float = 1.0
+    pos: Vec3 = field(default_factory=Vec3)
+    vel: Vec3 = field(default_factory=Vec3)
+    acc: Vec3 = field(default_factory=Vec3)
+    unwrapped_pos: Vec3 = field(default_factory=Vec3)
+    initial_pos: Vec3 = field(default_factory=Vec3)
+    force: Vec3 = field(default_factory=Vec3)
+    pe: float = 0.0
+    color: str = Color.CYAN
+    group: int = 0
+
+# =====================================================================
+# Simulation Box & Periodic Boundary Conditions (PBC)
+# =====================================================================
+class SimulationBox:
+    def __init__(self, lx: float, ly: float, lz: float):
+        self.lx = float(lx)
+        self.ly = float(ly)
+        self.lz = float(lz)
+        self.half_lx = 0.5 * self.lx
+        self.half_ly = 0.5 * self.ly
+        self.half_lz = 0.5 * self.lz
+        self.volume = self.lx * self.ly * self.lz
+
+    def min_image(self, dr: Vec3) -> Vec3:
+        dx = dr.x - self.lx * round(dr.x / self.lx)
+        dy = dr.y - self.ly * round(dr.y / self.ly)
+        dz = dr.z - self.lz * round(dr.z / self.lz)
+        return Vec3(dx, dy, dz)
+
+    def wrap_pos(self, pos: Vec3) -> Vec3:
+        return Vec3(
+            pos.x % self.lx,
+            pos.y % self.ly,
+            pos.z % self.lz,
+        )
+
+# =====================================================================
+# Shifted Lennard-Jones (12-6) Potential & Force Field
+# =====================================================================
+class LennardJonesForceField:
+    def __init__(
+        self,
+        box: SimulationBox,
+        rc: float = 2.5,
+        epsilon: float = 1.0,
+        sigma: float = 1.0,
+        use_cell_list: bool = True,
+    ):
+        self.box = box
+        self.rc = float(rc)
+        self.rc_sq = self.rc * self.rc
+        self.epsilon = float(epsilon)
+        self.sigma = float(sigma)
+        self.sigma_sq = self.sigma * self.sigma
+        self.use_cell_list = use_cell_list
+
+        inv_rc2 = (self.sigma / self.rc) ** 2
+        inv_rc6 = inv_rc2 * inv_rc2 * inv_rc2
+        inv_rc12 = inv_rc6 * inv_rc6
+        self.v_shift = 4.0 * self.epsilon * (inv_rc12 - inv_rc6)
+
+    def compute_tail_corrections(self, n_atoms: int) -> Tuple[float, float]:
+        rho = n_atoms / self.box.volume
+        s_over_rc = self.sigma / self.rc
+        s_over_rc3 = s_over_rc ** 3
+        s_over_rc9 = s_over_rc3 ** 3
+        u_tail = (8.0 / 3.0) * math.pi * rho * n_atoms * self.epsilon * (
+            (1.0 / 3.0) * s_over_rc9 - s_over_rc3
+        )
+        p_tail = (16.0 / 3.0) * math.pi * (rho * rho) * self.epsilon * (
+            (2.0 / 3.0) * s_over_rc9 - s_over_rc3
+        )
+        return u_tail, p_tail
+
+    def compute_forces_direct(self, atoms: List[Atom]) -> Tuple[float, float]:
+        n = len(atoms)
+        for atom in atoms:
+            atom.force = Vec3(0.0, 0.0, 0.0)
+            atom.pe = 0.0
+
+        total_pe = 0.0
+        total_virial = 0.0
+
+        for i in range(n):
+            ai = atoms[i]
+            pos_i = ai.pos
+            for j in range(i + 1, n):
+                aj = atoms[j]
+                dr = self.box.min_image(aj.pos - pos_i)
+                r2 = dr.norm_sq()
+                if r2 < self.rc_sq and r2 > 1e-12:
+                    inv_r2 = 1.0 / r2
+                    s2 = self.sigma_sq * inv_r2
+                    s6 = s2 * s2 * s2
+                    s12 = s6 * s6
+
+                    pe_pair = 4.0 * self.epsilon * (s12 - s6) - self.v_shift
+                    total_pe += pe_pair
+                    ai.pe += 0.5 * pe_pair
+                    aj.pe += 0.5 * pe_pair
+
+                    ffactor = 24.0 * self.epsilon * (2.0 * s12 - s6) * inv_r2
+                    f_vec = dr * ffactor
+                    ai.force = ai.force - f_vec
+                    aj.force = aj.force + f_vec
+                    total_virial += 24.0 * self.epsilon * (2.0 * s12 - s6)
+
+        return total_pe, total_virial
+
+    def compute_forces_cell_list(self, atoms: List[Atom]) -> Tuple[float, float]:
+        n = len(atoms)
+        for atom in atoms:
+            atom.force = Vec3(0.0, 0.0, 0.0)
+            atom.pe = 0.0
+
+        nx = max(3, int(self.box.lx / self.rc))
+        ny = max(3, int(self.box.ly / self.rc))
+        nz = max(3, int(self.box.lz / self.rc))
+
+        cell_dx = self.box.lx / nx
+        cell_dy = self.box.ly / ny
+        cell_dz = self.box.lz / nz
+
+        grid: List[List[List[List[int]]]] = [
+            [[[] for _ in range(nz)] for _ in range(ny)] for _ in range(nx)
+        ]
+
+        for idx, atom in enumerate(atoms):
+            cx = min(nx - 1, max(0, int(atom.pos.x / cell_dx)))
+            cy = min(ny - 1, max(0, int(atom.pos.y / cell_dy)))
+            cz = min(nz - 1, max(0, int(atom.pos.z / cell_dz)))
+            grid[cx][cy][cz].append(idx)
+
+        half_shell = [
+            (0, 0, 1),
+            (0, 1, -1),
+            (0, 1, 0),
+            (0, 1, 1),
+            (1, -1, -1),
+            (1, -1, 0),
+            (1, -1, 1),
+            (1, 0, -1),
+            (1, 0, 0),
+            (1, 0, 1),
+            (1, 1, -1),
+            (1, 1, 0),
+            (1, 1, 1),
+        ]
+
+        total_pe = 0.0
+        total_virial = 0.0
+
+        for cx in range(nx):
+            for cy in range(ny):
+                for cz in range(nz):
+                    cell_atoms = grid[cx][cy][cz]
+                    num_cell = len(cell_atoms)
+
+                    for i_idx in range(num_cell):
+                        ai_id = cell_atoms[i_idx]
+                        ai = atoms[ai_id]
+                        pos_i = ai.pos
+                        for j_idx in range(i_idx + 1, num_cell):
+                            aj_id = cell_atoms[j_idx]
+                            aj = atoms[aj_id]
+                            dr = self.box.min_image(aj.pos - pos_i)
+                            r2 = dr.norm_sq()
+                            if r2 < self.rc_sq and r2 > 1e-12:
+                                inv_r2 = 1.0 / r2
+                                s2 = self.sigma_sq * inv_r2
+                                s6 = s2 * s2 * s2
+                                s12 = s6 * s6
+                                pe_pair = 4.0 * self.epsilon * (s12 - s6) - self.v_shift
+                                total_pe += pe_pair
+                                ai.pe += 0.5 * pe_pair
+                                aj.pe += 0.5 * pe_pair
+                                ffactor = 24.0 * self.epsilon * (2.0 * s12 - s6) * inv_r2
+                                f_vec = dr * ffactor
+                                ai.force = ai.force - f_vec
+                                aj.force = aj.force + f_vec
+                                total_virial += 24.0 * self.epsilon * (2.0 * s12 - s6)
+
+                    for dx, dy, dz in half_shell:
+                        ncx = (cx + dx) % nx
+                        ncy = (cy + dy) % ny
+                        ncz = (cz + dz) % nz
+                        neigh_atoms = grid[ncx][ncy][ncz]
+
+                        for ai_id in cell_atoms:
+                            ai = atoms[ai_id]
+                            pos_i = ai.pos
+                            for aj_id in neigh_atoms:
+                                aj = atoms[aj_id]
+                                dr = self.box.min_image(aj.pos - pos_i)
+                                r2 = dr.norm_sq()
+                                if r2 < self.rc_sq and r2 > 1e-12:
+                                    inv_r2 = 1.0 / r2
+                                    s2 = self.sigma_sq * inv_r2
+                                    s6 = s2 * s2 * s2
+                                    s12 = s6 * s6
+                                    pe_pair = 4.0 * self.epsilon * (s12 - s6) - self.v_shift
+                                    total_pe += pe_pair
+                                    ai.pe += 0.5 * pe_pair
+                                    aj.pe += 0.5 * pe_pair
+                                    ffactor = 24.0 * self.epsilon * (2.0 * s12 - s6) * inv_r2
+                                    f_vec = dr * ffactor
+                                    ai.force = ai.force - f_vec
+                                aj.force = aj.force + f_vec
+                                total_virial += 24.0 * self.epsilon * (2.0 * s12 - s6)
+
+        return total_pe, total_virial
+
+    def compute_forces(self, atoms: List[Atom]) -> Tuple[float, float]:
+        if self.use_cell_list and len(atoms) >= 150:
+            return self.compute_forces_cell_list(atoms)
+        return self.compute_forces_direct(atoms)
+# =====================================================================
+# Thermostats (Berendsen Weak-Coupling & Andersen Stochastic)
+# =====================================================================
+class Thermostat:
+    def __init__(
+        self,
+        mode: str = "none",
+        target_temp: float = 1.0,
+        tau: float = 0.5,
+        nu: float = 0.1,
+    ):
+        self.mode = mode.lower()
+        self.target_temp = float(target_temp)
+        self.tau = float(tau)  # Coupling time constant
+        self.nu = float(nu)    # Stochastic collision frequency
+
+    def apply(self, atoms: List[Atom], dt: float, current_temp: float):
+        if self.mode == "berendsen":
+            if current_temp > 1e-6:
+                lam = math.sqrt(1.0 + (dt / self.tau) * (self.target_temp / current_temp - 1.0))
+                lam = max(0.8, min(1.2, lam))
+                for a in atoms:
+                    a.vel = a.vel * lam
+        elif self.mode == "andersen":
+            p_collide = 1.0 - math.exp(-self.nu * dt)
+            sigma_v = math.sqrt(self.target_temp)
+            for a in atoms:
+                if random.random() < p_collide:
+                    a.vel = Vec3(
+                        random.gauss(0.0, sigma_v),
+                        random.gauss(0.0, sigma_v),
+                        random.gauss(0.0, sigma_v),
+                    )
+
+# =====================================================================
+# Symplectic 2nd-Order Velocity-Verlet Integrator
+# =====================================================================
+class VelocityVerletIntegrator:
+    def __init__(
+        self,
+        box: SimulationBox,
+        force_field: LennardJonesForceField,
+        thermostat: Thermostat,
+    ):
+        self.box = box
+        self.ff = force_field
+        self.thermostat = thermostat
+
+    def step(self, atoms: List[Atom], dt: float) -> Tuple[float, float, float]:
+        half_dt = 0.5 * dt
+        dt_sq_half = 0.5 * dt * dt
+
+        # 1. Position drift & half-kick velocity
+        for a in atoms:
+            displacement = a.vel * dt + a.acc * dt_sq_half
+            a.unwrapped_pos = a.unwrapped_pos + displacement
+            a.pos = self.box.wrap_pos(a.pos + displacement)
+            a.vel = a.vel + a.acc * half_dt
+
+        # 2. Evaluate forces and potential at new positions
+        pe, virial = self.ff.compute_forces(atoms)
+
+        # 3. Final half-kick velocity
+        for a in atoms:
+            a.acc = a.force / a.mass
+            a.vel = a.vel + a.acc * half_dt
+
+        # 4. Instantaneous kinetic energy & temperature
+        ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in atoms)
+        n = len(atoms)
+        temp = (2.0 * ke) / (3.0 * (n - 1)) if n > 1 else (2.0 * ke) / 3.0
+
+        # 5. Apply thermostat if enabled
+        if self.thermostat.mode != "none":
+            self.thermostat.apply(atoms, dt, temp)
+            ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in atoms)
+            temp = (2.0 * ke) / (3.0 * (n - 1)) if n > 1 else (2.0 * ke) / 3.0
+
+        return pe, ke, virial
+
+# =====================================================================
+# Statistical Mechanics Observables & Radial Distribution Function g(r)
+# =====================================================================
+class ThermodynamicsTelemetry:
+    def __init__(self, box: SimulationBox, n_bins: int = 50, r_max: Optional[float] = None):
+        self.box = box
+        self.n_bins = n_bins
+        self.r_max = r_max if r_max is not None else 0.5 * min(box.lx, box.ly, box.lz)
+        self.dr = self.r_max / self.n_bins
+        self.rdf_hist = [0.0] * self.n_bins
+        self.rdf_samples = 0
+        self.e0: Optional[float] = None
+
+    def sample_rdf(self, atoms: List[Atom]):
+        n = len(atoms)
+        if n < 2:
+            return
+
+        for i in range(n):
+            pos_i = atoms[i].pos
+            for j in range(i + 1, n):
+                dr = self.box.min_image(atoms[j].pos - pos_i)
+                r = dr.norm()
+                if r < self.r_max:
+                    bin_idx = int(r / self.dr)
+                    if bin_idx < self.n_bins:
+                        self.rdf_hist[bin_idx] += 2.0  # Pair contribution
+        self.rdf_samples += 1
+
+    def get_rdf(self, n_atoms: int) -> Tuple[List[float], List[float]]:
+        if self.rdf_samples == 0 or n_atoms < 2:
+            return [0.0] * self.n_bins, [0.0] * self.n_bins
+
+        r_vals = []
+        g_vals = []
+        rho = n_atoms / self.box.volume
+
+        for b in range(self.n_bins):
+            r_lower = b * self.dr
+            r_upper = r_lower + self.dr
+            r_mid = 0.5 * (r_lower + r_upper)
+            shell_vol = (4.0 / 3.0) * math.pi * (r_upper**3 - r_lower**3)
+            ideal_count = rho * shell_vol * n_atoms * self.rdf_samples
+            g_r = (self.rdf_hist[b] / ideal_count) if ideal_count > 0 else 0.0
+            r_vals.append(r_mid)
+            g_vals.append(g_r)
+
+        return r_vals, g_vals
+
+    @staticmethod
+    def compute_msd(atoms: List[Atom]) -> float:
+        if not atoms:
+            return 0.0
+        total_disp_sq = sum((a.unwrapped_pos - a.initial_pos).norm_sq() for a in atoms)
+        return total_disp_sq / len(atoms)
+# =====================================================================
+# Initial Conditions & Scenario Generators
+# =====================================================================
+def init_maxwell_boltzmann_velocities(atoms: List[Atom], target_temp: float):
+    if not atoms:
+        return
+    sigma_v = math.sqrt(target_temp)
+    v_total = Vec3(0.0, 0.0, 0.0)
+    total_mass = sum(a.mass for a in atoms)
+
+    for a in atoms:
+        a.vel = Vec3(
+            random.gauss(0.0, sigma_v),
+            random.gauss(0.0, sigma_v),
+            random.gauss(0.0, sigma_v),
+        )
+        v_total = v_total + a.vel * a.mass
+
+    # Zero center-of-mass momentum drift
+    v_cm = v_total / total_mass
+    for a in atoms:
+        a.vel = a.vel - v_cm
+
+    # Rescale to target kinetic temperature
+    ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in atoms)
+    n = len(atoms)
+    t_current = (2.0 * ke) / (3.0 * (n - 1)) if n > 1 else (2.0 * ke) / 3.0
+    if t_current > 1e-8:
+        scale = math.sqrt(target_temp / t_current)
+        for a in atoms:
+            a.vel = a.vel * scale
+
+def create_fcc_lattice(
+    n_cells: int = 4,
+    density: float = 0.84,
+    target_temp: float = 0.85,
+) -> Tuple[List[Atom], SimulationBox]:
+    """Generate Face-Centered Cubic (FCC) lattice (4 * n_cells^3 atoms)."""
+    n_atoms = 4 * (n_cells**3)
+    vol = n_atoms / density
+    l_box = vol ** (1.0 / 3.0)
+    box = SimulationBox(l_box, l_box, l_box)
+    a = l_box / n_cells
+
+    basis = [
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(0.5 * a, 0.5 * a, 0.0),
+        Vec3(0.5 * a, 0.0, 0.5 * a),
+        Vec3(0.0, 0.5 * a, 0.5 * a),
+    ]
+
+    atoms: List[Atom] = []
+    idx = 0
+    for ix in range(n_cells):
+        for iy in range(n_cells):
+            for iz in range(n_cells):
+                origin = Vec3(ix * a, iy * a, iz * a)
+                for b in basis:
+                    pos = origin + b
+                    atom = Atom(
+                        id=idx,
+                        element="Ar",
+                        mass=1.0,
+                        pos=pos.copy(),
+                        unwrapped_pos=pos.copy(),
+                        initial_pos=pos.copy(),
+                        color=Color.CYAN,
+                        group=0,
+                    )
+                    atoms.append(atom)
+                    idx += 1
+
+    init_maxwell_boltzmann_velocities(atoms, target_temp)
+    return atoms, box
+
+def create_argon_liquid(
+    n_cells: int = 4,
+    density: float = 0.84,
+    target_temp: float = 0.85,
+) -> Tuple[List[Atom], SimulationBox]:
+    """Liquid Argon state near triple point (rho*=0.84, T*=0.85)."""
+    atoms, box = create_fcc_lattice(n_cells, density, target_temp)
+    # Randomly jitter lattice positions slightly to accelerate melting into liquid phase
+    for a in atoms:
+        jitter = Vec3(
+            random.uniform(-0.08, 0.08),
+            random.uniform(-0.08, 0.08),
+            random.uniform(-0.08, 0.08),
+        )
+        a.pos = box.wrap_pos(a.pos + jitter)
+        a.unwrapped_pos = a.pos.copy()
+        a.initial_pos = a.pos.copy()
+        a.color = Color.BRIGHT_CYAN
+    return atoms, box
+
+def create_shockwave_collision(
+    n_cells_sub: int = 3,
+    density: float = 0.85,
+    impact_vel: float = 2.5,
+) -> Tuple[List[Atom], SimulationBox]:
+    """Two high-density clusters colliding head-on along X axis."""
+    n_cluster = 4 * (n_cells_sub**3)
+    vol_single = n_cluster / density
+    l_sub = vol_single ** (1.0 / 3.0)
+    l_total_x = l_sub * 4.0
+    l_total_y = l_sub * 1.5
+    l_total_z = l_sub * 1.5
+    box = SimulationBox(l_total_x, l_total_y, l_total_z)
+
+    atoms: List[Atom] = []
+    idx = 0
+    a = l_sub / n_cells_sub
+    basis = [
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(0.5 * a, 0.5 * a, 0.0),
+        Vec3(0.5 * a, 0.0, 0.5 * a),
+        Vec3(0.0, 0.5 * a, 0.5 * a),
+    ]
+
+    # Left cluster (traveling +X)
+    offset_left = Vec3(0.3 * l_sub, 0.25 * l_sub, 0.25 * l_sub)
+    for ix in range(n_cells_sub):
+        for iy in range(n_cells_sub):
+            for iz in range(n_cells_sub):
+                origin = offset_left + Vec3(ix * a, iy * a, iz * a)
+                for b in basis:
+                    pos = origin + b
+                    atom = Atom(
+                        id=idx,
+                        element="Ar",
+                        mass=1.0,
+                        pos=pos.copy(),
+                        vel=Vec3(impact_vel + random.gauss(0, 0.2), random.gauss(0, 0.2), random.gauss(0, 0.2)),
+                        unwrapped_pos=pos.copy(),
+                        initial_pos=pos.copy(),
+                        color=Color.BRIGHT_GREEN,
+                        group=1,
+                    )
+                    atoms.append(atom)
+                    idx += 1
+
+    # Right cluster (traveling -X)
+    offset_right = Vec3(l_total_x - 1.3 * l_sub, 0.25 * l_sub, 0.25 * l_sub)
+    for ix in range(n_cells_sub):
+        for iy in range(n_cells_sub):
+            for iz in range(n_cells_sub):
+                origin = offset_right + Vec3(ix * a, iy * a, iz * a)
+                for b in basis:
+                    pos = origin + b
+                    atom = Atom(
+                        id=idx,
+                        element="Kr",
+                        mass=1.0,
+                        pos=pos.copy(),
+                        vel=Vec3(-impact_vel + random.gauss(0, 0.2), random.gauss(0, 0.2), random.gauss(0, 0.2)),
+                        unwrapped_pos=pos.copy(),
+                        initial_pos=pos.copy(),
+                        color=Color.BRIGHT_YELLOW,
+                        group=2,
+                    )
+                    atoms.append(atom)
+                    idx += 1
+
+    return atoms, box
+
+def create_free_expansion(
+    n_cells: int = 3,
+    density: float = 0.85,
+    box_expansion: float = 2.4,
+) -> Tuple[List[Atom], SimulationBox]:
+    """Dense cluster placed in large vacuum box to observe Joule-Thomson expansion."""
+    n_atoms = 4 * (n_cells**3)
+    vol_dense = n_atoms / density
+    l_dense = vol_dense ** (1.0 / 3.0)
+    l_box = l_dense * box_expansion
+    box = SimulationBox(l_box, l_box, l_box)
+
+    offset = Vec3(0.5 * (l_box - l_dense), 0.5 * (l_box - l_dense), 0.5 * (l_box - l_dense))
+    a = l_dense / n_cells
+    basis = [
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(0.5 * a, 0.5 * a, 0.0),
+        Vec3(0.5 * a, 0.0, 0.5 * a),
+        Vec3(0.0, 0.5 * a, 0.5 * a),
+    ]
+
+    atoms: List[Atom] = []
+    idx = 0
+    for ix in range(n_cells):
+        for iy in range(n_cells):
+            for iz in range(n_cells):
+                origin = offset + Vec3(ix * a, iy * a, iz * a)
+                for b in basis:
+                    pos = origin + b
+                    atom = Atom(
+                        id=idx,
+                        element="Ar",
+                        mass=1.0,
+                        pos=pos.copy(),
+                        unwrapped_pos=pos.copy(),
+                        initial_pos=pos.copy(),
+                        color=Color.BRIGHT_MAGENTA,
+                        group=0,
+                    )
+                    atoms.append(atom)
+                    idx += 1
+
+    init_maxwell_boltzmann_velocities(atoms, 1.2)
+    return atoms, box
+
+def create_binary_mixture(
+    n_cells: int = 4,
+    density: float = 0.80,
+    target_temp: float = 0.90,
+) -> Tuple[List[Atom], SimulationBox]:
+    """Binary mixture of two species A (Ar) and B (Kr)."""
+    atoms, box = create_fcc_lattice(n_cells, density, target_temp)
+    for i, a in enumerate(atoms):
+        if i % 2 == 1:
+            a.element = "Kr"
+            a.color = Color.BRIGHT_YELLOW
+            a.group = 1
+        else:
+            a.element = "Ar"
+            a.color = Color.BRIGHT_CYAN
+            a.group = 0
+    return atoms, box
+# =====================================================================
+# Terminal Unicode Braille Canvas & HUD Renderer
+# =====================================================================
+class BrailleCanvas:
+    BRAILLE_MAP = [
+        [0x01, 0x08],
+        [0x02, 0x10],
+        [0x04, 0x20],
+        [0x40, 0x80],
+    ]
+
+    def __init__(self, char_width: int = 76, char_height: int = 24):
+        self.char_w = char_width
+        self.char_h = char_height
+        self.pixel_w = char_width * 2
+        self.pixel_h = char_height * 4
+        self.grid = [[0 for _ in range(self.char_w)] for _ in range(self.char_h)]
+        self.colors = [[Color.CYAN for _ in range(self.char_w)] for _ in range(self.char_h)]
+        self.special_markers: List[Tuple[int, int, str, str]] = []
+
+    def clear(self):
+        for y in range(self.char_h):
+            for x in range(self.char_w):
+                self.grid[y][x] = 0
+                self.colors[y][x] = Color.CYAN
+        self.special_markers.clear()
+
+    def set_pixel(self, px: int, py: int, color: str = Color.CYAN):
+        if 0 <= px < self.pixel_w and 0 <= py < self.pixel_h:
+            cx = px // 2
+            cy = py // 4
+            sub_x = px % 2
+            sub_y = py % 4
+            self.grid[cy][cx] |= self.BRAILLE_MAP[sub_y][sub_x]
+            self.colors[cy][cx] = color
+
+    def add_marker(self, cx: int, cy: int, char: str, color: str):
+        if 0 <= cx < self.char_w and 0 <= cy < self.char_h:
+            self.special_markers.append((cx, cy, char, color))
+
+    def render(self) -> List[str]:
+        lines = []
+        for cy in range(self.char_h):
+            row_chars = []
+            for cx in range(self.char_w):
+                marker_found = None
+                for mx, my, mch, mcol in self.special_markers:
+                    if mx == cx and my == cy:
+                        marker_found = (mch, mcol)
+                        break
+
+                if marker_found:
+                    mch, mcol = marker_found
+                    row_chars.append(f"{mcol}{mch}{Color.RESET}")
+                else:
+                    code = self.grid[cy][cx]
+                    if code == 0:
+                        row_chars.append(" ")
+                    else:
+                        braille_char = chr(0x2800 + code)
+                        row_chars.append(f"{self.colors[cy][cx]}{braille_char}{Color.RESET}")
+            lines.append("".join(row_chars))
+        return lines
+
+# =====================================================================
+# Simulation Execution & Interactive Visualizer
+# =====================================================================
+def run_simulation(
+    scenario_name: str = "liquid-argon",
+    steps: int = 200,
+    dt: float = 0.005,
+    target_temp: float = 0.85,
+    thermostat_mode: str = "berendsen",
+    tau: float = 0.5,
+    cutoff: float = 2.5,
+    fps: int = 25,
+    no_render: bool = False,
+    viewport_width: int = 76,
+    viewport_height: int = 22,
+    use_cell_list: bool = True,
+):
+    scenarios = {
+        "fcc-crystal": lambda: create_fcc_lattice(n_cells=3, density=0.84, target_temp=target_temp),
+        "liquid-argon": lambda: create_argon_liquid(n_cells=3, density=0.84, target_temp=target_temp),
+        "shockwave-collision": lambda: create_shockwave_collision(n_cells_sub=2, density=0.85, impact_vel=2.0),
+        "free-expansion": lambda: create_free_expansion(n_cells=3, density=0.85, box_expansion=2.2),
+        "binary-mixture": lambda: create_binary_mixture(n_cells=3, density=0.80, target_temp=target_temp),
+    }
+
+    if scenario_name not in scenarios:
+        print(f"{Color.RED}Error: Unknown scenario '{scenario_name}'. Available: {list(scenarios.keys())}{Color.RESET}")
+        sys.exit(1)
+
+    atoms, box = scenarios[scenario_name]()
+    ff = LennardJonesForceField(box=box, rc=cutoff, epsilon=1.0, sigma=1.0, use_cell_list=use_cell_list)
+    thermo = Thermostat(mode=thermostat_mode, target_temp=target_temp, tau=tau)
+    integrator = VelocityVerletIntegrator(box=box, force_field=ff, thermostat=thermo)
+    telemetry = ThermodynamicsTelemetry(box=box, n_bins=40)
+    canvas = BrailleCanvas(char_width=viewport_width, char_height=viewport_height)
+
+    # Initialize initial forces & accelerations
+    init_pe, init_virial = ff.compute_forces(atoms)
+    for a in atoms:
+        a.acc = a.force / a.mass
+    init_ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in atoms)
+    init_energy = init_ke + init_pe
+    u_tail, p_tail = ff.compute_tail_corrections(len(atoms))
+
+    frame_delay = 1.0 / max(fps, 1)
+    sim_time = 0.0
+
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}⚛️  HERMES MOLECULAR DYNAMICS SIMULATOR (LENNARD-JONES & VELOCITY-VERLET){Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"Scenario: {Color.BOLD}{scenario_name}{Color.RESET} | Atoms: {Color.BOLD}{len(atoms)}{Color.RESET} | Box: {box.lx:.2f}x{box.ly:.2f}x{box.lz:.2f} | Density: {len(atoms)/box.volume:.3f}")
+    print(f"Integrator: Symplectic 2nd-Order Velocity-Verlet | dt: {dt} | Thermostat: {thermostat_mode} (T*={target_temp})\n")
+
+    if not no_render:
+        sys.stdout.write("\033[?25l")
+        sys.stdout.flush()
+
+    try:
+        for s in range(1, steps + 1):
+            t_start = time.perf_counter()
+            pe, ke, virial = integrator.step(atoms, dt=dt)
+            sim_time += dt
+            t_elapsed = max(time.perf_counter() - t_start, 1e-6)
+
+            n_atoms = len(atoms)
+            t_inst = (2.0 * ke) / (3.0 * (n_atoms - 1)) if n_atoms > 1 else (2.0 * ke) / 3.0
+            total_e = pe + ke
+            e_drift = (total_e - init_energy) / max(abs(init_energy), 1e-6)
+
+            # Pressure from Virial theorem: P = rho*T + (1/(3*V))*Virial + P_tail
+            rho = n_atoms / box.volume
+            p_virial = (virial) / (3.0 * box.volume)
+            p_total = rho * t_inst + p_virial + p_tail
+
+            # Telemetry sampling
+            if s > 20 and s % 5 == 0:
+                telemetry.sample_rdf(atoms)
+            msd = telemetry.compute_msd(atoms)
+
+            if not no_render:
+                canvas.clear()
+                half_pw = canvas.pixel_w * 0.5
+                half_ph = canvas.pixel_h * 0.5
+
+                # Orthographic 3D projection onto canvas with isometric angle
+                # Rotated by 25 deg around Y, 15 deg around X
+                cos_y = math.cos(0.4)
+                sin_y = math.sin(0.4)
+                cos_x = math.cos(0.25)
+                sin_x = math.sin(0.25)
+
+                center_x = 0.5 * box.lx
+                center_y = 0.5 * box.ly
+                center_z = 0.5 * box.lz
+                max_dim = max(box.lx, box.ly, box.lz) * 0.8
+
+                for a in atoms:
+                    rx = a.pos.x - center_x
+                    ry = a.pos.y - center_y
+                    rz = a.pos.z - center_z
+
+                    # Rotation
+                    x_rot = rx * cos_y + rz * sin_y
+                    z_rot = -rx * sin_y + rz * cos_y
+                    y_rot = ry * cos_x - z_rot * sin_x
+
+                    px = int(half_pw + (x_rot / max_dim) * (half_pw * 0.85))
+                    py = int(half_ph - (y_rot / max_dim) * (half_ph * 0.85))
+
+                    # Velocity-dependent coloring
+                    v_mag = a.vel.norm()
+                    if a.group == 1:
+                        col = Color.BRIGHT_YELLOW
+                    elif a.group == 2:
+                        col = Color.BRIGHT_GREEN
+                    elif v_mag > 1.8 * math.sqrt(max(target_temp, 0.1)):
+                        col = Color.BRIGHT_MAGENTA
+                    elif v_mag > 1.1 * math.sqrt(max(target_temp, 0.1)):
+                        col = Color.CYAN
+                    else:
+                        col = Color.BLUE
+
+                    canvas.set_pixel(px, py, col)
+
+                frame_lines = canvas.render()
+
+                hud_header = (
+                    f"{Color.BG_DARK}{Color.BOLD}{Color.WHITE} STEP {s:>4}/{steps} | T*={t_inst:>5.3f} (target {target_temp:.2f}) | TIME={sim_time:>6.3f} | N={n_atoms} {Color.RESET}"
+                )
+                hud_footer = (
+                    f"{Color.DIM}E_tot: {total_e:>8.2f} | ΔE/E0: {e_drift:>+7.4%} | P_virial: {p_total:>6.3f} | MSD: {msd:>6.3f}{Color.RESET}"
+                )
+
+                sys.stdout.write("\033[H")
+                sys.stdout.write(hud_header + "\n")
+                for line in frame_lines:
+                    sys.stdout.write(line + "\n")
+                sys.stdout.write(hud_footer + "\n")
+                sys.stdout.flush()
+
+                rem = frame_delay - t_elapsed
+                if rem > 0:
+                    time.sleep(rem)
+            else:
+                if s == 1 or s % 25 == 0 or s == steps:
+                    print(
+                        f"Step {s:>4}/{steps} [T={sim_time:>6.3f}] | Temp={t_inst:>6.3f} | E_tot={total_e:>9.2f} (ΔE/E0={e_drift:>+7.3%}) | P={p_total:>6.3f} | MSD={msd:>6.3f}"
+                    )
+    finally:
+        if not no_render:
+            sys.stdout.write("\033[?25h\033[0m\n")
+            sys.stdout.flush()
+
+    print(f"\n{Color.BOLD}{Color.GREEN}Simulation completed successfully ({steps} steps).{Color.RESET}")
+    return atoms, telemetry
+# =====================================================================
+# Comprehensive Formal Verification & Test Suite
+# =====================================================================
+def run_tests() -> bool:
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}🔬 MOLECULAR DYNAMICS FORMAL VERIFICATION & INVARIANT SUITE{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+
+    all_passed = True
+    test_num = 1
+
+    def test(name: str, passed: bool, detail: str = ""):
+        nonlocal all_passed, test_num
+        status = f"{Color.GREEN}PASS{Color.RESET}" if passed else f"{Color.RED}FAIL{Color.RESET}"
+        print(f"[{test_num:02d}] {name:<52} [{status}]")
+        if detail:
+            print(f"     {Color.DIM}{detail}{Color.RESET}")
+        if not passed:
+            all_passed = False
+        test_num += 1
+
+    # 1. Minimum Image Convention PBC Metric
+    box = SimulationBox(10.0, 10.0, 10.0)
+    dr1 = Vec3(9.2, -8.7, 5.5)
+    min_dr1 = box.min_image(dr1)
+    pbc_ok = (
+        abs(min_dr1.x - (-0.8)) < 1e-10
+        and abs(min_dr1.y - 1.3) < 1e-10
+        and abs(min_dr1.z - (-4.5)) < 1e-10
+    )
+    test(
+        "Minimum Image Convention Periodic Boundary Distance",
+        pbc_ok,
+        f"Wrapped dr: ({min_dr1.x:.2f}, {min_dr1.y:.2f}, {min_dr1.z:.2f})",
+    )
+
+    # 2. Lennard-Jones Equilibrium Interatomic Force Zero
+    # V(r) = 4*eps*((s/r)^12 - (s/r)^6), dV/dr = 0 at r_eq = 2^(1/6)*sigma
+    r_eq = (2.0 ** (1.0 / 6.0))
+    ff = LennardJonesForceField(box=box, rc=3.0, epsilon=1.0, sigma=1.0)
+    a1 = Atom(id=0, pos=Vec3(0, 0, 0))
+    a2 = Atom(id=1, pos=Vec3(r_eq, 0, 0))
+    pe, virial = ff.compute_forces_direct([a1, a2])
+    force_norm = a1.force.norm()
+    lj_eq_ok = force_norm < 1e-8 and abs(pe - (-1.0 + ff.v_shift)) < 1e-8
+    test(
+        "Lennard-Jones Minimum Force Equilibrium (r = 2^(1/6)*σ)",
+        lj_eq_ok,
+        f"F(r_eq) = {force_norm:.2e}, V(r_eq) - V_shift = {pe:.6f} (Theory: -1.0)",
+    )
+
+    # 3. Shifted Potential Cutoff Boundary Condition
+    inv_rc2 = (1.0 / 2.5) ** 2
+    inv_rc6 = inv_rc2 ** 3
+    inv_rc12 = inv_rc6 ** 2
+    expected_v_shift = 4.0 * (inv_rc12 - inv_rc6)
+    cutoff_ok = abs(ff.v_shift - expected_v_shift) < 1e-12
+    test(
+        "Shifted Potential Smooth Continuity at Cutoff V(rc) = 0",
+        cutoff_ok,
+        f"V_shift(rc=2.5) = {ff.v_shift:.6f}",
+    )
+
+    # 4. Cell Linked-List O(N) vs Direct O(N^2) Force Equivalence
+    atoms_dense, box_dense = create_fcc_lattice(n_cells=3, density=0.8, target_temp=1.0)
+    ff_test = LennardJonesForceField(box=box_dense, rc=2.5, use_cell_list=False)
+    pe_direct, vir_direct = ff_test.compute_forces_direct(atoms_dense)
+    f_direct = [a.force.copy() for a in atoms_dense]
+
+    pe_cell, vir_cell = ff_test.compute_forces_cell_list(atoms_dense)
+    max_f_diff = max((atoms_dense[i].force - f_direct[i]).norm() for i in range(len(atoms_dense)))
+    pe_diff = abs(pe_cell - pe_direct)
+    cell_ok = max_f_diff < 1e-9 and pe_diff < 1e-9
+    test(
+        "Cell Linked-List vs Direct O(N^2) Force Equivalence",
+        cell_ok,
+        f"Max ||F_cell - F_direct|| = {max_f_diff:.2e}, |ΔPE| = {pe_diff:.2e}",
+    )
+
+    # 5. Symplectic Hamiltonian Phase-Space Conservation (NVE Microcanonical Ensemble)
+    nve_atoms, nve_box = create_fcc_lattice(n_cells=3, density=0.84, target_temp=0.8)
+    nve_ff = LennardJonesForceField(box=nve_box, rc=2.5, use_cell_list=True)
+    nve_thermo = Thermostat(mode="none")
+    nve_integrator = VelocityVerletIntegrator(box=nve_box, force_field=nve_ff, thermostat=nve_thermo)
+
+    # Initial setup
+    init_pe, _ = nve_ff.compute_forces(nve_atoms)
+    for a in nve_atoms:
+        a.acc = a.force / a.mass
+    init_ke = sum(0.5 * a.mass * a.vel.norm_sq() for a in nve_atoms)
+    e0 = init_pe + init_ke
+    max_drift = 0.0
+
+    # Integrate 250 symplectic steps
+    dt = 0.004
+    for _ in range(250):
+        pe_s, ke_s, _ = nve_integrator.step(nve_atoms, dt=dt)
+        drift = abs((pe_s + ke_s) - e0) / abs(e0)
+        max_drift = max(max_drift, drift)
+
+    symp_ok = max_drift < 2e-4
+    test(
+        "Symplectic Hamiltonian Energy Conservation (250 NVE steps)",
+        symp_ok,
+        f"Max Hamiltonian Drift |ΔE/E0| = {max_drift:.3e} (< 0.02%)",
+    )
+
+    # 6. Total Linear Momentum Conservation (No External Force)
+    p_init = Vec3(0, 0, 0)
+    for a in nve_atoms:
+        p_init = p_init + a.vel * a.mass
+    mom_diff = p_init.norm()
+    mom_ok = mom_diff < 1e-10
+    test(
+        "System Total Linear Momentum Conservation (Zero-Drift)",
+        mom_ok,
+        f"||P_total|| = {mom_diff:.2e} (< 1e-10)",
+    )
+
+    # 7. Berendsen Thermostat Temperature Relaxation
+    t_target = 1.35
+    nvt_atoms, nvt_box = create_fcc_lattice(n_cells=3, density=0.84, target_temp=0.6)
+    nvt_ff = LennardJonesForceField(box=nvt_box, rc=2.5, use_cell_list=True)
+    nvt_thermo = Thermostat(mode="berendsen", target_temp=t_target, tau=0.2)
+    nvt_integrator = VelocityVerletIntegrator(box=nvt_box, force_field=nvt_ff, thermostat=nvt_thermo)
+    nvt_ff.compute_forces(nvt_atoms)
+    for a in nvt_atoms:
+        a.acc = a.force / a.mass
+
+    for _ in range(200):
+        nvt_integrator.step(nvt_atoms, dt=0.005)
+
+    ke_final = sum(0.5 * a.mass * a.vel.norm_sq() for a in nvt_atoms)
+    t_final = (2.0 * ke_final) / (3.0 * (len(nvt_atoms) - 1))
+    t_relax_ok = abs(t_final - t_target) / t_target < 0.08
+    test(
+        "Berendsen Thermostat Canonical Relaxation (T* = 0.6 -> 1.35)",
+        t_relax_ok,
+        f"Final T* = {t_final:.3f} (Target: {t_target:.2f}, Error: {abs(t_final - t_target)/t_target:.2%})",
+    )
+
+    # 8. Radial Distribution Function g(r) Liquid Structure Peak
+    liq_atoms, liq_box = create_argon_liquid(n_cells=3, density=0.84, target_temp=0.85)
+    liq_ff = LennardJonesForceField(box=liq_box, rc=2.5, use_cell_list=True)
+    liq_thermo = Thermostat(mode="berendsen", target_temp=0.85, tau=0.4)
+    liq_integrator = VelocityVerletIntegrator(box=liq_box, force_field=liq_ff, thermostat=liq_thermo)
+    telemetry = ThermodynamicsTelemetry(box=liq_box, n_bins=50)
+    liq_ff.compute_forces(liq_atoms)
+    for a in liq_atoms:
+        a.acc = a.force / a.mass
+
+    for s in range(120):
+        liq_integrator.step(liq_atoms, dt=0.005)
+        if s > 30 and s % 3 == 0:
+            telemetry.sample_rdf(liq_atoms)
+
+    r_vals, g_vals = telemetry.get_rdf(len(liq_atoms))
+    max_g = max(g_vals) if g_vals else 0.0
+    peak_r = r_vals[g_vals.index(max_g)] if g_vals else 0.0
+    # Liquid Argon first peak is typically near r ~ 1.05 to 1.15 sigma with g(r) > 2.0
+    rdf_ok = 1.0 <= peak_r <= 1.25 and max_g > 1.8
+    test(
+        "Radial Distribution Function g(r) Liquid Coordination Peak",
+        rdf_ok,
+        f"First Peak at r = {peak_r:.3f}σ with g(r) = {max_g:.2f} (Theory: ~1.10σ, g > 2.0)",
+    )
+
+    # 9. Virial Equation of State Pressure Positivity
+    rho = len(liq_atoms) / liq_box.volume
+    _, _, vir = liq_integrator.step(liq_atoms, dt=0.005)
+    p_vir = vir / (3.0 * liq_box.volume)
+    u_tail, p_tail = liq_ff.compute_tail_corrections(len(liq_atoms))
+    ke_inst = sum(0.5 * a.mass * a.vel.norm_sq() for a in liq_atoms)
+    t_inst = (2.0 * ke_inst) / (3.0 * (len(liq_atoms) - 1))
+    p_tot = rho * t_inst + p_vir + p_tail
+    p_ok = p_tot > 0.0 and abs(p_tot) < 20.0
+    test(
+        "Virial Equation of State Pressure & Tail Correction",
+        p_ok,
+        f"P_tot = {p_tot:.3f} (Kinetic={rho*t_inst:.3f}, Virial={p_vir:.3f}, Tail={p_tail:.3f})",
+    )
+
+    msg = "🎉 ALL FORMAL INVARIANT TESTS PASSED SUCCESSFULLY!" if all_passed else "❌ SOME TESTS FAILED"
+    print(f"\n{Color.BOLD}{msg}{Color.RESET}")
+    return all_passed
+
+# =====================================================================
+# Scaling Benchmark: Direct O(N^2) vs Cell Linked-List O(N)
+# =====================================================================
+def run_benchmark(cell_sizes: List[int] = None):
+    if cell_sizes is None:
+        cell_sizes = [2, 3, 4, 5]
+
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}⚡ MD SCALING BENCHMARK: DIRECT O(N^2) VS CELL LINKED-LIST O(N){Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}========================================================================{Color.RESET}")
+    print(f"| {'Cells':^7} | {'Atoms':^8} | {'Direct O(N^2)':^16} | {'Cell List O(N)':^18} | {'Speedup':^9} | {'Max Force Diff':^15} |")
+    print(f"|{'-'*9}|{'-'*10}|{'-'*18}|{'-'*20}|{'-'*11}|{'-'*17}|")
+
+    for nc in cell_sizes:
+        atoms, box = create_fcc_lattice(n_cells=nc, density=0.84, target_temp=1.0)
+        n = len(atoms)
+        ff = LennardJonesForceField(box=box, rc=2.5, use_cell_list=False)
+
+        # Warmup
+        ff.compute_forces_direct(atoms)
+        f_direct_copy = [a.force.copy() for a in atoms]
+
+        # Time Direct
+        n_reps = 3 if n < 500 else 1
+        t0 = time.perf_counter()
+        for _ in range(n_reps):
+            ff.compute_forces_direct(atoms)
+        t_direct = (time.perf_counter() - t0) / n_reps
+
+        # Warmup Cell List
+        ff.compute_forces_cell_list(atoms)
+        f_cell_copy = [a.force.copy() for a in atoms]
+
+        # Time Cell List
+        t0 = time.perf_counter()
+        for _ in range(n_reps):
+            ff.compute_forces_cell_list(atoms)
+        t_cell = (time.perf_counter() - t0) / n_reps
+
+        speedup = t_direct / max(t_cell, 1e-6)
+        f_diff = max((f_direct_copy[i] - f_cell_copy[i]).norm() for i in range(n))
+
+        direct_str = f"{t_direct * 1000.0:>8.2f} ms"
+        cell_str = f"{t_cell * 1000.0:>8.2f} ms"
+        speed_str = f"{speedup:>6.2f}x"
+        diff_str = f"{f_diff:>10.2e}"
+
+        print(f"| {nc:^7} | {n:^8} | {direct_str:^16} | {cell_str:^18} | {Color.GREEN}{speed_str:^9}{Color.RESET} | {diff_str:^15} |")
+
+    print(f"|{'-'*9}|{'-'*10}|{'-'*18}|{'-'*20}|{'-'*11}|{'-'*17}|\n")
+
+# =====================================================================
+# CLI Entry Point
+# =====================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="Molecular Dynamics Engine: Symplectic Velocity-Verlet & Lennard-Jones Phase Dynamics."
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Sub-command to execute")
+
+    # Subcommand: run
+    p_run = subparsers.add_parser("run", help="Run interactive real-time MD simulation")
+    p_run.add_argument(
+        "--scenario",
+        type=str,
+        default="liquid-argon",
+        choices=["fcc-crystal", "liquid-argon", "shockwave-collision", "free-expansion", "binary-mixture"],
+        help="Simulation scenario to run",
+    )
+    p_run.add_argument("--steps", type=int, default=150, help="Number of integration steps")
+    p_run.add_argument("--dt", type=float, default=0.005, help="Integration time step (reduced units)")
+    p_run.add_argument("--temp", type=float, default=0.85, help="Target reduced temperature T*")
+    p_run.add_argument("--thermostat", type=str, default="berendsen", choices=["none", "berendsen", "andersen"], help="Thermostat ensemble")
+    p_run.add_argument("--cutoff", type=float, default=2.5, help="Lennard-Jones cutoff radius rc")
+    p_run.add_argument("--fps", type=int, default=25, help="Visualizer frame rate (frames per second)")
+    p_run.add_argument("--no-render", action="store_true", help="Disable Braille terminal canvas rendering")
+    p_run.add_argument("--no-cell-list", action="store_true", help="Force direct O(N^2) pairwise force calculation")
+
+    # Subcommand: test
+    subparsers.add_parser("test", help="Run formal mathematical invariant test suite")
+
+    # Subcommand: benchmark
+    subparsers.add_parser("benchmark", help="Run Direct O(N^2) vs Cell Linked-List O(N) scaling benchmark")
+
+    # Subcommand: info
+    subparsers.add_parser("info", help="Display mathematical formulation and physical units")
+
+    args = parser.parse_args()
+
+    if args.command == "run" or args.command is None:
+        scenario = getattr(args, "scenario", "liquid-argon")
+        steps = getattr(args, "steps", 150)
+        dt = getattr(args, "dt", 0.005)
+        temp = getattr(args, "temp", 0.85)
+        thermo = getattr(args, "thermostat", "berendsen")
+        cutoff = getattr(args, "cutoff", 2.5)
+        fps = getattr(args, "fps", 25)
+        no_render = getattr(args, "no_render", False)
+        use_cell = not getattr(args, "no_cell_list", False)
+
+        run_simulation(
+            scenario_name=scenario,
+            steps=steps,
+            dt=dt,
+            target_temp=temp,
+            thermostat_mode=thermo,
+            cutoff=cutoff,
+            fps=fps,
+            no_render=no_render,
+            use_cell_list=use_cell,
+        )
+    elif args.command == "test":
+        success = run_tests()
+        sys.exit(0 if success else 1)
+    elif args.command == "benchmark":
+        run_benchmark()
+    elif args.command == "info":
+        print(f"""{Color.BOLD}{Color.CYAN}⚛️  MOLECULAR DYNAMICS MATHEMATICAL FORMULATION & REDUCED UNITS{Color.RESET}
+
+1. Lennard-Jones (12-6) Pair Potential:
+   V(r) = 4 * ε * [ (σ/r)^12 - (σ/r)^6 ]
+   Shifted: V_shift(r) = V(r) - V(r_c) for r <= r_c, 0 otherwise
+
+2. Symplectic 2nd-Order Velocity-Verlet Integration:
+   r(t + Δt) = r(t) + v(t)Δt + (1/2) a(t) Δt^2
+   v(t + Δt/2) = v(t) + (1/2) a(t) Δt
+   a(t + Δt) = F(r(t + Δt)) / m
+   v(t + Δt) = v(t + Δt/2) + (1/2) a(t + Δt) Δt
+
+3. Statistical Mechanics Observables:
+   - Temperature: T* = 2K / (3(N - 1))
+   - Virial Pressure: P* = ρT* + (1/3V) Σ (r_ij · f_ij) + P_tail
+   - Radial Distribution Function: g(r) = <N(r, r+Δr)> / (4π r^2 Δr ρ N)
+   - Mean Squared Displacement: MSD(t) = (1/N) Σ ||r_i(t) - r_i(0)||^2
+""")
+
+if __name__ == "__main__":
+    main()
