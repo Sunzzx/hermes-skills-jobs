@@ -381,5 +381,22 @@
       "IIT-JAM",
       "IndianGovtExams"
     ]
+  },
+  {
+    "id": "executive-intelligence-briefing-24h",
+    "title": "24-Hour Executive Intelligence & Academic Surveillance Briefing",
+    "category": "education",
+    "type": "job+tool",
+    "description": "Daily 4-section executive briefing: top actions, T-minus countdown (IITM BS milestones, exams), inbox/security watchdog, and universal opportunity radar (Government Officer recruitments, Quant, Remote AI roles).",
+    "cli": "daily-briefing",
+    "evolved_at": "2026-10-28T13:26:19.644335",
+    "tags": [
+      "ExecutiveBriefing",
+      "UPSC",
+      "IITM-BS",
+      "GovernmentRecruitment",
+      "Fellowships",
+      "Quant"
+    ]
   }
 ]
