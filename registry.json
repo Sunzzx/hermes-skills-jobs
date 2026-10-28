@@ -348,5 +348,21 @@
       "RemoteWork",
       "Proposals"
     ]
+  },
+  {
+    "id": "auto-application-pipeline-25m",
+    "title": "Autonomous 25-Min Application & Assessment Pipeline",
+    "category": "finance",
+    "type": "job+tool",
+    "description": "Continuous 25-minute engine: scouts developer contracts, pre-engineers full assessment/take-home solutions, auto-creates missing skills on the fly, and packages instant submissions.",
+    "cli": "auto-apply",
+    "evolved_at": "2026-10-28T12:57:18.452954",
+    "tags": [
+      "Finance",
+      "Jobs",
+      "Assessments",
+      "Automation",
+      "Contracts"
+    ]
   }
 ]
