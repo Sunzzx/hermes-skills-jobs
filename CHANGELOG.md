@@ -133,3 +133,9 @@
 - **Title**: Workflow Accelerator Suite #22
 - **Category**: productivity
 - **Description**: Automated filesystem indexing & context cache accelerator for Hermes cycle #22.
+
+### [2026-10-28 21:38:00] - Evolved `sparse-autoencoders`
+- **Title**: Sparse Autoencoders & Mechanistic Interpretability Engine
+- **Category**: research
+- **Description**: Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation.
+- **CLI**: `sae-lens` (`verify`, `train`, `inspect`, `steer`, `benchmark`, `info`)
