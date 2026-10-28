@@ -594,5 +594,19 @@
       "PhaseSpace",
       "BrailleVisualizer"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v24",
+    "title": "Workflow Accelerator Suite #24",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #24.",
+    "cli": "accelerate-24",
+    "evolved_at": "2026-10-29T01:19:37.932278",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]

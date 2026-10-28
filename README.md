@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-38-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-39-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (38 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (39 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -49,7 +49,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #22** | `productivity` | `accelerate-22` | Automated filesystem indexing & context cache accelerator for Hermes cycle #22. | `Automation` `Productivity` `Evolution` |
 | **Lock-Free Concurrency & Chase-Lev Work-Stealing Runtime** | `systems` | `lockfree-rt` | Lock-free synchronization primitives, Michael-Scott queues, Treiber stacks, Disruptor ring buffers, Epoch-Based Reclamation (EBR), and Blumofe-Leiserson randomized work-stealing schedulers. | `HardcoreSystems` `Concurrency` `LockFree` |
 | **Workflow Accelerator Suite #23** | `productivity` | `accelerate-23` | Automated filesystem indexing & context cache accelerator for Hermes cycle #23. | `Automation` `Productivity` `Evolution` |
-| **Molecular Dynamics Engine & Velocity-Verlet Integrator** | `computational-science` | `md-sim` | Production-grade Molecular Dynamics (MD) engine: symplectic 2nd-order Velocity-Verlet integration, shifted Lennard-Jones (12-6) potential, PBC, Cell Linked-List O(N) neighbor acceleration, Berendsen/Andersen thermostats, radial distribution function g(r), virial pressure, MSD, and interactive Unicode Braille visualizer. | `ComputationalPhysics` `MolecularDynamics` `SymplecticIntegrator` |
+| **Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine** | `computational-science` | `md-sim` | Production-grade Molecular Dynamics engine: symplectic 2nd-order Velocity-Verlet, shifted Lennard-Jones (12-6) potential, Periodic Boundary Conditions, Cell Linked-List O(N) spatial acceleration, Berendsen/Andersen canonical thermostats, radial distribution function g(r), virial pressure, MSD, and interactive Unicode Braille visualizer. | `ComputationalPhysics` `MolecularDynamics` `SymplecticIntegrator` |
+| **Workflow Accelerator Suite #24** | `productivity` | `accelerate-24` | Automated filesystem indexing & context cache accelerator for Hermes cycle #24. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -80,4 +81,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 00:15:00*
+*Last Evolved: 2026-10-29 01:19:37*
