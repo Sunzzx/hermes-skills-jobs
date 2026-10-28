@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-31-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-32-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (31 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (32 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -43,6 +43,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler** | `systems` | `bytecode-vm` | Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger. | `SystemsArchitecture` `VirtualMachines` `BytecodeCompiler` |
 | **Workflow Accelerator Suite #20** | `productivity` | `accelerate-20` | Automated filesystem indexing & context cache accelerator for Hermes cycle #20. | `Automation` `Productivity` `Evolution` |
 | **N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine** | `computational-science` | `nbody-sim` | Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer. | `ComputationalPhysics` `Astrophysics` `BarnesHut` |
+| **Workflow Accelerator Suite #21** | `productivity` | `accelerate-21` | Automated filesystem indexing & context cache accelerator for Hermes cycle #21. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -73,4 +74,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-28 18:39:32*
+*Last Evolved: 2026-10-28 19:42:38*

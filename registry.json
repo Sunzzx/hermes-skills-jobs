@@ -478,5 +478,19 @@
       "OrbitalMechanics",
       "ComputerScience"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v21",
+    "title": "Workflow Accelerator Suite #21",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #21.",
+    "cli": "accelerate-21",
+    "evolved_at": "2026-10-28T19:42:38.013620",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
