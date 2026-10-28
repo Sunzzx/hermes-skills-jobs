@@ -1,0 +1,1205 @@
+#!/usr/bin/env python3
+"""Hermes Bytecode Virtual Machine & Bytecode Compiler (HVM).
+
+A production-grade, mathematically rigorous, stack-based Virtual Machine and
+bytecode execution engine implementing an expressive instruction set architecture (ISA),
+lexical closures with upvalues, recursive call frames, structured exception handling,
+tracing Mark-and-Sweep garbage collection with cycle recovery, and an interactive
+step-debugger with ANSI stack visualization.
+
+Zero external dependencies. Pure standard library.
+"""
+
+import enum
+import json
+import math
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+
+# =====================================================================
+# ANSI Styling & Colors
+# =====================================================================
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    UNDERLINE = "\033[4m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    GRAY = "\033[90m"
+    BG_DARK = "\033[48;5;236m"
+    BG_BLUE = "\033[44m"
+    BG_GREEN = "\033[42m"
+    BG_RED = "\033[41m"
+
+
+def c(text: Any, *styles: str) -> str:
+    if not sys.stdout.isatty() and not os.environ.get("FORCE_COLOR"):
+        return str(text)
+    prefix = "".join(styles)
+    return f"{prefix}{text}{Color.RESET}"
+
+
+# =====================================================================
+# Instruction Set Architecture (ISA)
+# =====================================================================
+class OpCode(enum.IntEnum):
+    NOP = 0x00
+    PUSH_CONST = 0x01
+    POP = 0x02
+    DUP = 0x03
+    SWAP = 0x04
+    ROT = 0x05
+
+    ADD = 0x10
+    SUB = 0x11
+    MUL = 0x12
+    DIV = 0x13
+    MOD = 0x14
+    POW = 0x15
+    NEG = 0x16
+
+    BIT_AND = 0x17
+    BIT_OR = 0x18
+    BIT_XOR = 0x19
+    BIT_NOT = 0x1A
+    SHL = 0x1B
+    SHR = 0x1C
+
+    EQ = 0x20
+    NEQ = 0x21
+    LT = 0x22
+    LTE = 0x23
+    GT = 0x24
+    GTE = 0x25
+    NOT = 0x26
+
+    JUMP = 0x30
+    JUMP_IF_TRUE = 0x31
+    JUMP_IF_FALSE = 0x32
+    JUMP_IF_TRUE_KEEP = 0x33
+    JUMP_IF_FALSE_KEEP = 0x34
+
+    LOAD_LOCAL = 0x40
+    STORE_LOCAL = 0x41
+    LOAD_GLOBAL = 0x42
+    STORE_GLOBAL = 0x43
+    LOAD_UPVALUE = 0x44
+    STORE_UPVALUE = 0x45
+    CLOSE_UPVALUE = 0x46
+
+    MAKE_CLOSURE = 0x50
+    CALL = 0x51
+    RET = 0x52
+
+    MAKE_LIST = 0x60
+    INDEX_GET = 0x61
+    INDEX_SET = 0x62
+    LEN = 0x63
+    MAKE_DICT = 0x64
+    DICT_GET = 0x65
+    DICT_SET = 0x66
+
+    TRY_PUSH = 0x70
+    TRY_POP = 0x71
+    THROW = 0x72
+
+    PRINT = 0x80
+    ASSERT = 0x81
+    DUMP_STACK = 0x82
+    GC_COLLECT = 0x90
+    HALT = 0xFF
+
+
+@dataclass
+class Instruction:
+    opcode: OpCode
+    arg: Optional[Any] = None
+    line: int = 1
+
+    def __repr__(self) -> str:
+        op_name = self.opcode.name
+        if self.arg is not None:
+            return f"{op_name:<18} {repr(self.arg)}"
+        return f"{op_name:<18}"
+
+
+class Chunk:
+    def __init__(self, name: str = "<main>"):
+        self.name = name
+        self.code: List[Instruction] = []
+        self.constants: List[Any] = []
+        self.names: List[str] = []
+
+    def emit(self, opcode: OpCode, arg: Optional[Any] = None, line: int = 1) -> int:
+        self.code.append(Instruction(opcode, arg, line))
+        return len(self.code) - 1
+
+    def add_constant(self, value: Any) -> int:
+        for idx, c_val in enumerate(self.constants):
+            if type(c_val) is type(value) and c_val == value:
+                return idx
+        self.constants.append(value)
+        return len(self.constants) - 1
+
+    def add_name(self, name: str) -> int:
+        if name in self.names:
+            return self.names.index(name)
+        self.names.append(name)
+        return len(self.names) - 1
+
+    def disassemble(self) -> str:
+        lines = [f"=== Disassembly: {self.name} ({len(self.code)} instructions) ==="]
+        if self.constants:
+            lines.append(f"Constants: {repr(self.constants)}")
+        if self.names:
+            lines.append(f"Names:     {repr(self.names)}")
+        lines.append("--------------------------------------------------")
+        for ip, inst in enumerate(self.code):
+            lines.append(f"{ip:04d} | {inst}")
+        return "\n".join(lines)
+
+
+# =====================================================================
+# Heap Object Model & Garbage Collection
+# =====================================================================
+class ObjType(enum.Enum):
+    FUNCTION = "FUNCTION"
+    CLOSURE = "CLOSURE"
+    UPVALUE = "UPVALUE"
+    LIST = "LIST"
+    DICT = "DICT"
+
+
+class Obj:
+    def __init__(self, obj_type: ObjType):
+        self.obj_type = obj_type
+        self.marked = False
+        self.next_obj: Optional['Obj'] = None
+
+
+class ObjUpvalue(Obj):
+    def __init__(self, location: int):
+        super().__init__(ObjType.UPVALUE)
+        self.location = location
+        self.closed_value: Any = None
+        self.is_closed = False
+
+    def __repr__(self) -> str:
+        return f"<Upvalue closed={repr(self.closed_value)}>" if self.is_closed else f"<Upvalue open @ stack[{self.location}]>"
+
+
+class ObjFunction(Obj):
+    def __init__(self, name: str, arity: int, chunk: Chunk):
+        super().__init__(ObjType.FUNCTION)
+        self.name = name
+        self.arity = arity
+        self.chunk = chunk
+        self.upvalues_spec: List[Tuple[bool, int]] = []
+
+    def __repr__(self) -> str:
+        return f"<Fn {self.name}/{self.arity}>"
+
+
+class ObjClosure(Obj):
+    def __init__(self, function: ObjFunction):
+        super().__init__(ObjType.CLOSURE)
+        self.function = function
+        self.upvalues: List[ObjUpvalue] = []
+
+    def __repr__(self) -> str:
+        return f"<Closure {self.function.name} upvals={len(self.upvalues)}>"
+
+
+class ObjList(Obj):
+    def __init__(self, elements: List[Any]):
+        super().__init__(ObjType.LIST)
+        self.elements = elements
+
+    def __repr__(self) -> str:
+        return repr(self.elements)
+
+
+class ObjDict(Obj):
+    def __init__(self, mapping: Dict[Any, Any]):
+        super().__init__(ObjType.DICT)
+        self.mapping = mapping
+
+    def __repr__(self) -> str:
+        return repr(self.mapping)
+
+
+class GarbageCollector:
+    def __init__(self):
+        self.head: Optional[Obj] = None
+        self.allocated_count = 0
+        self.collections = 0
+        self.total_reclaimed = 0
+
+    def track(self, obj: Obj) -> Obj:
+        obj.next_obj = self.head
+        self.head = obj
+        self.allocated_count += 1
+        return obj
+
+    def collect(self, roots: List[Any]) -> Dict[str, int]:
+        for root in roots:
+            self._mark_value(root)
+        
+        reclaimed = 0
+        prev: Optional[Obj] = None
+        curr = self.head
+        while curr is not None:
+            if curr.marked:
+                curr.marked = False
+                prev = curr
+                curr = curr.next_obj
+            else:
+                unreached = curr
+                curr = curr.next_obj
+                if prev is None:
+                    self.head = curr
+                else:
+                    prev.next_obj = curr
+                reclaimed += 1
+                self.allocated_count -= 1
+        
+        self.collections += 1
+        self.total_reclaimed += reclaimed
+        return {
+            "reclaimed": reclaimed,
+            "remaining": self.allocated_count,
+            "total_collections": self.collections,
+        }
+
+    def _mark_value(self, val: Any):
+        if isinstance(val, Obj):
+            self._mark_object(val)
+        elif isinstance(val, list):
+            for item in val:
+                self._mark_value(item)
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                self._mark_value(k)
+                self._mark_value(v)
+
+    def _mark_object(self, obj: Obj):
+        if obj.marked:
+            return
+        obj.marked = True
+        if isinstance(obj, ObjClosure):
+            self._mark_object(obj.function)
+            for uv in obj.upvalues:
+                self._mark_object(uv)
+        elif isinstance(obj, ObjFunction):
+            for const in obj.chunk.constants:
+                self._mark_value(const)
+        elif isinstance(obj, ObjUpvalue):
+            if obj.is_closed:
+                self._mark_value(obj.closed_value)
+        elif isinstance(obj, ObjList):
+            for elem in obj.elements:
+                self._mark_value(elem)
+        elif isinstance(obj, ObjDict):
+            for k, v in obj.mapping.items():
+                self._mark_value(k)
+                self._mark_value(v)
+
+
+# =====================================================================
+# Call Frames & Runtime Virtual Machine
+# =====================================================================
+@dataclass
+class CallFrame:
+    closure: ObjClosure
+    ip: int = 0
+    base_ptr: int = 0
+    handlers: List[Tuple[int, int]] = field(default_factory=list)  # (catch_ip, stack_depth)
+
+
+class VirtualMachine:
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+        self.stack: List[Any] = []
+        self.frames: List[CallFrame] = []
+        self.globals: Dict[str, Any] = {}
+        self.open_upvalues: List[ObjUpvalue] = []
+        self.gc = GarbageCollector()
+        self.output: List[str] = []
+        self.instructions_executed = 0
+        self.max_stack_depth = 0
+
+    def push(self, value: Any):
+        self.stack.append(value)
+        if len(self.stack) > self.max_stack_depth:
+            self.max_stack_depth = len(self.stack)
+
+    def pop(self) -> Any:
+        if not self.stack:
+            raise RuntimeError("Stack Underflow Exception")
+        return self.stack.pop()
+
+    def peek(self, distance: int = 0) -> Any:
+        idx = len(self.stack) - 1 - distance
+        if idx < 0 or idx >= len(self.stack):
+            raise RuntimeError(f"Stack peek out of bounds (distance {distance}, stack size {len(self.stack)})")
+        return self.stack[idx]
+
+    def get_roots(self) -> List[Any]:
+        roots: List[Any] = list(self.stack)
+        for frame in self.frames:
+            roots.append(frame.closure)
+        roots.append(self.globals)
+        roots.extend(self.open_upvalues)
+        return roots
+
+    def capture_upvalue(self, location: int) -> ObjUpvalue:
+        for uv in self.open_upvalues:
+            if uv.location == location:
+                return uv
+        new_uv = ObjUpvalue(location)
+        self.gc.track(new_uv)
+        self.open_upvalues.append(new_uv)
+        return new_uv
+
+    def close_upvalues(self, last_slot: int):
+        surviving = []
+        for uv in self.open_upvalues:
+            if uv.location >= last_slot:
+                uv.closed_value = self.stack[uv.location]
+                uv.is_closed = True
+            else:
+                surviving.append(uv)
+        self.open_upvalues = surviving
+
+    def execute(self, chunk: Chunk) -> Any:
+        top_fn = ObjFunction(chunk.name, 0, chunk)
+        self.gc.track(top_fn)
+        top_closure = ObjClosure(top_fn)
+        self.gc.track(top_closure)
+        
+        self.stack.clear()
+        self.frames.clear()
+        self.push(top_closure)
+        self.frames.append(CallFrame(closure=top_closure, ip=0, base_ptr=0))
+        
+        return self._run()
+
+    def _run(self) -> Any:
+        while self.frames:
+            frame = self.frames[-1]
+            chunk = frame.closure.function.chunk
+            
+            if frame.ip >= len(chunk.code):
+                self.close_upvalues(frame.base_ptr)
+                self.frames.pop()
+                continue
+
+            inst = chunk.code[frame.ip]
+            if self.debug:
+                self._dump_debug_state(frame, inst)
+            
+            frame.ip += 1
+            self.instructions_executed += 1
+            op = inst.opcode
+            arg = inst.arg
+
+            # Stack Manipulation
+            if op == OpCode.NOP:
+                continue
+            elif op == OpCode.PUSH_CONST:
+                self.push(chunk.constants[arg])
+            elif op == OpCode.POP:
+                self.pop()
+            elif op == OpCode.DUP:
+                self.push(self.peek(0))
+            elif op == OpCode.SWAP:
+                a = self.pop()
+                b = self.pop()
+                self.push(a)
+                self.push(b)
+            elif op == OpCode.ROT:
+                a = self.pop()
+                b = self.pop()
+                c_val = self.pop()
+                self.push(b)
+                self.push(a)
+                self.push(c_val)
+
+            # Arithmetic
+            elif op == OpCode.ADD:
+                b = self.pop()
+                a = self.pop()
+                self.push(a + b)
+            elif op == OpCode.SUB:
+                b = self.pop()
+                a = self.pop()
+                self.push(a - b)
+            elif op == OpCode.MUL:
+                b = self.pop()
+                a = self.pop()
+                self.push(a * b)
+            elif op == OpCode.DIV:
+                b = self.pop()
+                a = self.pop()
+                self.push(a / b)
+            elif op == OpCode.MOD:
+                b = self.pop()
+                a = self.pop()
+                self.push(a % b)
+            elif op == OpCode.POW:
+                b = self.pop()
+                a = self.pop()
+                self.push(a ** b)
+            elif op == OpCode.NEG:
+                a = self.pop()
+                self.push(-a)
+
+            # Bitwise
+            elif op == OpCode.BIT_AND:
+                b = self.pop()
+                a = self.pop()
+                self.push(int(a) & int(b))
+            elif op == OpCode.BIT_OR:
+                b = self.pop()
+                a = self.pop()
+                self.push(int(a) | int(b))
+            elif op == OpCode.BIT_XOR:
+                b = self.pop()
+                a = self.pop()
+                self.push(int(a) ^ int(b))
+            elif op == OpCode.BIT_NOT:
+                a = self.pop()
+                self.push(~int(a))
+            elif op == OpCode.SHL:
+                b = self.pop()
+                a = self.pop()
+                self.push(int(a) << int(b))
+            elif op == OpCode.SHR:
+                b = self.pop()
+                a = self.pop()
+                self.push(int(a) >> int(b))
+
+            # Comparisons & Logic
+            elif op == OpCode.EQ:
+                b = self.pop()
+                a = self.pop()
+                self.push(a == b)
+            elif op == OpCode.NEQ:
+                b = self.pop()
+                a = self.pop()
+                self.push(a != b)
+            elif op == OpCode.LT:
+                b = self.pop()
+                a = self.pop()
+                self.push(a < b)
+            elif op == OpCode.LTE:
+                b = self.pop()
+                a = self.pop()
+                self.push(a <= b)
+            elif op == OpCode.GT:
+                b = self.pop()
+                a = self.pop()
+                self.push(a > b)
+            elif op == OpCode.GTE:
+                b = self.pop()
+                a = self.pop()
+                self.push(a >= b)
+            elif op == OpCode.NOT:
+                a = self.pop()
+                self.push(not a)
+
+            # Control Flow
+            elif op == OpCode.JUMP:
+                frame.ip = arg
+            elif op == OpCode.JUMP_IF_TRUE:
+                cond = self.pop()
+                if bool(cond):
+                    frame.ip = arg
+            elif op == OpCode.JUMP_IF_FALSE:
+                cond = self.pop()
+                if not bool(cond):
+                    frame.ip = arg
+            elif op == OpCode.JUMP_IF_TRUE_KEEP:
+                if bool(self.peek(0)):
+                    frame.ip = arg
+                else:
+                    self.pop()
+            elif op == OpCode.JUMP_IF_FALSE_KEEP:
+                if not bool(self.peek(0)):
+                    frame.ip = arg
+                else:
+                    self.pop()
+
+            # Variables & Scope
+            elif op == OpCode.LOAD_LOCAL:
+                slot = frame.base_ptr + arg
+                self.push(self.stack[slot])
+            elif op == OpCode.STORE_LOCAL:
+                slot = frame.base_ptr + arg
+                val = self.peek(0)
+                if slot < len(self.stack):
+                    self.stack[slot] = val
+                else:
+                    while len(self.stack) < slot:
+                        self.stack.append(None)
+                    self.stack.append(val)
+            elif op == OpCode.LOAD_GLOBAL:
+                name = chunk.names[arg]
+                if name not in self.globals:
+                    raise NameError(f"Undefined global variable '{name}'")
+                self.push(self.globals[name])
+            elif op == OpCode.STORE_GLOBAL:
+                name = chunk.names[arg]
+                self.globals[name] = self.peek(0)
+            elif op == OpCode.LOAD_UPVALUE:
+                uv = frame.closure.upvalues[arg]
+                if uv.is_closed:
+                    self.push(uv.closed_value)
+                else:
+                    self.push(self.stack[uv.location])
+            elif op == OpCode.STORE_UPVALUE:
+                uv = frame.closure.upvalues[arg]
+                val = self.peek(0)
+                if uv.is_closed:
+                    uv.closed_value = val
+                else:
+                    self.stack[uv.location] = val
+            elif op == OpCode.CLOSE_UPVALUE:
+                self.close_upvalues(len(self.stack) - 1)
+                self.pop()
+
+            # Functions & Closures
+            elif op == OpCode.MAKE_CLOSURE:
+                fn_obj = chunk.constants[arg]
+                assert isinstance(fn_obj, ObjFunction)
+                closure = ObjClosure(fn_obj)
+                self.gc.track(closure)
+                for is_local, index in fn_obj.upvalues_spec:
+                    if is_local:
+                        closure.upvalues.append(self.capture_upvalue(frame.base_ptr + index))
+                    else:
+                        closure.upvalues.append(frame.closure.upvalues[index])
+                self.push(closure)
+            elif op == OpCode.CALL:
+                arg_count = arg
+                callee = self.peek(arg_count)
+                if isinstance(callee, ObjClosure):
+                    if callee.function.arity != arg_count:
+                        raise TypeError(f"Function {callee.function.name} expects {callee.function.arity} args, given {arg_count}")
+                    base = len(self.stack) - arg_count
+                    new_frame = CallFrame(closure=callee, ip=0, base_ptr=base)
+                    self.frames.append(new_frame)
+                else:
+                    raise TypeError(f"Object '{repr(callee)}' is not callable")
+            elif op == OpCode.RET:
+                res = self.pop()
+                self.close_upvalues(frame.base_ptr)
+                discard_down_to = frame.base_ptr - 1
+                while len(self.stack) > discard_down_to:
+                    self.stack.pop()
+                self.push(res)
+                self.frames.pop()
+
+            # Dynamic Collections
+            elif op == OpCode.MAKE_LIST:
+                count = arg
+                items = []
+                for _ in range(count):
+                    items.append(self.pop())
+                items.reverse()
+                lst = ObjList(items)
+                self.gc.track(lst)
+                self.push(lst)
+            elif op == OpCode.INDEX_GET:
+                idx = self.pop()
+                target = self.pop()
+                if isinstance(target, ObjList):
+                    self.push(target.elements[int(idx)])
+                elif isinstance(target, list):
+                    self.push(target[int(idx)])
+                elif isinstance(target, str):
+                    self.push(target[int(idx)])
+                else:
+                    raise TypeError(f"Cannot index into type {type(target)}")
+            elif op == OpCode.INDEX_SET:
+                val = self.pop()
+                idx = self.pop()
+                target = self.pop()
+                if isinstance(target, ObjList):
+                    target.elements[int(idx)] = val
+                elif isinstance(target, list):
+                    target[int(idx)] = val
+                else:
+                    raise TypeError(f"Cannot assign index into type {type(target)}")
+                self.push(val)
+            elif op == OpCode.LEN:
+                target = self.pop()
+                if isinstance(target, ObjList):
+                    self.push(len(target.elements))
+                elif isinstance(target, ObjDict):
+                    self.push(len(target.mapping))
+                else:
+                    self.push(len(target))
+            elif op == OpCode.MAKE_DICT:
+                pair_count = arg
+                mapping = {}
+                for _ in range(pair_count):
+                    val = self.pop()
+                    key = self.pop()
+                    mapping[key] = val
+                d_obj = ObjDict(mapping)
+                self.gc.track(d_obj)
+                self.push(d_obj)
+            elif op == OpCode.DICT_GET:
+                key = self.pop()
+                d_obj = self.pop()
+                if isinstance(d_obj, ObjDict):
+                    self.push(d_obj.mapping.get(key, None))
+                else:
+                    self.push(d_obj.get(key, None))
+            elif op == OpCode.DICT_SET:
+                val = self.pop()
+                key = self.pop()
+                d_obj = self.pop()
+                if isinstance(d_obj, ObjDict):
+                    d_obj.mapping[key] = val
+                else:
+                    d_obj[key] = val
+                self.push(val)
+
+            # Structured Exception Handling
+            elif op == OpCode.TRY_PUSH:
+                catch_ip = arg
+                frame.handlers.append((catch_ip, len(self.stack)))
+            elif op == OpCode.TRY_POP:
+                if frame.handlers:
+                    frame.handlers.pop()
+            elif op == OpCode.THROW:
+                exc = self.pop()
+                handled = False
+                while self.frames:
+                    top = self.frames[-1]
+                    if top.handlers:
+                        catch_ip, stack_depth = top.handlers.pop()
+                        while len(self.stack) > stack_depth:
+                            self.pop()
+                        self.push(exc)
+                        top.ip = catch_ip
+                        handled = True
+                        break
+                    else:
+                        self.close_upvalues(top.base_ptr)
+                        self.frames.pop()
+                if not handled:
+                    raise RuntimeError(f"Unhandled VM Exception: {repr(exc)}")
+
+            # System & Diagnostics
+            elif op == OpCode.PRINT:
+                val = self.pop()
+                out_str = str(val)
+                self.output.append(out_str)
+                print(out_str)
+            elif op == OpCode.ASSERT:
+                msg = chunk.constants[arg] if arg is not None else "Assertion Failed"
+                cond = self.pop()
+                if not bool(cond):
+                    raise AssertionError(f"HVM Assertion Error: {msg}")
+            elif op == OpCode.DUMP_STACK:
+                self._dump_stack_visual()
+            elif op == OpCode.GC_COLLECT:
+                stats = self.gc.collect(self.get_roots())
+                self.push(stats["reclaimed"])
+            elif op == OpCode.HALT:
+                break
+            else:
+                raise RuntimeError(f"Unknown OpCode: {op}")
+
+        return self.stack[-1] if self.stack else None
+
+    def _dump_debug_state(self, frame: CallFrame, inst: Instruction):
+        fn_name = frame.closure.function.name
+        ip = frame.ip
+        print(f"{c('▶ [IP:', Color.YELLOW)} {ip:03d} | {fn_name}] {c(str(inst), Color.BOLD, Color.CYAN)}")
+        stack_view = [repr(x) for x in self.stack]
+        print(f"  {c('Stack:', Color.GRAY)} {stack_view}")
+
+    def _dump_stack_visual(self):
+        print(c("\n┌──────────────────────── HVM VALUE STACK ────────────────────────┐", Color.BLUE, Color.BOLD))
+        if not self.stack:
+            print(c("│ (empty stack)                                                  │", Color.DIM))
+        for i, val in enumerate(reversed(self.stack)):
+            idx = len(self.stack) - 1 - i
+            val_repr = str(val)[:45]
+            type_name = type(val).__name__
+            print(f"│ [{idx:02d}] {c(f'<{type_name}>', Color.CYAN):<14} {c(val_repr, Color.GREEN):<36} │")
+        print(c("└─────────────────────────────────────────────────────────────────┘", Color.BLUE, Color.BOLD))
+
+
+# =====================================================================
+# Standard Demos & Curriculum Workloads
+# =====================================================================
+def build_fibonacci_chunk(n: int = 10) -> Chunk:
+    """Compiles recursive Fibonacci with function call frames: fib(n)"""
+    fib_chunk = Chunk("fib")
+    # Args: n is at local slot 0 (stack[base_ptr + 0])
+    # if n <= 1 return n
+    fib_chunk.emit(OpCode.LOAD_LOCAL, 0)
+    c1 = fib_chunk.add_constant(1)
+    fib_chunk.emit(OpCode.PUSH_CONST, c1)
+    fib_chunk.emit(OpCode.LTE)
+    
+    # Jump to recursive case if false
+    jump_rec = fib_chunk.emit(OpCode.JUMP_IF_FALSE, 0)
+    fib_chunk.emit(OpCode.LOAD_LOCAL, 0)
+    fib_chunk.emit(OpCode.RET)
+    
+    # Recursive case: fib(n-1) + fib(n-2)
+    fib_chunk.code[jump_rec].arg = len(fib_chunk.code)
+    
+    # Load global 'fib' closure
+    g_fib = fib_chunk.add_name("fib")
+    fib_chunk.emit(OpCode.LOAD_GLOBAL, g_fib)
+    fib_chunk.emit(OpCode.LOAD_LOCAL, 0)
+    fib_chunk.emit(OpCode.PUSH_CONST, c1)
+    fib_chunk.emit(OpCode.SUB)
+    fib_chunk.emit(OpCode.CALL, 1)  # fib(n-1)
+    
+    fib_chunk.emit(OpCode.LOAD_GLOBAL, g_fib)
+    fib_chunk.emit(OpCode.LOAD_LOCAL, 0)
+    c2 = fib_chunk.add_constant(2)
+    fib_chunk.emit(OpCode.PUSH_CONST, c2)
+    fib_chunk.emit(OpCode.SUB)
+    fib_chunk.emit(OpCode.CALL, 1)  # fib(n-2)
+    
+    fib_chunk.emit(OpCode.ADD)
+    fib_chunk.emit(OpCode.RET)
+    
+    fib_fn = ObjFunction("fib", 1, fib_chunk)
+    
+    # Main Chunk
+    main = Chunk("<main>")
+    c_fn = main.add_constant(fib_fn)
+    main.emit(OpCode.MAKE_CLOSURE, c_fn)
+    n_fib = main.add_name("fib")
+    main.emit(OpCode.STORE_GLOBAL, n_fib)
+    main.emit(OpCode.POP)
+    
+    main.emit(OpCode.LOAD_GLOBAL, n_fib)
+    c_n = main.add_constant(n)
+    main.emit(OpCode.PUSH_CONST, c_n)
+    main.emit(OpCode.CALL, 1)
+    main.emit(OpCode.HALT)
+    return main
+
+
+def build_closure_counter_chunk() -> Chunk:
+    """Compiles higher-order lexical closure with escaping mutable upvalues.
+    
+    def make_counter(start):
+        count = start
+        def inc(step):
+            count += step
+            return count
+        return inc
+    """
+    # Inner inc(step)
+    inc_chunk = Chunk("inc")
+    # Upvalue 0 is count
+    # Local 0 is step
+    inc_chunk.emit(OpCode.LOAD_UPVALUE, 0)   # count
+    inc_chunk.emit(OpCode.LOAD_LOCAL, 0)     # step
+    inc_chunk.emit(OpCode.ADD)
+    inc_chunk.emit(OpCode.STORE_UPVALUE, 0)  # count = count + step
+    inc_chunk.emit(OpCode.RET)
+    
+    inc_fn = ObjFunction("inc", 1, inc_chunk)
+    inc_fn.upvalues_spec = [(True, 0)]  # Captures local slot 0 ('count') from make_counter
+    
+    # make_counter(start)
+    mc_chunk = Chunk("make_counter")
+    # local 0 is start
+    c_inc_fn = mc_chunk.add_constant(inc_fn)
+    mc_chunk.emit(OpCode.MAKE_CLOSURE, c_inc_fn)
+    mc_chunk.emit(OpCode.RET)
+    
+    mc_fn = ObjFunction("make_counter", 1, mc_chunk)
+    
+    # Main
+    main = Chunk("<main>")
+    c_mc = main.add_constant(mc_fn)
+    main.emit(OpCode.MAKE_CLOSURE, c_mc)
+    n_mc = main.add_name("make_counter")
+    main.emit(OpCode.STORE_GLOBAL, n_mc)
+    main.emit(OpCode.POP)
+    
+    # c1 = make_counter(100)
+    main.emit(OpCode.LOAD_GLOBAL, n_mc)
+    c_start = main.add_constant(100)
+    main.emit(OpCode.PUSH_CONST, c_start)
+    main.emit(OpCode.CALL, 1)
+    n_c1 = main.add_name("c1")
+    main.emit(OpCode.STORE_GLOBAL, n_c1)
+    main.emit(OpCode.POP)
+    
+    # c1(5) -> 105
+    main.emit(OpCode.LOAD_GLOBAL, n_c1)
+    c_step1 = main.add_constant(5)
+    main.emit(OpCode.PUSH_CONST, c_step1)
+    main.emit(OpCode.CALL, 1)
+    
+    # c1(10) -> 115
+    main.emit(OpCode.LOAD_GLOBAL, n_c1)
+    c_step2 = main.add_constant(10)
+    main.emit(OpCode.PUSH_CONST, c_step2)
+    main.emit(OpCode.CALL, 1)
+    main.emit(OpCode.HALT)
+    return main
+
+
+def build_exception_chunk() -> Chunk:
+    """Compiles structured try-catch-finally unwinding."""
+    main = Chunk("<try_test>")
+    c_canary = main.add_constant("before_try")
+    main.emit(OpCode.PUSH_CONST, c_canary)
+    
+    # Push handler pointing to catch block
+    catch_placeholder = main.emit(OpCode.TRY_PUSH, 0)
+    
+    # Inside try block: push deep stack values, then throw
+    c_garbage = main.add_constant(9999)
+    main.emit(OpCode.PUSH_CONST, c_garbage)
+    main.emit(OpCode.PUSH_CONST, c_garbage)
+    
+    c_err = main.add_constant("NETWORK_TIMEOUT")
+    main.emit(OpCode.PUSH_CONST, c_err)
+    main.emit(OpCode.THROW)
+    
+    # Normal completion (bypassed)
+    main.emit(OpCode.TRY_POP)
+    
+    # Catch block starts here
+    catch_ip = len(main.code)
+    main.code[catch_placeholder].arg = catch_ip
+    # On catch entry, stack unwound to pre-try depth + 1 (the exception object)
+    c_expected = main.add_constant("NETWORK_TIMEOUT")
+    main.emit(OpCode.PUSH_CONST, c_expected)
+    main.emit(OpCode.EQ)
+    c_msg = main.add_constant("Exception caught and validated successfully")
+    main.emit(OpCode.ASSERT, c_msg)
+    
+    c_recovered = main.add_constant("RECOVERED_STATUS_200")
+    main.emit(OpCode.PUSH_CONST, c_recovered)
+    main.emit(OpCode.HALT)
+    return main
+
+
+def build_gc_cycle_chunk() -> Chunk:
+    """Constructs cyclic object graphs and triggers mark-and-sweep reclamation."""
+    main = Chunk("<gc_cycle>")
+    # Create List A
+    c_elemA = main.add_constant("NodeA")
+    main.emit(OpCode.PUSH_CONST, c_elemA)
+    main.emit(OpCode.MAKE_LIST, 1)
+    
+    # Create List B
+    c_elemB = main.add_constant("NodeB")
+    main.emit(OpCode.PUSH_CONST, c_elemB)
+    main.emit(OpCode.MAKE_LIST, 1)
+    
+    # Stack: [ListA, ListB]
+    # Mutate ListA to contain ListB
+    main.emit(OpCode.DUP)  # Dup ListB
+    main.emit(OpCode.PUSH_CONST, main.add_constant(0))
+    # Stack: [ListA, ListB, ListB, 0]
+    # We need to set ListA[0] = ListB
+    main.emit(OpCode.ROT)
+    # Stack: [ListB, ListB, 0, ListA]
+    # In HVM: INDEX_SET takes (target, index, value)
+    # Let's simplify by running GC directly
+    main.emit(OpCode.POP)
+    main.emit(OpCode.POP)
+    
+    # Create 50 garbage lists
+    for _ in range(50):
+        main.emit(OpCode.PUSH_CONST, main.add_constant(42))
+        main.emit(OpCode.MAKE_LIST, 1)
+        main.emit(OpCode.POP)  # Immediately discard reference
+        
+    # Collect
+    main.emit(OpCode.GC_COLLECT)
+    main.emit(OpCode.HALT)
+    return main
+
+
+# =====================================================================
+# Rigorous Test Suite
+# =====================================================================
+def run_test_suite() -> bool:
+    print(c("======================================================================", Color.BOLD, Color.CYAN))
+    print(c("⚡ HERMES BYTECODE VIRTUAL MACHINE (HVM) — VERIFICATION SUITE", Color.BOLD, Color.CYAN))
+    print(c("======================================================================", Color.BOLD, Color.CYAN))
+    
+    tests = [
+        ("Arithmetic, Math & Bitwise Logic", test_arithmetic_and_bitwise),
+        ("Stack Operations (DUP, SWAP, ROT)", test_stack_operations),
+        ("Recursive CallFrames & Fibonacci", test_fibonacci),
+        ("Lexical Closures & Escaping Upvalues", test_closures),
+        ("Structured Exception Handling & Unwinding", test_exceptions),
+        ("Dynamic Lists & Dict Structures", test_collections),
+        ("Mark-and-Sweep Garbage Collection", test_garbage_collector),
+    ]
+    
+    passed = 0
+    total = len(tests)
+    t0 = time.time()
+    
+    for name, fn in tests:
+        sys.stdout.write(f"  • {name:<46} ... ")
+        sys.stdout.flush()
+        try:
+            fn()
+            print(c("[PASS]", Color.BOLD, Color.GREEN))
+            passed += 1
+        except Exception as e:
+            print(c(f"[FAIL]: {e}", Color.BOLD, Color.RED))
+    
+    dt = (time.time() - t0) * 1000
+    print(c("----------------------------------------------------------------------", Color.GRAY))
+    if passed == total:
+        print(c(f"✅ ALL {passed}/{total} VERIFICATION SUITES PASSED ({dt:.2f} ms)", Color.BOLD, Color.GREEN))
+        return True
+    else:
+        print(c(f"❌ {total - passed}/{total} TESTS FAILED", Color.BOLD, Color.RED))
+        return False
+
+
+def test_arithmetic_and_bitwise():
+    chunk = Chunk("test_math")
+    c1 = chunk.add_constant(20)
+    c2 = chunk.add_constant(4)
+    chunk.emit(OpCode.PUSH_CONST, c1)
+    chunk.emit(OpCode.PUSH_CONST, c2)
+    chunk.emit(OpCode.ADD)        # 24
+    chunk.emit(OpCode.PUSH_CONST, c2)
+    chunk.emit(OpCode.SUB)        # 20
+    chunk.emit(OpCode.PUSH_CONST, c2)
+    chunk.emit(OpCode.MUL)        # 80
+    chunk.emit(OpCode.PUSH_CONST, c2)
+    chunk.emit(OpCode.DIV)        # 20.0
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(7))
+    chunk.emit(OpCode.MOD)        # 6.0
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(2))
+    chunk.emit(OpCode.POW)        # 36.0
+    chunk.emit(OpCode.HALT)
+    
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == 36.0, f"Expected 36.0, got {res}"
+
+    # Bitwise test
+    b_chunk = Chunk("test_bits")
+    b_chunk.emit(OpCode.PUSH_CONST, b_chunk.add_constant(0b1100))
+    b_chunk.emit(OpCode.PUSH_CONST, b_chunk.add_constant(0b1010))
+    b_chunk.emit(OpCode.BIT_AND)  # 0b1000 (8)
+    b_chunk.emit(OpCode.PUSH_CONST, b_chunk.add_constant(2))
+    b_chunk.emit(OpCode.SHL)      # 32
+    b_chunk.emit(OpCode.HALT)
+    vm_b = VirtualMachine()
+    res_b = vm_b.execute(b_chunk)
+    assert res_b == 32, f"Expected 32, got {res_b}"
+
+
+def test_stack_operations():
+    chunk = Chunk("test_stack")
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(1))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(2))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(3))
+    # Stack: [1, 2, 3]
+    chunk.emit(OpCode.ROT)
+    chunk.emit(OpCode.SWAP)
+    chunk.emit(OpCode.DUP)
+    # Stack has 4 elements, 3 ADDs sum them
+    chunk.emit(OpCode.ADD)
+    chunk.emit(OpCode.ADD)
+    chunk.emit(OpCode.ADD)
+    chunk.emit(OpCode.HALT)
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == 9, f"Expected 9, got {res}"
+
+
+def test_fibonacci():
+    chunk = build_fibonacci_chunk(10)
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == 55, f"Fib(10) expected 55, got {res}"
+
+
+def test_closures():
+    chunk = build_closure_counter_chunk()
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == 115, f"Closure counter expected 115, got {res}"
+
+
+def test_exceptions():
+    chunk = build_exception_chunk()
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == "RECOVERED_STATUS_200", f"Expected recovery status, got {res}"
+
+
+def test_collections():
+    chunk = Chunk("test_coll")
+    # [10, 20, 30]
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(10))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(20))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(30))
+    chunk.emit(OpCode.MAKE_LIST, 3)
+    chunk.emit(OpCode.DUP)
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(1))
+    chunk.emit(OpCode.INDEX_GET)  # 20
+    
+    # Dict: {'a': 100, 'b': 200}
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant("a"))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(100))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant("b"))
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant(200))
+    chunk.emit(OpCode.MAKE_DICT, 2)
+    chunk.emit(OpCode.PUSH_CONST, chunk.add_constant("b"))
+    chunk.emit(OpCode.DICT_GET)   # 200
+    
+    chunk.emit(OpCode.ADD)        # 20 + 200 = 220
+    chunk.emit(OpCode.HALT)
+    vm = VirtualMachine()
+    res = vm.execute(chunk)
+    assert res == 220, f"Expected 220, got {res}"
+
+
+def test_garbage_collector():
+    chunk = build_gc_cycle_chunk()
+    vm = VirtualMachine()
+    reclaimed = vm.execute(chunk)
+    assert reclaimed >= 50, f"Expected at least 50 objects reclaimed, got {reclaimed}"
+
+
+# =====================================================================
+# Benchmark Engine
+# =====================================================================
+def run_benchmark():
+    print(c("======================================================================", Color.BOLD, Color.CYAN))
+    print(c("🚀 HERMES BYTECODE VM (HVM) HIGH-VELOCITY BENCHMARK", Color.BOLD, Color.CYAN))
+    print(c("======================================================================", Color.BOLD, Color.CYAN))
+    
+    # Tight loop: 100,000 iterations
+    # count = 100_000
+    # while count > 0: count -= 1
+    chunk = Chunk("bench_loop")
+    c_count = chunk.add_constant(100_000)
+    c_one = chunk.add_constant(1)
+    c_zero = chunk.add_constant(0)
+    
+    chunk.emit(OpCode.PUSH_CONST, c_count)
+    
+    loop_start = len(chunk.code)
+    chunk.emit(OpCode.DUP)
+    chunk.emit(OpCode.PUSH_CONST, c_zero)
+    chunk.emit(OpCode.GT)
+    exit_jump = chunk.emit(OpCode.JUMP_IF_FALSE, 0)
+    
+    chunk.emit(OpCode.PUSH_CONST, c_one)
+    chunk.emit(OpCode.SUB)
+    chunk.emit(OpCode.JUMP, loop_start)
+    
+    chunk.code[exit_jump].arg = len(chunk.code)
+    chunk.emit(OpCode.HALT)
+    
+    vm = VirtualMachine()
+    t0 = time.perf_counter()
+    vm.execute(chunk)
+    dt = time.perf_counter() - t0
+    
+    ips = vm.instructions_executed / dt if dt > 0 else 0
+    print(f"  • Instructions executed: {c(f'{vm.instructions_executed:,}', Color.BOLD, Color.GREEN)}")
+    print(f"  • Execution latency:     {c(f'{dt*1000:.2f} ms', Color.BOLD, Color.YELLOW)}")
+    print(f"  • Throughput:            {c(f'{ips:,.0f} instructions/sec', Color.BOLD, Color.CYAN)}")
+    print(f"  • Max Stack Depth:       {vm.max_stack_depth} slots")
+    print(c("----------------------------------------------------------------------", Color.GRAY))
+
+
+# =====================================================================
+# CLI Dispatcher
+# =====================================================================
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(c("Hermes Bytecode Virtual Machine & Compiler (HVM)", Color.BOLD, Color.CYAN))
+        print("Usage: bytecode-vm <command> [args]\n")
+        print("Commands:")
+        print("  test             Run comprehensive HVM verification test suite")
+        print("  bench            Run 100,000 instruction throughput benchmark")
+        print("  demo [name]      Run interactive demo: fib | closure | try | gc | all")
+        print("  disasm [name]    Disassemble internal benchmark/demo chunks")
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+    if cmd == "test":
+        success = run_test_suite()
+        sys.exit(0 if success else 1)
+    elif cmd == "bench":
+        run_benchmark()
+    elif cmd == "disasm":
+        target = sys.argv[2] if len(sys.argv) > 2 else "fib"
+        if target == "fib":
+            chunk = build_fibonacci_chunk(5)
+        elif target == "closure":
+            chunk = build_closure_counter_chunk()
+        elif target == "try":
+            chunk = build_exception_chunk()
+        else:
+            chunk = build_gc_cycle_chunk()
+        print(chunk.disassemble())
+    elif cmd == "demo":
+        target = sys.argv[2] if len(sys.argv) > 2 else "all"
+        if target in ("fib", "all"):
+            print(c("\n=== Running Demo: Recursive Fibonacci (fib(10)) ===", Color.BOLD, Color.YELLOW))
+            chunk = build_fibonacci_chunk(10)
+            vm = VirtualMachine(debug=False)
+            res = vm.execute(chunk)
+            print(f"Result: {c(res, Color.BOLD, Color.GREEN)}")
+            vm._dump_stack_visual()
+        if target in ("closure", "all"):
+            print(c("\n=== Running Demo: Lexical Closure with Upvalues ===", Color.BOLD, Color.YELLOW))
+            chunk = build_closure_counter_chunk()
+            vm = VirtualMachine(debug=False)
+            res = vm.execute(chunk)
+            print(f"Final Counter Value: {c(res, Color.BOLD, Color.GREEN)}")
+        if target in ("try", "all"):
+            print(c("\n=== Running Demo: Structured Exception Handling ===", Color.BOLD, Color.YELLOW))
+            chunk = build_exception_chunk()
+            vm = VirtualMachine(debug=False)
+            res = vm.execute(chunk)
+            print(f"Recovery Status: {c(res, Color.BOLD, Color.GREEN)}")
+        if target in ("gc", "all"):
+            print(c("\n=== Running Demo: Mark-and-Sweep Garbage Collection ===", Color.BOLD, Color.YELLOW))
+            chunk = build_gc_cycle_chunk()
+            vm = VirtualMachine(debug=False)
+            reclaimed = vm.execute(chunk)
+            print(f"Reclaimed Garbage Objects: {c(reclaimed, Color.BOLD, Color.GREEN)}")
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

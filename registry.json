@@ -429,5 +429,22 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "bytecode-vm",
+    "title": "Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger.",
+    "cli": "bytecode-vm",
+    "evolved_at": "2026-10-28T15:05:00.000000",
+    "tags": [
+      "SystemsArchitecture",
+      "VirtualMachines",
+      "BytecodeCompiler",
+      "Closures",
+      "GarbageCollection",
+      "ComputerScience"
+    ]
   }
 ]

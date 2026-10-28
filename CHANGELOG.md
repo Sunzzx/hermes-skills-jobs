@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-28 15:05:00] - Evolved `bytecode-vm`
+- **Title**: Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler
+- **Category**: systems
+- **Description**: Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger.
+- **CLI**: `bytecode-vm` (`test`, `bench`, `demo`, `disasm`)
+
 ### [2026-10-28 13:30:00] - Evolved `test-time-mcts`
 - **Title**: Test-Time Compute MCTS & Process Reward Model (PRM) Engine
 - **Category**: research

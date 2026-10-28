@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-28-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-29-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (28 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (29 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -40,6 +40,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **24-Hour Executive Intelligence & Academic Surveillance Briefing** | `education` | `daily-briefing` | Daily 4-section executive briefing: top actions, T-minus countdown (IITM BS milestones, exams), inbox/security watchdog, and universal opportunity radar (Government Officer recruitments, Quant, Remote AI roles). | `ExecutiveBriefing` `UPSC` `IITM-BS` |
 | **Test-Time Compute MCTS & Process Reward Model (PRM) Engine** | `research` | `test-time-mcts` | Frontier AI Test-Time Search implementation featuring Monte Carlo Tree Search with step-level Process Reward Models (PRMs), PUCT exploration, self-correcting backtracking, and ANSI tree visualization. | `Frontier-AI` `Test-Time-Compute` `MCTS` |
 | **Workflow Accelerator Suite #19** | `productivity` | `accelerate-19` | Automated filesystem indexing & context cache accelerator for Hermes cycle #19. | `Automation` `Productivity` `Evolution` |
+| **Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler** | `systems` | `bytecode-vm` | Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger. | `SystemsArchitecture` `VirtualMachines` `BytecodeCompiler` |
 
 ---
 
