@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-32-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-34-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (32 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (34 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -43,8 +43,9 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler** | `systems` | `bytecode-vm` | Production-grade stack-based Virtual Machine and Bytecode Execution Engine featuring lexical closures with escaping upvalues, recursive call frames, structured exception handling, mark-and-sweep GC with cycle reclamation, and an interactive ANSI step debugger. | `SystemsArchitecture` `VirtualMachines` `BytecodeCompiler` |
 | **Workflow Accelerator Suite #20** | `productivity` | `accelerate-20` | Automated filesystem indexing & context cache accelerator for Hermes cycle #20. | `Automation` `Productivity` `Evolution` |
 | **N-Body Barnes-Hut Gravitational Simulator & Collision Dynamics Engine** | `computational-science` | `nbody-sim` | Production-grade N-body gravitational simulator with Barnes-Hut hierarchical octree O(N log N), symplectic 2nd-order Leapfrog integration, Plummer softening, quadrupole multipoles, and interactive Unicode Braille terminal visualizer. | `ComputationalPhysics` `Astrophysics` `BarnesHut` |
-| **Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine** | `creative` | `waveguide-synth` | Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, MSW nonlinear bowed string solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python. | `AudioDSP` `PhysicalModeling` `Waveguides` |
 | **Workflow Accelerator Suite #21** | `productivity` | `accelerate-21` | Automated filesystem indexing & context cache accelerator for Hermes cycle #21. | `Automation` `Productivity` `Evolution` |
+| **Physical Modeling Audio Synthesizer & Digital Waveguide DSP Engine** | `creative` | `waveguide-synth` | Mathematically rigorous physical modeling audio synthesizer & digital waveguide DSP engine: bidirectional waveguides, Thiran fractional delay allpass filters, McIntyre-Schumacher-Woodhouse (MSW) nonlinear stick-slip friction solver, Euler-Bernoulli modal banks, Bessel membrane drums, acoustic flute, and Schroeder spatial acoustics in pure Python. | `AudioDSP` `PhysicalModeling` `DigitalWaveguides` |
+| **Workflow Accelerator Suite #22** | `productivity` | `accelerate-22` | Automated filesystem indexing & context cache accelerator for Hermes cycle #22. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -69,10 +70,10 @@ sysdoctor status
 ports check
 ports free 3000
 
-# Example: Synthesize and visualize physical modeling audio in terminal
-waveguide-synth visualize --instrument plucked --repertoire bach-prelude
+# Example: Fetch latest arXiv frontier AI breakthrough papers
+research-radar
 ```
 
 ---
 
-*Last Evolved: 2026-10-28 20:12:00*
+*Last Evolved: 2026-10-28 21:16:37*
