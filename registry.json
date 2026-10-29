@@ -97,7 +97,7 @@
   },
   {
     "id": "port-sentinel",
-    "title": "Port Sentinel \u2014 Dev Port Conflict Manager",
+    "title": "Port Sentinel — Dev Port Conflict Manager",
     "category": "software-development",
     "type": "skill+tool",
     "description": "Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely.",
@@ -705,6 +705,21 @@
       "Automation",
       "Productivity",
       "Evolution"
+    ]
+  },
+  {
+    "id": "log-scrub",
+    "title": "Log Scrub",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories.",
+    "cli": "log-scrub",
+    "evolved_at": "2026-10-29T20:02:05+05:30",
+    "tags": [
+      "LogSanitization",
+      "Secrets",
+      "Privacy",
+      "IncidentResponse"
     ]
   }
 ]
