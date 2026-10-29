@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Validate JSON Lines streams and summarize schema drift."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, TextIO
+
+
+class DuplicateKeyError(ValueError):
+    pass
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateKeyError(f"duplicate object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def stable_value(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def audit(stream: TextIO, *, unique_key: str | None = None, strict_fields: bool = False) -> dict[str, Any]:
+    valid_rows = 0
+    errors: list[dict[str, Any]] = []
+    field_counts: Counter[str] = Counter()
+    type_counts: dict[str, Counter[str]] = {}
+    seen_values: set[str] = set()
+    first_fields: set[str] | None = None
+
+    for line_number, raw_line in enumerate(stream, 1):
+        if not raw_line.strip():
+            continue
+        try:
+            value = json.loads(raw_line, object_pairs_hook=reject_duplicate_keys)
+            if not isinstance(value, dict):
+                raise ValueError("top-level JSON value must be an object")
+        except (json.JSONDecodeError, DuplicateKeyError, ValueError) as exc:
+            errors.append({"line": line_number, "error": str(exc)})
+            continue
+
+        valid_rows += 1
+        fields = set(value)
+        if first_fields is None:
+            first_fields = fields
+        field_counts.update(fields)
+        for key, item in value.items():
+            type_counts.setdefault(key, Counter()).update([json_type(item)])
+
+        if strict_fields and fields != first_fields:
+            missing = sorted((first_fields or set()) - fields)
+            extra = sorted(fields - (first_fields or set()))
+            errors.append({"line": line_number, "error": "field set differs from first valid row",
+                           "missing": missing, "extra": extra})
+
+        if unique_key is not None:
+            if unique_key not in value:
+                errors.append({"line": line_number, "error": f"missing unique key: {unique_key}"})
+            else:
+                encoded = stable_value(value[unique_key])
+                if encoded in seen_values:
+                    errors.append({"line": line_number, "error": f"duplicate value for unique key: {unique_key}"})
+                seen_values.add(encoded)
+
+    fields = sorted(field_counts)
+    schema = {
+        key: {"types": dict(sorted(type_counts[key].items())), "present_rows": field_counts[key]}
+        for key in fields
+    }
+    return {
+        "rows": valid_rows,
+        "errors": errors,
+        "schema": schema,
+        "consistent_fields": len(set(field_counts.values())) <= 1 and len(fields) == len(first_fields or set()),
+        "strict_fields": strict_fields,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("file", nargs="?", default="-", help="JSONL file; default reads stdin")
+    parser.add_argument("--unique", metavar="KEY", help="require a present, unique top-level field")
+    parser.add_argument("--strict-fields", action="store_true", help="require every row to match the first valid row's field set")
+    args = parser.parse_args(argv)
+
+    try:
+        if args.file == "-":
+            report = audit(sys.stdin, unique_key=args.unique, strict_fields=args.strict_fields)
+        else:
+            with Path(args.file).open("r", encoding="utf-8") as stream:
+                report = audit(stream, unique_key=args.unique, strict_fields=args.strict_fields)
+    except (OSError, UnicodeError) as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+    json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 1 if report["errors"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

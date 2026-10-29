@@ -266,3 +266,9 @@
 - **Title**: Workflow Accelerator Suite #26
 - **Category**: productivity
 - **Description**: Automated filesystem indexing & context cache accelerator for Hermes cycle #26.
+
+### [2026-10-29 21:30:00 +05:30] - Evolved `jsonl-audit`
+- **Title**: JSONL Audit
+- **Category**: software-development
+- **Description**: Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues.
+- **CLI**: `jsonl-audit` (`--strict-fields`, `--unique KEY`)
