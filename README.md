@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-44-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-45-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -55,6 +55,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #25** | `productivity` | `accelerate-25` | Automated filesystem indexing & context cache accelerator for Hermes cycle #25. | `Automation` `Productivity` `Evolution` |
 | **LSM-Tree Storage Engine with Leveled Compaction & WAL** | `systems` | `lsm-tree` | Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation. | `Hardcore-Systems` `LSM-Tree` `StorageEngine` |
 | **Incident Timeline** | `software-development` | `trace-timeline` | Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output. | `IncidentResponse` `Logs` `Debugging` |
+| **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests and verify release trees for changed, missing, or unexpected files. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
 | **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 
 ---

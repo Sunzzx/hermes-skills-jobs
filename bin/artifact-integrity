@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Create and verify deterministic SHA-256 manifests for release artifacts."""
+from __future__ import annotations
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+FORMAT = "hermes-artifact-manifest/v1"
+CHUNK = 1024 * 1024
+
+
+def digest(path: Path) -> tuple[str, int]:
+    h = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(CHUNK):
+            size += len(chunk)
+            h.update(chunk)
+    return h.hexdigest(), size
+
+
+def inventory(root: Path, excludes: list[str], manifest: Path | None = None) -> dict[str, dict]:
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError(f"root is not a directory: {root}")
+    entries = {}
+    for current, dirs, files in os.walk(root, followlinks=False):
+        base = Path(current)
+        dirs[:] = sorted(d for d in dirs if not (base / d).is_symlink())
+        for filename in sorted(files):
+            path = base / filename
+            rel = path.relative_to(root).as_posix()
+            if any(fnmatch.fnmatchcase(rel, pattern) for pattern in excludes):
+                continue
+            if manifest is not None and path.resolve() == manifest.resolve():
+                continue
+            if path.is_symlink():
+                raise ValueError(f"refusing symlink: {rel}")
+            sha, size = digest(path)
+            entries[rel] = {"sha256": sha, "size": size}
+    return entries
+
+
+def create(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve(strict=True)
+    out = Path(args.output).resolve()
+    files = inventory(root, args.exclude, out)
+    payload = {"format": FORMAT, "algorithm": "sha256", "files": files}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(out)
+    print(f"Created {out} ({len(files)} files)")
+    return 0
+
+
+def verify(args: argparse.Namespace) -> int:
+    manifest_path = Path(args.manifest).resolve(strict=True)
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if data.get("format") != FORMAT or data.get("algorithm") != "sha256" or not isinstance(data.get("files"), dict):
+            raise ValueError("unsupported or malformed manifest")
+        for name, record in data["files"].items():
+            p = Path(name)
+            if p.is_absolute() or ".." in p.parts or not isinstance(record, dict):
+                raise ValueError(f"unsafe manifest path: {name}")
+        root = Path(args.root).resolve(strict=True)
+        current = inventory(root, args.exclude, manifest_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"artifact-integrity: {exc}", file=sys.stderr)
+        return 2
+    expected = data["files"]
+    missing = sorted(set(expected) - set(current))
+    extra = sorted(set(current) - set(expected))
+    changed = sorted(name for name in set(expected) & set(current)
+                     if expected[name].get("sha256") != current[name]["sha256"]
+                     or expected[name].get("size") != current[name]["size"])
+    if not (missing or extra or changed):
+        print(f"OK: {len(expected)} files verified (SHA-256)")
+        return 0
+    for label, names in (("MISSING", missing), ("CHANGED", changed), ("UNEXPECTED", extra)):
+        for name in names:
+            print(f"{label}: {name}")
+    print(f"FAILED: {len(missing)} missing, {len(changed)} changed, {len(extra)} unexpected")
+    return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    make = sub.add_parser("create", help="write a deterministic manifest")
+    make.add_argument("root", help="directory to inventory")
+    make.add_argument("-o", "--output", required=True, help="manifest path")
+    make.add_argument("--exclude", action="append", default=[], help="relative glob to omit; repeatable")
+    make.set_defaults(func=create)
+    check = sub.add_parser("verify", help="compare a tree against a manifest")
+    check.add_argument("root", help="directory to verify")
+    check.add_argument("manifest", help="manifest JSON")
+    check.add_argument("--exclude", action="append", default=[], help="same exclusions used at creation")
+    check.set_defaults(func=verify)
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except (OSError, ValueError) as exc:
+        print(f"artifact-integrity: {exc}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    raise SystemExit(main())

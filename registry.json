@@ -97,7 +97,7 @@
   },
   {
     "id": "port-sentinel",
-    "title": "Port Sentinel \u2014 Dev Port Conflict Manager",
+    "title": "Port Sentinel — Dev Port Conflict Manager",
     "category": "software-development",
     "type": "skill+tool",
     "description": "Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely.",
@@ -690,6 +690,21 @@
       "Automation",
       "Productivity",
       "Evolution"
+    ]
+  },
+  {
+    "id": "artifact-integrity",
+    "title": "Artifact Integrity Manifest & Verifier",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions.",
+    "cli": "artifact-integrity",
+    "evolved_at": "2026-10-29T17:22:38",
+    "tags": [
+      "ReleaseIntegrity",
+      "SHA256",
+      "SupplyChain",
+      "ArtifactAudit"
     ]
   }
 ]
