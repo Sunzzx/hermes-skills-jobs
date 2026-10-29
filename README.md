@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-41-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-42-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (41 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (42 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -53,6 +53,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #24** | `productivity` | `accelerate-24` | Automated filesystem indexing & context cache accelerator for Hermes cycle #24. | `Automation` `Productivity` `Evolution` |
 | **Flow Matching & Continuous Normalizing Flows (CNF) Engine** | `research` | `flow-matching` | Production-grade Flow Matching & Continuous Normalizing Flows (CNF) engine: Optimal Transport displacement interpolants, Conditional Flow Matching (CFM) loss, neural vector field regression with sinusoidal time embeddings, adaptive Dormand-Prince RK45 & Euler numerical ODE integration, Liouville continuous change of variables log-likelihood, trajectory straightness metrics, and high-resolution interactive Unicode Braille phase-flow visualizer. | `FrontierAI` `FlowMatching` `ContinuousNormalizingFlows` |
 | **Workflow Accelerator Suite #25** | `productivity` | `accelerate-25` | Automated filesystem indexing & context cache accelerator for Hermes cycle #25. | `Automation` `Productivity` `Evolution` |
+| **LSM-Tree Storage Engine with Leveled Compaction & WAL** | `systems` | `lsm-tree` | Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation. | `Hardcore-Systems` `LSM-Tree` `StorageEngine` |
 
 ---
 
@@ -83,4 +84,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 15:04:38*
+*Last Evolved: 2026-10-29 15:15:17*

@@ -641,5 +641,25 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "lsm-tree",
+    "title": "LSM-Tree Storage Engine with Leveled Compaction & WAL",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation.",
+    "cli": "lsm-tree",
+    "evolved_at": "2026-10-29T15:15:17.649139",
+    "tags": [
+      "Hardcore-Systems",
+      "LSM-Tree",
+      "StorageEngine",
+      "WriteAheadLog",
+      "LeveledCompaction",
+      "BloomFilter",
+      "SkipList",
+      "MVCC",
+      "ACID"
+    ]
   }
 ]

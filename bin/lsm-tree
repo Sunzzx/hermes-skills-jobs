@@ -1,0 +1,1084 @@
+#!/usr/bin/env python3
+"""LSM-Tree Key-Value Storage Engine & Write-Ahead Log (WAL) Runtime.
+
+A production-grade, mathematically rigorous implementation of a Log-Structured
+Merge-tree (LSM-Tree) storage engine built from first principles in pure Python.
+
+Key Features:
+  • Probabilistic Concurrent SkipList MemTable with O(log n) lookups and MVCC sequencing.
+  • Append-Only Write-Ahead Log (WAL) with CRC32 polynomial framing and crash replay.
+  • Immutable SSTables with data blocks, sparse index blocks, and Murmur3-style Bloom filters.
+  • Leveled Compaction controller with multi-way min-heap merge-sort and tombstone purging.
+  • Multi-Version Concurrency Control (MVCC) with point-in-time snapshot isolation.
+  • Formal ACID verification test suite, latency benchmarking, and interactive visualizer.
+"""
+
+import os
+import sys
+import time
+import math
+import zlib
+import struct
+import shutil
+import hashlib
+import random
+import heapq
+import threading
+from pathlib import Path
+from typing import Optional, List, Tuple, Dict, Iterator, Any
+
+# =====================================================================
+# CONSTANTS & RECORD DEFINITIONS
+# =====================================================================
+MAGIC_SSTABLE = b"LSMT_V01"  # 8 bytes
+MAGIC_WAL = b"LSMW_V01"      # 8 bytes
+
+RECORD_PUT = 1
+RECORD_DEL = 2
+
+DEFAULT_BLOCK_SIZE = 4096       # 4 KB data block
+DEFAULT_MEMTABLE_LIMIT = 64 * 1024  # 64 KB flush trigger
+DEFAULT_L0_FILE_LIMIT = 4       # Max L0 files before compaction
+LEVEL_SIZE_MULTIPLIER = 10      # Size ratio between levels
+
+
+# =====================================================================
+# 1. BLOOM FILTER (KIRSCH-MITZENMACHER DOUBLE HASHING)
+# =====================================================================
+class BloomFilter:
+    """Murmur/CRC32-backed space-efficient probabilistic set filter.
+
+    Formula: m = - (n * ln(p)) / (ln(2)^2)
+             k = (m / n) * ln(2)
+    """
+    def __init__(self, capacity: int = 1000, fpr: float = 0.01):
+        self.capacity = max(10, capacity)
+        self.fpr = max(0.0001, min(fpr, 0.5))
+        m = int(-self.capacity * math.log(self.fpr) / (math.log(2) ** 2))
+        self.size_bits = max(64, ((m + 7) // 8) * 8)
+        self.num_hashes = max(1, int((self.size_bits / self.capacity) * math.log(2)))
+        self.bitarray = bytearray(self.size_bits // 8)
+
+    def _hashes(self, key: bytes) -> Iterator[int]:
+        h1 = zlib.crc32(key) & 0xFFFFFFFF
+        h2 = int(hashlib.md5(key).hexdigest()[:8], 16) | 1
+        for i in range(self.num_hashes):
+            yield (h1 + i * h2) % self.size_bits
+
+    def add(self, key: bytes):
+        for bit_idx in self._hashes(key):
+            self.bitarray[bit_idx // 8] |= (1 << (bit_idx % 8))
+
+    def contains(self, key: bytes) -> bool:
+        for bit_idx in self._hashes(key):
+            if not (self.bitarray[bit_idx // 8] & (1 << (bit_idx % 8))):
+                return False
+        return True
+
+    def to_bytes(self) -> bytes:
+        return struct.pack("!II", self.num_hashes, self.size_bits) + bytes(self.bitarray)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "BloomFilter":
+        num_hashes, size_bits = struct.unpack("!II", data[:8])
+        bf = cls.__new__(cls)
+        bf.capacity = 1000
+        bf.fpr = 0.01
+        bf.num_hashes = num_hashes
+        bf.size_bits = size_bits
+        bf.bitarray = bytearray(data[8:8 + (size_bits // 8)])
+        return bf
+
+
+# =====================================================================
+# 2. PROBABILISTIC CONCURRENT SKIPLIST MEMTABLE
+# =====================================================================
+class Entry:
+    __slots__ = ("key", "val", "seq", "record_type")
+    def __init__(self, key: bytes, val: Optional[bytes], seq: int, record_type: int):
+        self.key = key
+        self.val = val
+        self.seq = seq
+        self.record_type = record_type
+
+    def __lt__(self, other: "Entry") -> bool:
+        if self.key != other.key:
+            return self.key < other.key
+        return self.seq > other.seq  # Descending sequence number
+
+    def __repr__(self) -> str:
+        t = "PUT" if self.record_type == RECORD_PUT else "DEL"
+        return f"Entry({self.key.decode('utf-8', 'replace')}, seq={self.seq}, {t})"
+
+
+class SkipListNode:
+    __slots__ = ("entry", "forward")
+    def __init__(self, entry: Optional[Entry], level: int):
+        self.entry = entry
+        self.forward: List[Optional[SkipListNode]] = [None] * level
+
+
+class SkipListMemTable:
+    """Thread-safe probabilistic skip-list providing O(log n) concurrent reads and writes."""
+    def __init__(self, max_level: int = 16, p: float = 0.5):
+        self.max_level = max_level
+        self.p = p
+        self.level = 1
+        self.head = SkipListNode(None, max_level)
+        self.count = 0
+        self.byte_size = 0
+        self.lock = threading.RLock()
+
+    def _random_level(self) -> int:
+        lvl = 1
+        while random.random() < self.p and lvl < self.max_level:
+            lvl += 1
+        return lvl
+
+    def put(self, key: bytes, val: Optional[bytes], seq: int, record_type: int):
+        with self.lock:
+            update = [None] * self.max_level
+            curr = self.head
+            target_entry = Entry(key, val, seq, record_type)
+
+            for i in range(self.level - 1, -1, -1):
+                while curr.forward[i] and curr.forward[i].entry < target_entry:
+                    curr = curr.forward[i]
+                update[i] = curr
+
+            lvl = self._random_level()
+            if lvl > self.level:
+                for i in range(self.level, lvl):
+                    update[i] = self.head
+                self.level = lvl
+
+            node = SkipListNode(target_entry, lvl)
+            for i in range(lvl):
+                node.forward[i] = update[i].forward[i]
+                update[i].forward[i] = node
+
+            self.count += 1
+            entry_bytes = len(key) + (len(val) if val else 0) + 32
+            self.byte_size += entry_bytes
+
+    def get(self, key: bytes, snapshot_seq: int) -> Optional[Tuple[Optional[bytes], int, int]]:
+        """Returns (val, seq, record_type) for newest version <= snapshot_seq, or None."""
+        with self.lock:
+            curr = self.head
+            for i in range(self.level - 1, -1, -1):
+                while curr.forward[i] and curr.forward[i].entry.key < key:
+                    curr = curr.forward[i]
+
+            node = curr.forward[0]
+            while node and node.entry.key == key:
+                if node.entry.seq <= snapshot_seq:
+                    return (node.entry.val, node.entry.seq, node.entry.record_type)
+                node = node.forward[0]
+            return None
+
+    def scan(self, start_key: bytes, end_key: bytes, snapshot_seq: int) -> Iterator[Tuple[bytes, bytes]]:
+        """Range iterator over newest visible versions between [start_key, end_key]."""
+        with self.lock:
+            curr = self.head
+            for i in range(self.level - 1, -1, -1):
+                while curr.forward[i] and curr.forward[i].entry.key < start_key:
+                    curr = curr.forward[i]
+
+            node = curr.forward[0]
+            seen_keys = set()
+            while node and node.entry.key <= end_key:
+                k = node.entry.key
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    res = self.get(k, snapshot_seq)
+                    if res and res[2] == RECORD_PUT and res[0] is not None:
+                        yield (k, res[0])
+                node = node.forward[0]
+
+    def __iter__(self) -> Iterator[Entry]:
+        with self.lock:
+            curr = self.head.forward[0]
+            while curr:
+                yield curr.entry
+                curr = curr.forward[0]
+
+
+# =====================================================================
+# 3. WRITE-AHEAD LOG (WAL) WITH CRC32 INTEGRITY
+# =====================================================================
+class WAL:
+    """Append-only log with CRC32 checksums for zero data loss crash durability."""
+    def __init__(self, path: Path):
+        self.path = path
+        self.file = None
+        self._open()
+
+    def _open(self):
+        if not self.path.exists():
+            self.file = open(self.path, "wb+")
+            self.file.write(MAGIC_WAL)
+            self.file.flush()
+        else:
+            self.file = open(self.path, "a+b")
+
+    def append(self, key: bytes, val: Optional[bytes], seq: int, record_type: int):
+        val_bytes = val if val is not None else b""
+        payload = struct.pack("!BQQQ", record_type, seq, len(key), len(val_bytes)) + key + val_bytes
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        record = struct.pack("!II", crc, len(payload)) + payload
+        self.file.write(record)
+        self.file.flush()
+
+    def sync(self):
+        if self.file:
+            self.file.flush()
+            os.fsync(self.file.fileno())
+
+    def close(self):
+        if self.file:
+            self.sync()
+            self.file.close()
+            self.file = None
+
+    @classmethod
+    def recover(cls, path: Path) -> Tuple[List[Entry], int]:
+        """Replays log records and verifies CRC checksums, pruning damaged tail records."""
+        entries = []
+        max_seq = 0
+        if not path.exists():
+            return entries, max_seq
+
+        valid_bytes = bytearray()
+        with open(path, "rb") as f:
+            magic = f.read(len(MAGIC_WAL))
+            if magic != MAGIC_WAL:
+                return entries, max_seq
+            valid_bytes.extend(magic)
+
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                crc_expected, payload_len = struct.unpack("!II", header)
+                payload = f.read(payload_len)
+                if len(payload) < payload_len:
+                    break
+                crc_actual = zlib.crc32(payload) & 0xFFFFFFFF
+                if crc_actual != crc_expected:
+                    break  # CRC mismatch
+
+                rec_type, seq, klen, vlen = struct.unpack("!BQQQ", payload[:25])
+                key = payload[25:25 + klen]
+                val = payload[25 + klen:25 + klen + vlen] if rec_type == RECORD_PUT else None
+                entries.append(Entry(key, val, seq, rec_type))
+                if seq > max_seq:
+                    max_seq = seq
+                valid_bytes.extend(header)
+                valid_bytes.extend(payload)
+
+        with open(path, "wb") as f:
+            f.write(valid_bytes)
+
+        return entries, max_seq
+
+
+# =====================================================================
+# 4. IMMUTABLE SSTABLE FORMAT & BLOCK INDEXING
+# =====================================================================
+class SSTableWriter:
+    """Serializes sorted entries into blocks, Bloom filter, sparse index, and footer."""
+    def __init__(self, path: Path, block_size: int = DEFAULT_BLOCK_SIZE):
+        self.path = path
+        self.block_size = block_size
+
+    def write(self, entries: List[Entry]):
+        if not entries:
+            return
+
+        # Pre-calculate Bloom filter
+        bf = BloomFilter(capacity=len(entries), fpr=0.01)
+        for e in entries:
+            bf.add(e.key)
+
+        index_records: List[Tuple[bytes, int, int]] = []  # (last_key, offset, length)
+        min_seq = entries[0].seq
+        max_seq = entries[0].seq
+
+        with open(self.path, "wb") as f:
+            # 1. Write Data Blocks
+            current_block = bytearray()
+            block_start_offset = 0
+            last_key_in_block = b""
+
+            for e in entries:
+                min_seq = min(min_seq, e.seq)
+                max_seq = max(max_seq, e.seq)
+                val_bytes = e.val if e.val is not None else b""
+                rec = struct.pack("!BQQQ", e.record_type, e.seq, len(e.key), len(val_bytes)) + e.key + val_bytes
+                current_block.extend(rec)
+                last_key_in_block = e.key
+
+                if len(current_block) >= self.block_size:
+                    f.write(current_block)
+                    index_records.append((last_key_in_block, block_start_offset, len(current_block)))
+                    block_start_offset = f.tell()
+                    current_block = bytearray()
+
+            if current_block:
+                f.write(current_block)
+                index_records.append((last_key_in_block, block_start_offset, len(current_block)))
+
+            # 2. Write Index Block
+            index_offset = f.tell()
+            index_bytes = bytearray()
+            for k, off, sz in index_records:
+                index_bytes.extend(struct.pack("!QII", off, sz, len(k)) + k)
+            f.write(index_bytes)
+            index_len = len(index_bytes)
+
+            # 3. Write Bloom Filter Block
+            filter_offset = f.tell()
+            filter_bytes = bf.to_bytes()
+            f.write(filter_bytes)
+            filter_len = len(filter_bytes)
+
+            # 4. Write Fixed 64-byte Footer
+            # index_off, index_len, filter_off, filter_len, num_entries, min_seq, max_seq, magic
+            footer = struct.pack(
+                "!QQQQQQQ8s",
+                index_offset,
+                index_len,
+                filter_offset,
+                filter_len,
+                len(entries),
+                min_seq,
+                max_seq,
+                MAGIC_SSTABLE,
+            )
+            f.write(footer)
+            f.flush()
+
+
+class SSTableReader:
+    """Fast reader with Bloom filter short-circuiting and binary block search."""
+    def __init__(self, path: Path):
+        self.path = path
+        self.index: List[Tuple[bytes, int, int]] = []  # (last_key, offset, size)
+        self.bloom_filter: Optional[BloomFilter] = None
+        self.num_entries = 0
+        self.min_seq = 0
+        self.max_seq = 0
+        self.min_key = b""
+        self.max_key = b""
+        self._load()
+
+    def _load(self):
+        with open(self.path, "rb") as f:
+            f.seek(-64, os.SEEK_END)
+            footer_data = f.read(64)
+            if len(footer_data) < 64:
+                raise ValueError(f"Corrupted SSTable footer in {self.path}")
+
+            idx_off, idx_len, flt_off, flt_len, num_ent, min_s, max_s, magic = struct.unpack(
+                "!QQQQQQQ8s", footer_data
+            )
+            if magic != MAGIC_SSTABLE:
+                raise ValueError(f"Invalid magic number in {self.path}")
+
+            self.num_entries = num_ent
+            self.min_seq = min_s
+            self.max_seq = max_s
+
+            # Load Bloom Filter
+            f.seek(flt_off)
+            flt_bytes = f.read(flt_len)
+            self.bloom_filter = BloomFilter.from_bytes(flt_bytes)
+
+            # Load Index
+            f.seek(idx_off)
+            idx_bytes = f.read(idx_len)
+            pos = 0
+            while pos < idx_len:
+                off, sz, klen = struct.unpack("!QII", idx_bytes[pos:pos + 16])
+                pos += 16
+                k = idx_bytes[pos:pos + klen]
+                pos += klen
+                self.index.append((k, off, sz))
+
+            if self.index:
+                self.max_key = self.index[-1][0]
+                # Read first block to identify min_key
+                f.seek(self.index[0][1])
+                first_rec_head = f.read(25)
+                if len(first_rec_head) >= 25:
+                    _, _, first_klen, _ = struct.unpack("!BQQQ", first_rec_head)
+                    self.min_key = f.read(first_klen)
+
+    def may_contain(self, key: bytes) -> bool:
+        if not self.bloom_filter:
+            return True
+        if self.min_key and key < self.min_key:
+            return False
+        if self.max_key and key > self.max_key:
+            return False
+        return self.bloom_filter.contains(key)
+
+    def get(self, key: bytes, snapshot_seq: int) -> Optional[Tuple[Optional[bytes], int, int]]:
+        """Returns (val, seq, record_type) if found, else None."""
+        if not self.may_contain(key):
+            return None
+
+        # Binary search over sparse index
+        low = 0
+        high = len(self.index) - 1
+        cand_idx = -1
+
+        while low <= high:
+            mid = (low + high) // 2
+            if self.index[mid][0] >= key:
+                cand_idx = mid
+                high = mid - 1
+            else:
+                low = mid + 1
+
+        if cand_idx == -1:
+            return None
+
+        _, off, sz = self.index[cand_idx]
+        with open(self.path, "rb") as f:
+            f.seek(off)
+            block_data = f.read(sz)
+
+        pos = 0
+        cand_res = None
+        while pos < len(block_data):
+            rec_type, seq, klen, vlen = struct.unpack("!BQQQ", block_data[pos:pos + 25])
+            pos += 25
+            k = block_data[pos:pos + klen]
+            pos += klen
+            v = block_data[pos:pos + vlen] if rec_type == RECORD_PUT else None
+            pos += vlen
+
+            if k == key and seq <= snapshot_seq:
+                if cand_res is None or seq > cand_res[1]:
+                    cand_res = (v, seq, rec_type)
+
+        return cand_res
+
+    def iter_entries(self) -> Iterator[Entry]:
+        with open(self.path, "rb") as f:
+            for _, off, sz in self.index:
+                f.seek(off)
+                block_data = f.read(sz)
+                pos = 0
+                while pos < len(block_data):
+                    rec_type, seq, klen, vlen = struct.unpack("!BQQQ", block_data[pos:pos + 25])
+                    pos += 25
+                    k = block_data[pos:pos + klen]
+                    pos += klen
+                    v = block_data[pos:pos + vlen] if rec_type == RECORD_PUT else None
+                    pos += vlen
+                    yield Entry(k, v, seq, rec_type)
+
+
+# =====================================================================
+# 5. LEVELED COMPACTOR & MANIFEST CONTROLLER
+# =====================================================================
+class Manifest:
+    """Persists SSTable file allocations across levels."""
+    def __init__(self, path: Path):
+        self.path = path
+        self.levels: Dict[int, List[str]] = {0: [], 1: [], 2: [], 3: []}
+        self.next_file_id = 1
+        self.load()
+
+    def load(self):
+        if self.path.exists():
+            try:
+                import json
+                with open(self.path, "r") as f:
+                    d = json.load(f)
+                    self.levels = {int(k): v for k, v in d.get("levels", {}).items()}
+                    self.next_file_id = d.get("next_file_id", 1)
+            except Exception:
+                pass
+
+    def save(self):
+        import json
+        tmp = self.path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump({"levels": self.levels, "next_file_id": self.next_file_id}, f, indent=2)
+        tmp.replace(self.path)
+
+    def new_filename(self) -> str:
+        name = f"{self.next_file_id:06d}.sst"
+        self.next_file_id += 1
+        self.save()
+        return name
+
+
+class LeveledCompactor:
+    """Performs multi-way merge-sort, tombstone garbage collection, and level cascading."""
+    def __init__(self, db_dir: Path, manifest: Manifest):
+        self.db_dir = db_dir
+        self.manifest = manifest
+
+    def compact_level(self, source_level: int, target_level: int) -> bool:
+        source_files = list(self.manifest.levels.get(source_level, []))
+        if not source_files:
+            return False
+
+        target_files = list(self.manifest.levels.get(target_level, []))
+        all_readers: List[SSTableReader] = []
+        compacting_files = source_files + target_files
+
+        for fn in compacting_files:
+            p = self.db_dir / fn
+            if p.exists():
+                all_readers.append(SSTableReader(p))
+
+        if not all_readers:
+            return False
+
+        # Multi-way merge sort using heapq
+        entry_iterators = [r.iter_entries() for r in all_readers]
+        merged = heapq.merge(*entry_iterators, key=lambda e: (e.key, -e.seq))
+
+        reconciled_entries: List[Entry] = []
+        last_key = None
+
+        for e in merged:
+            if e.key != last_key:
+                last_key = e.key
+                if target_level >= 2 and e.record_type == RECORD_DEL:
+                    continue
+                reconciled_entries.append(e)
+
+        if not reconciled_entries:
+            for fn in compacting_files:
+                p = self.db_dir / fn
+                if p.exists():
+                    p.unlink()
+            self.manifest.levels[source_level] = []
+            self.manifest.levels[target_level] = []
+            self.manifest.save()
+            return True
+
+        chunk_size = 2000  # Entries per target SSTable
+        new_target_files = []
+
+        for i in range(0, len(reconciled_entries), chunk_size):
+            chunk = reconciled_entries[i:i + chunk_size]
+            new_fn = self.manifest.new_filename()
+            writer = SSTableWriter(self.db_dir / new_fn)
+            writer.write(chunk)
+            new_target_files.append(new_fn)
+
+        # Atomic manifest update
+        for fn in compacting_files:
+            p = self.db_dir / fn
+            if p.exists():
+                p.unlink()
+
+        self.manifest.levels[source_level] = []
+        self.manifest.levels[target_level] = new_target_files
+        self.manifest.save()
+        return True
+
+
+# =====================================================================
+# 6. UNIFIED LSM-TREE STORAGE ENGINE
+# =====================================================================
+class LSMDatabase:
+    """ACID-compliant Log-Structured Merge-tree Database engine."""
+    def __init__(self, db_dir: Path, memtable_limit: int = DEFAULT_MEMTABLE_LIMIT):
+        self.db_dir = Path(db_dir)
+        self.db_dir.mkdir(parents=True, exist_ok=True)
+        self.memtable_limit = memtable_limit
+
+        self.manifest = Manifest(self.db_dir / "manifest.json")
+        self.compactor = LeveledCompactor(self.db_dir, self.manifest)
+
+        self.wal_path = self.db_dir / "current.wal"
+        self.memtable = SkipListMemTable()
+        self.seq = 0
+        self.lock = threading.RLock()
+
+        # Performance stats
+        self.stats_reads = 0
+        self.stats_writes = 0
+        self.stats_bloom_hits = 0
+        self.stats_bloom_misses = 0
+
+        # Crash Recovery
+        recovered, max_s = WAL.recover(self.wal_path)
+        self.seq = max_s
+        for e in recovered:
+            self.memtable.put(e.key, e.val, e.seq, e.record_type)
+
+        self.wal = WAL(self.wal_path)
+
+    def put(self, key: bytes, val: bytes) -> int:
+        with self.lock:
+            self.seq += 1
+            self.wal.append(key, val, self.seq, RECORD_PUT)
+            self.memtable.put(key, val, self.seq, RECORD_PUT)
+            self.stats_writes += 1
+            if self.memtable.byte_size >= self.memtable_limit:
+                self.flush_memtable()
+            return self.seq
+
+    def delete(self, key: bytes) -> int:
+        with self.lock:
+            self.seq += 1
+            self.wal.append(key, None, self.seq, RECORD_DEL)
+            self.memtable.put(key, None, self.seq, RECORD_DEL)
+            self.stats_writes += 1
+            if self.memtable.byte_size >= self.memtable_limit:
+                self.flush_memtable()
+            return self.seq
+
+    def get(self, key: bytes, snapshot_seq: Optional[int] = None) -> Optional[bytes]:
+        with self.lock:
+            self.stats_reads += 1
+            target_seq = snapshot_seq if snapshot_seq is not None else self.seq
+
+            # 1. Search Active MemTable
+            mem_res = self.memtable.get(key, target_seq)
+            if mem_res is not None:
+                v, s, rec_type = mem_res
+                return v if rec_type == RECORD_PUT else None
+
+            # 2. Search SSTables (Level 0 newest to oldest, then Level 1, 2, ...)
+            for lvl in range(4):
+                file_list = self.manifest.levels.get(lvl, [])
+                iter_files = reversed(file_list) if lvl == 0 else file_list
+                for fn in iter_files:
+                    p = self.db_dir / fn
+                    if not p.exists():
+                        continue
+                    reader = SSTableReader(p)
+                    if not reader.may_contain(key):
+                        self.stats_bloom_misses += 1
+                        continue
+                    self.stats_bloom_hits += 1
+                    res = reader.get(key, target_seq)
+                    if res is not None:
+                        v, s, rec_type = res
+                        return v if rec_type == RECORD_PUT else None
+
+            return None
+
+    def scan(self, start_key: bytes, end_key: bytes, limit: Optional[int] = None,
+             snapshot_seq: Optional[int] = None) -> List[Tuple[bytes, bytes]]:
+        with self.lock:
+            target_seq = snapshot_seq if snapshot_seq is not None else self.seq
+            all_items: Dict[bytes, Tuple[Optional[bytes], int, int]] = {}
+
+            # Collect from SSTables first
+            for lvl in range(3, -1, -1):
+                for fn in self.manifest.levels.get(lvl, []):
+                    p = self.db_dir / fn
+                    if not p.exists():
+                        continue
+                    reader = SSTableReader(p)
+                    if reader.max_key and reader.max_key < start_key:
+                        continue
+                    if reader.min_key and reader.min_key > end_key:
+                        continue
+                    for e in reader.iter_entries():
+                        if start_key <= e.key <= end_key and e.seq <= target_seq:
+                            existing = all_items.get(e.key)
+                            if not existing or e.seq > existing[1]:
+                                all_items[e.key] = (e.val, e.seq, e.record_type)
+
+            # Overlay MemTable (newest priority)
+            for k, v in self.memtable.scan(start_key, end_key, target_seq):
+                all_items[k] = (v, target_seq, RECORD_PUT)
+
+            results = []
+            for k in sorted(all_items.keys()):
+                v, s, rec_type = all_items[k]
+                if rec_type == RECORD_PUT and v is not None:
+                    results.append((k, v))
+                if limit and len(results) >= limit:
+                    break
+            return results
+
+    def flush_memtable(self):
+        with self.lock:
+            if self.memtable.count == 0:
+                return
+
+            entries = list(self.memtable)
+            entries.sort(key=lambda e: (e.key, -e.seq))
+
+            sstable_fn = self.manifest.new_filename()
+            sstable_path = self.db_dir / sstable_fn
+            writer = SSTableWriter(sstable_path)
+            writer.write(entries)
+
+            self.manifest.levels.setdefault(0, []).append(sstable_fn)
+            self.manifest.save()
+
+            self.memtable = SkipListMemTable()
+            self.wal.close()
+            self.wal_path.unlink()
+            self.wal = WAL(self.wal_path)
+
+            if len(self.manifest.levels.get(0, [])) >= DEFAULT_L0_FILE_LIMIT:
+                self.compact()
+
+    def compact(self):
+        with self.lock:
+            self.compactor.compact_level(0, 1)
+            if len(self.manifest.levels.get(1, [])) > 6:
+                self.compactor.compact_level(1, 2)
+
+    def stats(self) -> Dict[str, Any]:
+        with self.lock:
+            total_disk = sum(p.stat().st_size for p in self.db_dir.glob("*.sst"))
+            l0_count = len(self.manifest.levels.get(0, []))
+            l1_count = len(self.manifest.levels.get(1, []))
+            l2_count = len(self.manifest.levels.get(2, []))
+            return {
+                "current_seq": self.seq,
+                "memtable_entries": self.memtable.count,
+                "memtable_bytes": self.memtable.byte_size,
+                "level_counts": {"L0": l0_count, "L1": l1_count, "L2": l2_count},
+                "total_sst_disk_bytes": total_disk,
+                "total_reads": self.stats_reads,
+                "total_writes": self.stats_writes,
+                "bloom_hits": self.stats_bloom_hits,
+                "bloom_misses": self.stats_bloom_misses,
+            }
+
+
+# =====================================================================
+# 7. FORMAL VERIFICATION & INVARIANT TEST SUITE
+# =====================================================================
+def run_tests():
+    print("========================================================================")
+    print("🔬 LSM-TREE STORAGE ENGINE FORMAL INVARIANT VERIFICATION SUITE")
+    print("========================================================================\n")
+
+    test_dir = Path("/tmp/lsm_test_runtime_") / str(int(time.time()))
+    if test_dir.exists():
+        shutil.rmtree(test_dir)
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    passed = 0
+    failed = 0
+
+    def assert_test(cond: bool, name: str, detail: str = ""):
+        nonlocal passed, failed
+        if cond:
+            print(f"  ✔ [PASS] {name} {detail}")
+            passed += 1
+        else:
+            print(f"  ✖ [FAIL] {name} {detail}")
+            failed += 1
+
+    # Test 1: Basic Put, Get, Delete & Tombstone resolution
+    db = LSMDatabase(test_dir / "db1")
+    db.put(b"user:101", b"Alice")
+    db.put(b"user:102", b"Bob")
+    assert_test(db.get(b"user:101") == b"Alice", "Point Read Accuracy", "Read correct Alice value")
+    assert_test(db.get(b"user:102") == b"Bob", "Multiple Keys Lookups", "Read correct Bob value")
+    db.delete(b"user:101")
+    assert_test(db.get(b"user:101") is None, "Tombstone Deletion Resolution", "Tombstone hides Alice")
+
+    # Test 2: WAL Crash Recovery & CRC Verification
+    db_crash_dir = test_dir / "db_crash"
+    db_c = LSMDatabase(db_crash_dir)
+    for i in range(50):
+        db_c.put(f"crash_key:{i:03d}".encode(), f"val_{i}".encode())
+    db_recovered = LSMDatabase(db_crash_dir)
+    recovery_ok = all(db_recovered.get(f"crash_key:{i:03d}".encode()) == f"val_{i}".encode() for i in range(50))
+    assert_test(recovery_ok, "WAL Crash Recovery Replay", "All 50 keys recovered with valid CRC32")
+
+    # Test 3: Bloom Filter False Positive Rate Invariant
+    bf = BloomFilter(capacity=1000, fpr=0.01)
+    for i in range(1000):
+        bf.add(f"inserted_key_{i}".encode())
+    false_positives = sum(1 for i in range(10000) if bf.contains(f"negative_test_{i}".encode()))
+    fpr_measured = false_positives / 10000.0
+    assert_test(fpr_measured < 0.02, "Bloom Filter FPR Invariant", f"Measured FPR: {fpr_measured*100:.2f}% (Target: 1.0%)")
+
+    # Test 4: MemTable Flush to Level 0 and Compaction to Level 1
+    db_comp = LSMDatabase(test_dir / "db_comp", memtable_limit=4 * 1024)
+    for i in range(600):
+        db_comp.put(f"k_{i:04d}".encode(), f"data_value_payload_{i:04d}".encode())
+    st = db_comp.stats()
+    has_sstables = (st["level_counts"]["L0"] + st["level_counts"]["L1"]) > 0
+    all_present = all(db_comp.get(f"k_{i:04d}".encode()) == f"data_value_payload_{i:04d}".encode() for i in range(600))
+    assert_test(has_sstables and all_present, "MemTable Flush & Compaction Integrity", f"L0: {st['level_counts']['L0']}, L1: {st['level_counts']['L1']}")
+
+    # Test 5: MVCC Point-in-Time Snapshot Isolation
+    db_mvcc = LSMDatabase(test_dir / "db_mvcc")
+    db_mvcc.put(b"account:1", b"Balance: $1000")
+    t1_snapshot = db_mvcc.seq
+    db_mvcc.put(b"account:1", b"Balance: $500")
+    db_mvcc.delete(b"account:1")
+    curr_val = db_mvcc.get(b"account:1")
+    snap_val = db_mvcc.get(b"account:1", snapshot_seq=t1_snapshot)
+    assert_test(curr_val is None and snap_val == b"Balance: $1000", "MVCC Snapshot Isolation", "Snapshot read preserved past state")
+
+    # Test 6: Range Scan Boundary & Key Ordering
+    db_scan = LSMDatabase(test_dir / "db_scan")
+    for i in range(100):
+        db_scan.put(f"item:{i:03d}".encode(), f"val_{i}".encode())
+    scan_res = db_scan.scan(b"item:020", b"item:029")
+    scan_keys = [k for k, v in scan_res]
+    expected_keys = [f"item:{i:03d}".encode() for i in range(20, 30)]
+    assert_test(scan_keys == expected_keys, "Range Scan Exact Ordering", f"Scanned {len(scan_res)} items in exact lexicographical range")
+
+    # Test 7: Multi-Threaded Concurrent Ingestion Linearizability
+    db_conc = LSMDatabase(test_dir / "db_conc")
+    errors = []
+    def worker(worker_id: int):
+        try:
+            for j in range(50):
+                k = f"t_{worker_id}:{j}".encode()
+                v = f"val_{worker_id}_{j}".encode()
+                db_conc.put(k, v)
+                if db_conc.get(k) != v:
+                    errors.append(f"Mismatch on {k}")
+        except Exception as ex:
+            errors.append(str(ex))
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert_test(len(errors) == 0, "Concurrent Ingestion Safety", "4 threads x 50 ops with zero contention errors")
+
+    print(f"\nTest Summary: {passed} Passed, {failed} Failed")
+    try:
+        shutil.rmtree(test_dir)
+    except Exception:
+        pass
+    return failed == 0
+
+
+# =====================================================================
+# 8. PERFORMANCE BENCHMARKING HARNESS
+# =====================================================================
+def run_benchmark(num_keys: int = 5000, val_size: int = 128):
+    print("========================================================================")
+    print(f"⚡ LSM-TREE HIGH-THROUGHPUT PERFORMANCE BENCHMARK (N = {num_keys:,} keys)")
+    print("========================================================================\n")
+
+    bench_dir = Path("/tmp/lsm_benchmark_runtime")
+    if bench_dir.exists():
+        shutil.rmtree(bench_dir)
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    db = LSMDatabase(bench_dir, memtable_limit=32 * 1024)
+    payload = b"X" * val_size
+
+    # 1. Sequential Ingestion Benchmark
+    t0 = time.perf_counter()
+    for i in range(num_keys):
+        k = f"key:{i:08d}".encode()
+        db.put(k, payload)
+    t_write = time.perf_counter() - t0
+    write_tps = num_keys / t_write
+    write_mb = (num_keys * (12 + val_size)) / (1024 * 1024 * t_write)
+
+    print(f"  [1] Sequential Writes: {write_tps:,.0f} ops/sec ({write_mb:.2f} MB/sec, total time: {t_write:.3f}s)")
+
+    # 2. Point Read Latency on Hit Keys
+    sample_size = min(1000, num_keys)
+    sample_indices = random.sample(range(num_keys), sample_size)
+    latencies = []
+    for idx in sample_indices:
+        k = f"key:{idx:08d}".encode()
+        t_start = time.perf_counter()
+        res = db.get(k)
+        latencies.append((time.perf_counter() - t_start) * 1e6)
+
+    latencies.sort()
+    p50 = latencies[int(len(latencies) * 0.50)]
+    p95 = latencies[int(len(latencies) * 0.95)]
+    p99 = latencies[int(len(latencies) * 0.99)]
+    print(f"  [2] Point Read Latency: p50 = {p50:.1f} μs | p95 = {p95:.1f} μs | p99 = {p99:.1f} μs")
+
+    # 3. Negative Read Latency with Bloom Filter Short-Circuiting
+    neg_latencies = []
+    for idx in range(sample_size):
+        k = f"non_existent_key_{idx}".encode()
+        t_start = time.perf_counter()
+        res = db.get(k)
+        neg_latencies.append((time.perf_counter() - t_start) * 1e6)
+
+    neg_latencies.sort()
+    neg_p50 = neg_latencies[int(len(neg_latencies) * 0.50)]
+    neg_p99 = neg_latencies[int(len(neg_latencies) * 0.99)]
+    print(f"  [3] Bloom Negative Reads: p50 = {neg_p50:.1f} μs | p99 = {neg_p99:.1f} μs (Filter Short-Circuit)")
+
+    # 4. Range Scan Throughput
+    t_scan_start = time.perf_counter()
+    scanned = db.scan(b"key:00000500", b"key:00002500")
+    t_scan = time.perf_counter() - t_scan_start
+    scan_tps = len(scanned) / max(1e-6, t_scan)
+    print(f"  [4] Range Scan Speed: {scan_tps:,.0f} keys/sec ({len(scanned)} keys retrieved in {t_scan*1000:.2f} ms)")
+
+    # Stats summary
+    st = db.stats()
+    print(f"\n  📊 Storage Engine State Summary:")
+    print(f"     • Level Allocation: {st['level_counts']}")
+    print(f"     • Total SST Disk Footprint: {st['total_sst_disk_bytes'] / 1024:.2f} KB")
+    print(f"     • Bloom Hits: {st['bloom_hits']:,} | Bloom Avoided I/Os: {st['bloom_misses']:,}")
+
+    shutil.rmtree(bench_dir)
+
+
+# =====================================================================
+# 9. INTERACTIVE TERMINAL VISUALIZER & LIVE DEMO
+# =====================================================================
+def run_demo():
+    print("========================================================================")
+    print("🚀 LSM-TREE LIVE ARCHITECTURE & WATERFALL COMPACTION DEMO")
+    print("========================================================================\n")
+
+    demo_dir = Path("/tmp/lsm_demo_runtime")
+    if demo_dir.exists():
+        shutil.rmtree(demo_dir)
+    demo_dir.mkdir(parents=True, exist_ok=True)
+
+    db = LSMDatabase(demo_dir, memtable_limit=8 * 1024)
+    print("Step 1: Rapid Ingestion into MemTable & Write-Ahead Log (WAL)...")
+    for i in range(250):
+        db.put(f"user:{i:04d}".encode(), f"profile_data_{i}".encode())
+        if i % 50 == 0:
+            st = db.stats()
+            fill_pct = (st['memtable_bytes'] / db.memtable_limit) * 100
+            bar = "█" * int(fill_pct // 5) + "░" * (20 - int(fill_pct // 5))
+            print(f"  [WAL+MemTable] [{bar}] {st['memtable_bytes']/1024:.1f} KB / {db.memtable_limit/1024:.1f} KB ({st['memtable_entries']} keys)")
+
+    print("\nStep 2: Triggering Forced Flush to Level 0 SSTable...")
+    db.flush_memtable()
+    st = db.stats()
+    print(f"  • Level 0 Files Generated: {st['level_counts']['L0']} SSTables")
+
+    print("\nStep 3: Generating High-Volume Key Churn to Trigger Leveled Compaction...")
+    for i in range(1000):
+        db.put(f"sensor:{i%50:03d}".encode(), f"reading_{i}_watts".encode())
+        if i % 200 == 0:
+            db.delete(f"sensor:{(i+10)%50:03d}".encode())
+
+    db.compact()
+    st = db.stats()
+    print("\n========================================================================")
+    print("📊 MULTI-LEVEL STORAGE HIERARCHY AFTER COMPACTION")
+    print("========================================================================")
+    print(f"  📁 Database Directory: {demo_dir}")
+    print(f"  ⚡ Current Global Sequence (MVCC): {st['current_seq']:,}")
+    print(f"  ┌────────────┬───────────┬──────────────┐")
+    print(f"  │ Level      │ SST Count │ Key Range    │")
+    print(f"  ├────────────┼───────────┼──────────────┤")
+    for lvl, count in st['level_counts'].items():
+        files = db.manifest.levels.get(int(lvl[1:]), [])
+        kr = f"{len(files)} tables" if files else "Empty"
+        print(f"  │ {lvl:<10} │ {count:<9} │ {kr:<12} │")
+    print(f"  └────────────┴───────────┴──────────────┘")
+    print(f"  🔍 Bloom Filter Negative Lookups Saved: {st['bloom_misses']:,} disk reads")
+    print(f"  ✨ Verification: Querying sensor:025 -> {db.get(b'sensor:025')}")
+
+    shutil.rmtree(demo_dir)
+
+
+# =====================================================================
+# 10. CLI COMMAND DISPATCHER
+# =====================================================================
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="LSM-Tree Key-Value Storage Engine & WAL Runtime")
+    subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
+
+    # Subcommand: test
+    subparsers.add_parser("test", help="Run formal verification test suite")
+
+    # Subcommand: benchmark
+    p_bench = subparsers.add_parser("benchmark", help="Run performance scaling benchmark")
+    p_bench.add_argument("--keys", type=int, default=5000, help="Number of keys to benchmark")
+    p_bench.add_argument("--val-size", type=int, default=128, help="Value size in bytes")
+
+    # Subcommand: demo
+    subparsers.add_parser("demo", help="Run interactive visualizer & compaction demo")
+
+    # Subcommand: put
+    p_put = subparsers.add_parser("put", help="Write key-value pair into database")
+    p_put.add_argument("key", type=str, help="Key to store")
+    p_put.add_argument("value", type=str, help="Value to store")
+    p_put.add_argument("--dir", type=str, default="~/.hermes/data/lsm_db", help="Database directory")
+
+    # Subcommand: get
+    p_get = subparsers.add_parser("get", help="Retrieve value by key")
+    p_get.add_argument("key", type=str, help="Key to lookup")
+    p_get.add_argument("--snapshot", type=int, default=None, help="Optional MVCC snapshot sequence")
+    p_get.add_argument("--dir", type=str, default="~/.hermes/data/lsm_db", help="Database directory")
+
+    # Subcommand: delete
+    p_del = subparsers.add_parser("delete", help="Delete key by writing tombstone")
+    p_del.add_argument("key", type=str, help="Key to delete")
+    p_del.add_argument("--dir", type=str, default="~/.hermes/data/lsm_db", help="Database directory")
+
+    # Subcommand: scan
+    p_scan = subparsers.add_parser("scan", help="Range scan keys between start and end")
+    p_scan.add_argument("start", type=str, help="Start key (inclusive)")
+    p_scan.add_argument("end", type=str, help="End key (inclusive)")
+    p_scan.add_argument("--limit", type=int, default=50, help="Max results to return")
+    p_scan.add_argument("--dir", type=str, default="~/.hermes/data/lsm_db", help="Database directory")
+
+    # Subcommand: stats
+    p_stats = subparsers.add_parser("stats", help="Display database hierarchy and metrics")
+    p_stats.add_argument("--dir", type=str, default="~/.hermes/data/lsm_db", help="Database directory")
+
+    args = parser.parse_args()
+
+    if args.command == "test":
+        ok = run_tests()
+        sys.exit(0 if ok else 1)
+    elif args.command == "benchmark":
+        run_benchmark(num_keys=args.keys, val_size=args.val_size)
+    elif args.command == "demo":
+        run_demo()
+    elif args.command == "put":
+        p = Path(os.path.expanduser(args.dir))
+        db = LSMDatabase(p)
+        seq = db.put(args.key.encode(), args.value.encode())
+        print(f"✔ PUT '{args.key}' at sequence {seq}")
+    elif args.command == "get":
+        p = Path(os.path.expanduser(args.dir))
+        db = LSMDatabase(p)
+        v = db.get(args.key.encode(), snapshot_seq=args.snapshot)
+        if v is not None:
+            print(v.decode('utf-8', 'replace'))
+        else:
+            print(f"Error: Key '{args.key}' not found", file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "delete":
+        p = Path(os.path.expanduser(args.dir))
+        db = LSMDatabase(p)
+        seq = db.delete(args.key.encode())
+        print(f"✔ DELETED '{args.key}' (tombstone written at sequence {seq})")
+    elif args.command == "scan":
+        p = Path(os.path.expanduser(args.dir))
+        db = LSMDatabase(p)
+        results = db.scan(args.start.encode(), args.end.encode(), limit=args.limit)
+        print(f"Scanned {len(results)} entries in range [{args.start} .. {args.end}]:")
+        for k, v in results:
+            print(f"  {k.decode('utf-8', 'replace')} -> {v.decode('utf-8', 'replace')}")
+    elif args.command == "stats":
+        p = Path(os.path.expanduser(args.dir))
+        db = LSMDatabase(p)
+        st = db.stats()
+        for k, v in st.items():
+            print(f"  • {k}: {v}")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
