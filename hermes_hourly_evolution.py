@@ -420,7 +420,7 @@ def load_ledger():
                 return json.load(f)
         except Exception:
             pass
-    return {"evolutions": [], "completed_ids": []}
+    return {"evolutions": [], "completed_ids": [], "last_evolution": ""}
 
 
 def save_ledger(ledger):
@@ -572,6 +572,14 @@ Operational workflow utility.
     else:
         log(f"  • Git push status: {push_out} {push_err}")
 
+    if target_item['id'] not in ledger.get('completed_ids', []):
+        ledger.setdefault('completed_ids', []).append(target_item['id'])
+    ledger['evolutions'] = ledger.get('evolutions', []) + [{
+        'id': target_item['id'],
+        'title': target_item['title'],
+        'timestamp': datetime.datetime.now().isoformat()
+    }]
+    ledger['last_evolution'] = datetime.datetime.now().isoformat()
     save_ledger(ledger)
     log(f"✅ Evolution cycle complete for: {target_item['id']}\n")
 

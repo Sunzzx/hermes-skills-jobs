@@ -220,3 +220,8 @@
 - **Title**: Workflow Accelerator Suite #24
 - **Category**: productivity
 - **Description**: Automated filesystem indexing & context cache accelerator for Hermes cycle #24.
+
+### [2026-10-29 14:02:05] - Evolved `flow-matching`
+- **Title**: Flow Matching & Continuous Normalizing Flows (CNF) Engine
+- **Category**: research
+- **Description**: Production-grade Flow Matching & Continuous Normalizing Flows (CNF) engine: Optimal Transport displacement interpolants, Conditional Flow Matching (CFM) loss, neural vector field regression with sinusoidal time embeddings, adaptive Dormand-Prince RK45 & Euler numerical ODE integration, Liouville continuous change of variables log-likelihood, trajectory straightness metrics, and high-resolution interactive Unicode Braille phase-flow visualizer.

@@ -608,5 +608,24 @@
       "Productivity",
       "Evolution"
     ]
+  },
+  {
+    "id": "flow-matching",
+    "title": "Flow Matching & Continuous Normalizing Flows (CNF) Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Production-grade Flow Matching & Continuous Normalizing Flows (CNF) engine: Optimal Transport displacement interpolants, Conditional Flow Matching (CFM) loss, neural vector field regression with sinusoidal time embeddings, adaptive Dormand-Prince RK45 & Euler numerical ODE integration, Liouville continuous change of variables log-likelihood, trajectory straightness metrics, and high-resolution interactive Unicode Braille phase-flow visualizer.",
+    "cli": "flow-matching",
+    "evolved_at": "2026-10-29T14:02:05.172830",
+    "tags": [
+      "FrontierAI",
+      "FlowMatching",
+      "ContinuousNormalizingFlows",
+      "OptimalTransport",
+      "GenerativeAI",
+      "ODENumerics",
+      "VectorFields",
+      "BrailleVisualizer"
+    ]
   }
 ]
