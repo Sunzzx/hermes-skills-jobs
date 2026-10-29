@@ -768,5 +768,19 @@
       "SchemaValidation",
       "DeveloperTools"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v28",
+    "title": "Workflow Accelerator Suite #28",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #28.",
+    "cli": "accelerate-28",
+    "evolved_at": "2026-10-30T00:37:35.718428",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]

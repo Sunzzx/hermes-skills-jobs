@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-48-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-50-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (48 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (50 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -60,7 +60,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 | **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
-| **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` `Security` |
+| **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` |
+| **Workflow Accelerator Suite #28** | `productivity` | `accelerate-28` | Automated filesystem indexing & context cache accelerator for Hermes cycle #28. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -91,4 +92,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 23:30:00*
+*Last Evolved: 2026-10-30 00:37:35*
