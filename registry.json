@@ -724,20 +724,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v26",
-    "title": "Workflow Accelerator Suite #26",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
-    "cli": "accelerate-26",
-    "evolved_at": "2026-10-29T22:13:27.210808",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "release-gate",
     "title": "Git Release Readiness Gate",
     "category": "software-development",
@@ -745,6 +731,25 @@
     "description": "Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.",
     "cli": "release-gate",
     "evolved_at": "2026-10-29T22:20:00+05:30",
-    "tags": ["Git", "Release", "SemVer", "SupplyChain"]
+    "tags": [
+      "Git",
+      "Release",
+      "SemVer",
+      "SupplyChain"
+    ]
+  },
+  {
+    "id": "workflow-accelerator-v26",
+    "title": "Workflow Accelerator Suite #26",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
+    "cli": "accelerate-26",
+    "evolved_at": "2026-10-29T23:17:27.167575",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]

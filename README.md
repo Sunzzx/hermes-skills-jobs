@@ -58,8 +58,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
 | **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
-| **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
+| **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -90,4 +90,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 22:13:27*
+*Last Evolved: 2026-10-29 23:17:27*
