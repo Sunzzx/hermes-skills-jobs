@@ -627,5 +627,19 @@
       "VectorFields",
       "BrailleVisualizer"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v25",
+    "title": "Workflow Accelerator Suite #25",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #25.",
+    "cli": "accelerate-25",
+    "evolved_at": "2026-10-29T15:04:38.093714",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]

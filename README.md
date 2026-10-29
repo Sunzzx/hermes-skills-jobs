@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-40-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-41-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (40 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (41 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -52,6 +52,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine** | `computational-science` | `md-sim` | Production-grade Molecular Dynamics engine: symplectic 2nd-order Velocity-Verlet, shifted Lennard-Jones (12-6) potential, Periodic Boundary Conditions, Cell Linked-List O(N) spatial acceleration, Berendsen/Andersen canonical thermostats, radial distribution function g(r), virial pressure, MSD, and interactive Unicode Braille visualizer. | `ComputationalPhysics` `MolecularDynamics` `SymplecticIntegrator` |
 | **Workflow Accelerator Suite #24** | `productivity` | `accelerate-24` | Automated filesystem indexing & context cache accelerator for Hermes cycle #24. | `Automation` `Productivity` `Evolution` |
 | **Flow Matching & Continuous Normalizing Flows (CNF) Engine** | `research` | `flow-matching` | Production-grade Flow Matching & Continuous Normalizing Flows (CNF) engine: Optimal Transport displacement interpolants, Conditional Flow Matching (CFM) loss, neural vector field regression with sinusoidal time embeddings, adaptive Dormand-Prince RK45 & Euler numerical ODE integration, Liouville continuous change of variables log-likelihood, trajectory straightness metrics, and high-resolution interactive Unicode Braille phase-flow visualizer. | `FrontierAI` `FlowMatching` `ContinuousNormalizingFlows` |
+| **Workflow Accelerator Suite #25** | `productivity` | `accelerate-25` | Automated filesystem indexing & context cache accelerator for Hermes cycle #25. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -82,4 +83,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 14:02:05*
+*Last Evolved: 2026-10-29 15:04:38*
