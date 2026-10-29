@@ -60,6 +60,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 | **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
+| **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` `Security` |
 
 ---
 
@@ -90,4 +91,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 23:18:38*
+*Last Evolved: 2026-10-29 23:30:00*

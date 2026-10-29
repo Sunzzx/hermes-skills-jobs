@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-29 23:30:00 +05:30] - Evolved `env-guard`
+- **Title**: Environment Drift, Secret Leak, and Schema Enforcement Engine
+- **Category**: software-development
+- **Description**: Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints.
+- **CLI**: `env-guard` (`--strict`, `--sync`, `--types`, `--required`, `--format json|text`)
+
 ### [2026-10-29 22:20:00 +05:30] - Evolved `release-gate`
 - **Title**: Git Release Readiness Gate
 - **Category**: software-development
