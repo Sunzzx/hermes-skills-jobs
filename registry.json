@@ -670,7 +670,13 @@
     "description": "Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.",
     "cli": "trace-timeline",
     "evolved_at": "2026-10-29T16:30:00+05:30",
-    "tags": ["IncidentResponse", "Logs", "Debugging", "Forensics", "Observability"]
+    "tags": [
+      "IncidentResponse",
+      "Logs",
+      "Debugging",
+      "Forensics",
+      "Observability"
+    ]
   },
   {
     "id": "workflow-accelerator-v26",
@@ -679,7 +685,7 @@
     "type": "skill+tool",
     "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
     "cli": "accelerate-26",
-    "evolved_at": "2026-10-29T16:17:38.054422",
+    "evolved_at": "2026-10-29T17:22:38.085140",
     "tags": [
       "Automation",
       "Productivity",

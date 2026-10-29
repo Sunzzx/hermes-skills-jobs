@@ -8,7 +8,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ---
 
-## 🚀 Live Capability Registry (43 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (44 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -86,4 +86,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 16:17:38*
+*Last Evolved: 2026-10-29 17:22:38*
