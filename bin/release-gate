@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Read-only Git release readiness gate; never creates tags or pushes changes."""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SEMVER_TAG = re.compile(
+    r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+def git(*args):
+    return subprocess.run(
+        ["git", *args], text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False,
+    )
+
+
+def check_release(tag=None):
+    checks = []
+
+    def add(code, passed, detail):
+        checks.append({"code": code, "passed": passed, "detail": detail})
+
+    inside = git("rev-parse", "--is-inside-work-tree")
+    if inside.returncode or inside.stdout.strip() != "true":
+        add("git_repository", False, "Current directory is not inside a Git worktree")
+        return {"ready": False, "branch": None, "tag": tag, "checks": checks}
+    add("git_repository", True, "Git worktree detected")
+
+    status = git("status", "--porcelain=v1", "--untracked-files=all")
+    if status.returncode:
+        add("git_status", False, status.stderr.strip() or "Unable to inspect worktree")
+    else:
+        dirty = bool(status.stdout.strip())
+        add("dirty_worktree", not dirty,
+            "Uncommitted or untracked files present" if dirty else "Worktree is clean")
+
+    branch_result = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    if branch is None:
+        add("detached_head", False, "HEAD is detached; release from a named branch")
+    else:
+        add("named_branch", True, f"On branch {branch}")
+
+    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if upstream.returncode:
+        add("missing_upstream", False, "Current branch has no configured upstream")
+    else:
+        upstream_name = upstream.stdout.strip()
+        counts = git("rev-list", "--left-right", "--count", f"HEAD...{upstream_name}")
+        if counts.returncode:
+            add("upstream_sync", False, counts.stderr.strip() or "Unable to compare with upstream")
+        else:
+            ahead, behind = (int(value) for value in counts.stdout.split())
+            synced = ahead == 0 and behind == 0
+            add("upstream_sync", synced,
+                f"Branch is synchronized with {upstream_name}" if synced else
+                f"Branch differs from {upstream_name}: {ahead} ahead, {behind} behind")
+
+    if tag is not None:
+        valid = bool(SEMVER_TAG.fullmatch(tag))
+        add("invalid_tag", valid, "Tag follows vMAJOR.MINOR.PATCH SemVer" if valid else
+            "Tag must be a valid SemVer version prefixed with v (for example v1.2.3)")
+        if valid:
+            exists = git("show-ref", "--quiet", "--verify", f"refs/tags/{tag}")
+            add("tag_exists", exists.returncode != 0,
+                f"Tag {tag} is unused" if exists.returncode != 0 else f"Tag {tag} already exists")
+
+    return {"ready": all(item["passed"] for item in checks),
+            "branch": branch, "tag": tag, "checks": checks}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Read-only release readiness checks for the current Git repository"
+    )
+    parser.add_argument("--tag", help="Optional v-prefixed SemVer tag to validate")
+    parser.add_argument("--format", choices=("json", "text"), default="json")
+    args = parser.parse_args(argv)
+
+    report = check_release(args.tag)
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        tag_suffix = f", tag={report['tag']}" if report["tag"] else ""
+        state = "READY" if report["ready"] else "NOT READY"
+        print(f"{state} — branch={report['branch'] or 'detached'}{tag_suffix}")
+        for item in report["checks"]:
+            print(f"{'PASS' if item['passed'] else 'BLOCK'} [{item['code']}] {item['detail']}")
+    return 0 if report["ready"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

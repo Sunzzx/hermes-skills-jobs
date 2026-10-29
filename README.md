@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-47-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-48-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (47 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (48 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -59,6 +59,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
+| **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 
 ---
 

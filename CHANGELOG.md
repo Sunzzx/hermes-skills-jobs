@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-29 22:20:00 +05:30] - Evolved `release-gate`
+- **Title**: Git Release Readiness Gate
+- **Category**: software-development
+- **Description**: Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.
+- **CLI**: `release-gate` (`--tag`, `--format json|text`)
+
 ### [2026-10-29 16:30:00] - Evolved `incident-timeline`
 - **Title**: Incident Timeline
 - **Category**: software-development
