@@ -8,7 +8,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ---
 
-## 🚀 Live Capability Registry (46 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (47 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -57,8 +57,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Incident Timeline** | `software-development` | `trace-timeline` | Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output. | `IncidentResponse` `Logs` `Debugging` |
 | **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
 | **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
-| **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
+| **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 
 ---
 
@@ -89,4 +89,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 21:09:27*
+*Last Evolved: 2026-10-29 22:13:27*

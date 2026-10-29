@@ -709,20 +709,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v26",
-    "title": "Workflow Accelerator Suite #26",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
-    "cli": "accelerate-26",
-    "evolved_at": "2026-10-29T21:09:27.160947",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "jsonl-audit",
     "title": "JSONL Audit",
     "category": "software-development",
@@ -735,6 +721,20 @@
       "DataQuality",
       "SchemaValidation",
       "ETL"
+    ]
+  },
+  {
+    "id": "workflow-accelerator-v26",
+    "title": "Workflow Accelerator Suite #26",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
+    "cli": "accelerate-26",
+    "evolved_at": "2026-10-29T22:13:27.210808",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
     ]
   }
 ]
