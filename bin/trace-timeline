@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Normalize mixed application logs into a deterministic incident timeline."""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, TextIO
+
+ISO_RE = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-][0-2]\d:?[0-5]\d)?)")
+SYSLOG_RE = re.compile(r"^(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(?P<day>\d{1,2})\s+(?P<time>[0-2]\d:[0-5]\d:[0-5]\d)\s+")
+MONTHS = {m: i for i, m in enumerate(("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec").split(), 1)}
+LEVEL_RE = re.compile(r"\b(TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|CRITICAL|FATAL)\b", re.I)
+LEVEL_RANK = {"TRACE": 0, "DEBUG": 1, "INFO": 2, "NOTICE": 3, "WARN": 4, "WARNING": 4, "ERROR": 5, "CRITICAL": 6, "FATAL": 7}
+
+@dataclass(frozen=True)
+class Event:
+    timestamp: str
+    level: str
+    source: str
+    line: int
+    message: str
+
+
+def parse_timestamp(value: str, *, year: int | None = None) -> datetime | None:
+    """Parse ISO-8601 or RFC3164-like syslog timestamps; naive means UTC."""
+    value = value.strip()
+    try:
+        dt = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value)
+    except ValueError:
+        try:
+            dt = datetime.strptime(value, "%b %d %H:%M:%S")
+            dt = dt.replace(year=year or datetime.now(timezone.utc).year)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _event_timestamp(line: str, *, year: int | None = None) -> tuple[datetime | None, str]:
+    # Structured JSON log entries commonly use one of these timestamp keys.
+    try:
+        obj = json.loads(line)
+        if isinstance(obj, dict):
+            for key in ("timestamp", "time", "@timestamp", "ts"):
+                if isinstance(obj.get(key), str):
+                    dt = parse_timestamp(obj[key])
+                    if dt:
+                        payload = str(obj.get("message", obj.get("msg", line)))
+                        level = obj.get("level", obj.get("severity", ""))
+                        return dt, f"{level} {payload}".strip()
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = ISO_RE.search(line)
+    if match:
+        dt = parse_timestamp(match.group("ts"))
+        if dt:
+            return dt, line[match.end():].strip() or line
+    match = SYSLOG_RE.match(line)
+    if match:
+        value = f"{match.group('mon')} {int(match.group('day')):02d} {match.group('time')}"
+        return parse_timestamp(value, year=year), line
+    return None, line
+
+
+def _level(message: str) -> str:
+    try:
+        obj = json.loads(message)
+        if isinstance(obj, dict):
+            for key in ("level", "severity", "log.level"):
+                candidate = obj.get(key)
+                if isinstance(candidate, str) and candidate.upper() in LEVEL_RANK:
+                    return candidate.upper()
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = LEVEL_RE.search(message)
+    if not match:
+        return "UNKNOWN"
+    raw = match.group(1).upper()
+    return "WARN" if raw == "WARNING" else raw
+
+
+def parse_lines(lines: Iterable[str], source: str, *, year: int | None = None) -> tuple[list[Event], int]:
+    events: list[tuple[datetime, Event]] = []
+    skipped = 0
+    for number, raw in enumerate(lines, 1):
+        text = raw.rstrip("\r\n")
+        if not text.strip():
+            continue
+        if text.lstrip().startswith(("#", "--")):
+            skipped += 1
+            continue
+        dt, message = _event_timestamp(text, year=year)
+        if dt is None:
+            skipped += 1
+            continue
+        events.append((dt, Event(dt.isoformat(timespec="microseconds").replace("+00:00", "Z"), _level(message), source, number, message)))
+    events.sort(key=lambda pair: (pair[0], pair[1].source, pair[1].line))
+    return [event for _, event in events], skipped
+
+
+def load_events(paths: list[str], *, year: int | None = None) -> tuple[list[Event], int]:
+    inputs: list[tuple[str, TextIO]] = []
+    opened: list[TextIO] = []
+    try:
+        if not paths or paths == ["-"]:
+            inputs.append(("<stdin>", sys.stdin))
+        else:
+            for name in paths:
+                stream = Path(name).open("r", encoding="utf-8", errors="replace")
+                opened.append(stream)
+                inputs.append((name, stream))
+        all_events: list[Event] = []
+        skipped = 0
+        for name, stream in inputs:
+            events, omitted = parse_lines(stream, name, year=year)
+            all_events.extend(events)
+            skipped += omitted
+        all_events.sort(key=lambda event: (event.timestamp, event.source, event.line))
+        return all_events, skipped
+    finally:
+        for stream in opened:
+            stream.close()
+
+
+def render(events: list[Event], *, as_json: bool = False) -> str:
+    if as_json:
+        return json.dumps([asdict(event) for event in events], indent=2, ensure_ascii=False)
+    if not events:
+        return "No timestamped log events found."
+    origin = parse_timestamp(events[0].timestamp)
+    rows = []
+    for event in events:
+        dt = parse_timestamp(event.timestamp)
+        elapsed = (dt - origin).total_seconds() if dt and origin else 0.0
+        rows.append(f"+{elapsed:9.3f}s  {event.timestamp}  {event.level:<8} {event.source}:{event.line}  {event.message}")
+    return "\n".join(rows)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Merge mixed timestamped logs into a normalized incident timeline.")
+    parser.add_argument("files", nargs="*", help="log files; omit or use - for stdin")
+    parser.add_argument("--year", type=int, help="year to apply to yearless syslog entries (default: current UTC year)")
+    parser.add_argument("--min-level", choices=["TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "ERROR", "CRITICAL", "FATAL", "UNKNOWN"], help="hide lower-severity events")
+    parser.add_argument("--json", action="store_true", help="emit JSON event array")
+    args = parser.parse_args(argv)
+    if args.year is not None and not 1970 <= args.year <= 9999:
+        parser.error("--year must be in range 1970..9999")
+    try:
+        events, skipped = load_events(args.files, year=args.year)
+    except OSError as exc:
+        print(f"trace-timeline: {exc}", file=sys.stderr)
+        return 2
+    if args.min_level:
+        threshold = LEVEL_RANK.get(args.min_level, -1)
+        events = [e for e in events if LEVEL_RANK.get(e.level, -1) >= threshold]
+    print(render(events, as_json=args.json))
+    print(f"{len(events)} events; {skipped} non-timestamped/blank/comment lines skipped", file=sys.stderr)
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

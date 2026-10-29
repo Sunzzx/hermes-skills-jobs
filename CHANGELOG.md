@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-29 16:30:00] - Evolved `incident-timeline`
+- **Title**: Incident Timeline
+- **Category**: software-development
+- **Description**: Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.
+- **CLI**: `trace-timeline` (`--json`, `--min-level`, `--year`)
+
 ### [2026-10-29 00:15:00] - Evolved `molecular-dynamics`
 - **Title**: Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine
 - **Category**: computational-science
