@@ -97,7 +97,7 @@
   },
   {
     "id": "port-sentinel",
-    "title": "Port Sentinel — Dev Port Conflict Manager",
+    "title": "Port Sentinel \u2014 Dev Port Conflict Manager",
     "category": "software-development",
     "type": "skill+tool",
     "description": "Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely.",
@@ -694,20 +694,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v26",
-    "title": "Workflow Accelerator Suite #26",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
-    "cli": "accelerate-26",
-    "evolved_at": "2026-10-29T19:46:49.256616",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "log-scrub",
     "title": "Log Scrub",
     "category": "software-development",
@@ -720,6 +706,20 @@
       "Secrets",
       "Privacy",
       "IncidentResponse"
+    ]
+  },
+  {
+    "id": "workflow-accelerator-v26",
+    "title": "Workflow Accelerator Suite #26",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
+    "cli": "accelerate-26",
+    "evolved_at": "2026-10-29T21:09:27.160947",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
     ]
   }
 ]
