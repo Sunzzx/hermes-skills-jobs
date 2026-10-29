@@ -661,5 +661,19 @@
       "MVCC",
       "ACID"
     ]
+  },
+  {
+    "id": "workflow-accelerator-v26",
+    "title": "Workflow Accelerator Suite #26",
+    "category": "productivity",
+    "type": "skill+tool",
+    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
+    "cli": "accelerate-26",
+    "evolved_at": "2026-10-29T16:17:38.054422",
+    "tags": [
+      "Automation",
+      "Productivity",
+      "Evolution"
+    ]
   }
 ]
