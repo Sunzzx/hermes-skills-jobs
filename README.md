@@ -8,7 +8,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ---
 
-## 🚀 Live Capability Registry (44 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (45 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -55,7 +55,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Workflow Accelerator Suite #25** | `productivity` | `accelerate-25` | Automated filesystem indexing & context cache accelerator for Hermes cycle #25. | `Automation` `Productivity` `Evolution` |
 | **LSM-Tree Storage Engine with Leveled Compaction & WAL** | `systems` | `lsm-tree` | Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation. | `Hardcore-Systems` `LSM-Tree` `StorageEngine` |
 | **Incident Timeline** | `software-development` | `trace-timeline` | Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output. | `IncidentResponse` `Logs` `Debugging` |
-| **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests and verify release trees for changed, missing, or unexpected files. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
+| **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
 | **Workflow Accelerator Suite #26** | `productivity` | `accelerate-26` | Automated filesystem indexing & context cache accelerator for Hermes cycle #26. | `Automation` `Productivity` `Evolution` |
 
 ---
@@ -87,4 +87,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-29 17:22:38*
+*Last Evolved: 2026-10-29 19:46:49*
