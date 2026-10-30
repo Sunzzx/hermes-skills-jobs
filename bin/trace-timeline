@@ -33,8 +33,8 @@ def parse_timestamp(value: str, *, year: int | None = None) -> datetime | None:
         dt = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value)
     except ValueError:
         try:
-            dt = datetime.strptime(value, "%b %d %H:%M:%S")
-            dt = dt.replace(year=year or datetime.now(timezone.utc).year)
+            y = year or datetime.now(timezone.utc).year
+            dt = datetime.strptime(f"{y} {value}", "%Y %b %d %H:%M:%S")
         except ValueError:
             return None
     if dt.tzinfo is None:
