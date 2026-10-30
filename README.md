@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-34-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-35-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (34 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (35 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -46,6 +46,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 | **BitNet b1.58 Ternary Quantization & Inference Engine** | `research` | `bitnet` | 1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation. | `Frontier-AI` `BitNet` `Quantization` |
 | **2D Incompressible Navier-Stokes Fluid Simulator** | `computational-science` | `fluid2d` | Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization. | `ComputationalPhysics` `FluidDynamics` `NavierStokes` |
+| **Polyphonic 6-Operator Algorithmic FM Synthesizer & Phase Modulation DSP Engine** | `creative` | `fm-synth` | All 32 Yamaha DX7 routing topologies, 4-Rate/4-Level exponential envelopes, feedback anti-aliasing loops, 16-voice dynamic polyphony with priority voice stealing, Braille oscilloscope, and 16-bit 44.1kHz stereo WAV export. | `Audio-DSP` `FM-Synthesis` `Phase-Modulation` |
 
 ---
 
@@ -76,4 +77,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-31 01:44:07*
+*Last Evolved: 2026-10-31 03:35:50*

@@ -561,5 +561,21 @@
       "NavierStokes",
       "PartialDifferentialEquations"
     ]
+  },
+  {
+    "id": "polyphonic-fm",
+    "title": "Polyphonic 6-Operator Algorithmic FM Synthesizer & Phase Modulation DSP Engine",
+    "category": "creative",
+    "type": "skill+tool",
+    "description": "All 32 Yamaha DX7 routing topologies, 4-Rate/4-Level exponential envelopes, feedback anti-aliasing loops, 16-voice dynamic polyphony with priority voice stealing, Braille oscilloscope, and 16-bit 44.1kHz stereo WAV export.",
+    "cli": "fm-synth",
+    "evolved_at": "2026-10-31T03:35:46.164948",
+    "tags": [
+      "Audio-DSP",
+      "FM-Synthesis",
+      "Phase-Modulation",
+      "Generative-Aesthetics",
+      "Yamaha-DX7"
+    ]
   }
 ]

@@ -415,3 +415,8 @@
 - **Title**: 2D Incompressible Navier-Stokes Fluid Simulator
 - **Category**: computational-science
 - **Description**: Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization.
+
+### [2026-10-31 03:35:50] - Evolved `polyphonic-fm`
+- **Title**: Polyphonic 6-Operator Algorithmic FM Synthesizer & Phase Modulation DSP Engine
+- **Category**: creative
+- **Description**: All 32 Yamaha DX7 routing topologies, 4-Rate/4-Level exponential envelopes, feedback anti-aliasing loops, 16-voice dynamic polyphony with priority voice stealing, Braille oscilloscope, and 16-bit 44.1kHz stereo WAV export.
