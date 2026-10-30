@@ -80,22 +80,6 @@
     ]
   },
   {
-    "id": "stripe-payments",
-    "title": "Stripe Payments & Payouts Engine",
-    "category": "finance",
-    "type": "skill+tool",
-    "description": "Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue.",
-    "cli": "stripe-tool",
-    "evolved_at": "2026-10-27T22:45:23.696055",
-    "tags": [
-      "Finance",
-      "Stripe",
-      "Payments",
-      "Payouts",
-      "Billing"
-    ]
-  },
-  {
     "id": "port-sentinel",
     "title": "Port Sentinel \u2014 Dev Port Conflict Manager",
     "category": "software-development",
@@ -529,6 +513,22 @@
       "Security",
       "SchemaValidation",
       "DeveloperTools"
+    ]
+  },
+  {
+    "id": "stripe-payments",
+    "title": "Stripe Payments & Payouts Engine",
+    "category": "finance",
+    "type": "skill+tool",
+    "description": "Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue.",
+    "cli": "stripe-tool",
+    "evolved_at": "2026-10-30T18:15:57.570701",
+    "tags": [
+      "Finance",
+      "Stripe",
+      "Payments",
+      "Payouts",
+      "Billing"
     ]
   }
 ]

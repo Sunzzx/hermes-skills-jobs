@@ -4,7 +4,7 @@
 [![Total Capabilities](https://img.shields.io/badge/Capabilities-32-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Autonomous, continuous evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
+Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
@@ -17,7 +17,6 @@ Autonomous, continuous evolution system for **Hermes**. Every single hour, Herme
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
 | **Autonomous Health & Self-Healing Watchdog** | `devops` | `hermes-health` | Reviews Hermes system health, model provider connectivity, SQLite databases, locks, and tool executables every 6 hours. Automatically heals bugs, WAL bloat, and stuck jobs. | `DevOps` `SelfHealing` `Diagnostics` |
 | **Autonomous Opportunity & Bounty Scout** | `finance` | `opportunity-scout` | Scouts high-yield digital revenue opportunities: Kaggle cash prize pools, Algora GitHub bounties, and security research programs. Compiles actionable dossiers. | `Finance` `Bounties` `Kaggle` |
-| **Stripe Payments & Payouts Engine** | `finance` | `stripe-tool` | Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue. | `Finance` `Stripe` `Payments` |
 | **Port Sentinel — Dev Port Conflict Manager** | `software-development` | `ports` | Zero-friction local port inspector and zombie dev server terminator. Instantly detects what process is hogging ports (3000, 8000, 8080, 5000, 5173, 8501) and frees them safely. | `DevOps` `Networking` `DeveloperTools` |
 | **Git Autopilot & Smart Commit Synthesizer** | `software-development` | `git-auto` | High-velocity Git workflow assistant: analyzes staged/unstaged diffs, synthesizes Conventional Commits, audits branch hygiene, and automates synchronization. | `Git` `GitHub` `DeveloperSuperpowers` |
 | **ArXiv & AI Research Radar** | `research` | `research-radar` | Continuous academic and frontier AI radar: fetches daily top papers from arXiv Computer Science & AI, extracts abstracts and breakthrough techniques, and compiles concise briefings. | `Research` `AI` `ArXiv` |
@@ -44,6 +43,7 @@ Autonomous, continuous evolution system for **Hermes**. Every single hour, Herme
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 | **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` |
+| **Stripe Payments & Payouts Engine** | `finance` | `stripe-tool` | Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue. | `Finance` `Stripe` `Payments` |
 
 ---
 
@@ -74,4 +74,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-30 17:17:03*
+*Last Evolved: 2026-10-30 18:15:57*
