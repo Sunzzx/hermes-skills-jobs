@@ -776,7 +776,7 @@
     "type": "skill+tool",
     "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #28.",
     "cli": "accelerate-28",
-    "evolved_at": "2026-10-30T15:39:45.290080",
+    "evolved_at": "2026-10-30T17:11:56.451087",
     "tags": [
       "Automation",
       "Productivity",
