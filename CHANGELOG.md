@@ -379,3 +379,8 @@
 - **Title**: Incident Timeline
 - **Category**: software-development
 - **Description**: Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.
+
+### [2026-10-30 21:29:56] - Evolved `artifact-integrity`
+- **Title**: Artifact Integrity Manifest & Verifier
+- **Category**: software-development
+- **Description**: Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions.

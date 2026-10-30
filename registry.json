@@ -388,21 +388,6 @@
     ]
   },
   {
-    "id": "artifact-integrity",
-    "title": "Artifact Integrity Manifest & Verifier",
-    "category": "software-development",
-    "type": "skill+tool",
-    "description": "Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions.",
-    "cli": "artifact-integrity",
-    "evolved_at": "2026-10-29T17:22:38",
-    "tags": [
-      "ReleaseIntegrity",
-      "SHA256",
-      "SupplyChain",
-      "ArtifactAudit"
-    ]
-  },
-  {
     "id": "log-scrub",
     "title": "Log Scrub",
     "category": "software-development",
@@ -529,6 +514,21 @@
       "Debugging",
       "Forensics",
       "Observability"
+    ]
+  },
+  {
+    "id": "artifact-integrity",
+    "title": "Artifact Integrity Manifest & Verifier",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions.",
+    "cli": "artifact-integrity",
+    "evolved_at": "2026-10-30T21:29:56.541066",
+    "tags": [
+      "ReleaseIntegrity",
+      "SHA256",
+      "SupplyChain",
+      "ArtifactAudit"
     ]
   }
 ]
