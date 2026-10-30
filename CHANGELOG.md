@@ -404,3 +404,8 @@
 - **Title**: BitNet b1.58 Ternary Quantization & Inference Engine
 - **Category**: research
 - **Description**: 1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation.
+
+### [2026-10-31 01:44:07] - Evolved `navier-stokes-2d`
+- **Title**: 2D Incompressible Navier-Stokes Fluid Simulator
+- **Category**: computational-science
+- **Description**: Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization.

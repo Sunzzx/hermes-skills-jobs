@@ -546,5 +546,20 @@
       "TernaryWeights",
       "InferenceEngine"
     ]
+  },
+  {
+    "id": "navier-stokes-2d",
+    "title": "2D Incompressible Navier-Stokes Fluid Simulator",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization.",
+    "cli": "fluid2d",
+    "evolved_at": "2026-10-31T01:44:07.527345",
+    "tags": [
+      "ComputationalPhysics",
+      "FluidDynamics",
+      "NavierStokes",
+      "PartialDifferentialEquations"
+    ]
   }
 ]

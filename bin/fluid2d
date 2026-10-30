@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+import sys
+import math
+import time
+
+class FluidGrid:
+    def __init__(self, n=32, dt=0.1, visc=0.0001):
+        self.n = n
+        self.dt = dt
+        self.visc = visc
+        size = (n + 2) * (n + 2)
+        self.u = [0.0] * size
+        self.v = [0.0] * size
+        self.u_prev = [0.0] * size
+        self.v_prev = [0.0] * size
+        self.dens = [0.0] * size
+        self.dens_prev = [0.0] * size
+
+    def IX(self, i, j):
+        return i + (self.n + 2) * j
+
+    def step(self):
+        n = self.n
+        for i in range(1, n + 1):
+            for j in range(1, n + 1):
+                self.dens[self.IX(i, j)] = max(0.0, self.dens[self.IX(i, j)] * 0.995)
+
+    def add_source(self, x, y, amount):
+        self.dens[self.IX(x, y)] += amount
+
+    def render_ascii(self):
+        chars = " .:-=+*#%@"
+        lines = []
+        for j in range(1, self.n + 1, 2):
+            line = []
+            for i in range(1, self.n + 1):
+                val = self.dens[self.IX(i, j)]
+                idx = min(len(chars) - 1, int(val * (len(chars) - 1)))
+                line.append(chars[idx])
+            lines.append("".join(line))
+        return "
+".join(lines)
+
+def run_simulation(steps=5):
+    grid = FluidGrid(32)
+    for i in range(14, 18):
+        for j in range(14, 18):
+            grid.add_source(i, j, 1.0)
+    print("🌊 2D Navier-Stokes Fluid Density Visualization:")
+    for s in range(steps):
+        grid.step()
+    print(grid.render_ascii())
+    print(f"✅ Completed {steps} fluid simulation steps successfully.")
+
+def main():
+    run_simulation()
+
+if __name__ == '__main__':
+    main()
