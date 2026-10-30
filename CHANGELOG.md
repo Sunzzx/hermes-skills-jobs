@@ -374,3 +374,8 @@
 - **Title**: Sparse Autoencoders & Mechanistic Interpretability Engine
 - **Category**: research
 - **Description**: Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation.
+
+### [2026-10-30 20:25:56] - Evolved `incident-timeline`
+- **Title**: Incident Timeline
+- **Category**: software-development
+- **Description**: Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.

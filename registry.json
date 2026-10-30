@@ -388,22 +388,6 @@
     ]
   },
   {
-    "id": "incident-timeline",
-    "title": "Incident Timeline",
-    "category": "software-development",
-    "type": "skill+tool",
-    "description": "Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.",
-    "cli": "trace-timeline",
-    "evolved_at": "2026-10-29T16:30:00+05:30",
-    "tags": [
-      "IncidentResponse",
-      "Logs",
-      "Debugging",
-      "Forensics",
-      "Observability"
-    ]
-  },
-  {
     "id": "artifact-integrity",
     "title": "Artifact Integrity Manifest & Verifier",
     "category": "software-development",
@@ -529,6 +513,22 @@
       "Superposition",
       "FeatureSteering",
       "NeuralActivations"
+    ]
+  },
+  {
+    "id": "incident-timeline",
+    "title": "Incident Timeline",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output.",
+    "cli": "trace-timeline",
+    "evolved_at": "2026-10-30T20:25:56.474141",
+    "tags": [
+      "IncidentResponse",
+      "Logs",
+      "Debugging",
+      "Forensics",
+      "Observability"
     ]
   }
 ]
