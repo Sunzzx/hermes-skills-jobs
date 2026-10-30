@@ -35,7 +35,6 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Molecular Dynamics Symplectic Velocity-Verlet & Phase Dynamics Engine** | `computational-science` | `md-sim` | Production-grade Molecular Dynamics engine: symplectic 2nd-order Velocity-Verlet, shifted Lennard-Jones (12-6) potential, Periodic Boundary Conditions, Cell Linked-List O(N) spatial acceleration, Berendsen/Andersen canonical thermostats, radial distribution function g(r), virial pressure, MSD, and interactive Unicode Braille visualizer. | `ComputationalPhysics` `MolecularDynamics` `SymplecticIntegrator` |
 | **Flow Matching & Continuous Normalizing Flows (CNF) Engine** | `research` | `flow-matching` | Production-grade Flow Matching & Continuous Normalizing Flows (CNF) engine: Optimal Transport displacement interpolants, Conditional Flow Matching (CFM) loss, neural vector field regression with sinusoidal time embeddings, adaptive Dormand-Prince RK45 & Euler numerical ODE integration, Liouville continuous change of variables log-likelihood, trajectory straightness metrics, and high-resolution interactive Unicode Braille phase-flow visualizer. | `FrontierAI` `FlowMatching` `ContinuousNormalizingFlows` |
 | **LSM-Tree Storage Engine with Leveled Compaction & WAL** | `systems` | `lsm-tree` | Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation. | `Hardcore-Systems` `LSM-Tree` `StorageEngine` |
-| **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
 | **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` |
@@ -44,6 +43,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Sparse Autoencoders & Mechanistic Interpretability Engine** | `research` | `sae-lens` | Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation. | `FrontierAI` `MechanisticInterpretability` `SparseAutoencoders` |
 | **Incident Timeline** | `software-development` | `trace-timeline` | Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output. | `IncidentResponse` `Logs` `Debugging` |
 | **Artifact Integrity Manifest & Verifier** | `software-development` | `artifact-integrity` | Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions. | `ReleaseIntegrity` `SHA256` `SupplyChain` |
+| **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
 
 ---
 
@@ -74,4 +74,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-30 21:29:56*
+*Last Evolved: 2026-10-30 22:31:56*

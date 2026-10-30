@@ -388,21 +388,6 @@
     ]
   },
   {
-    "id": "log-scrub",
-    "title": "Log Scrub",
-    "category": "software-development",
-    "type": "skill+tool",
-    "description": "Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories.",
-    "cli": "log-scrub",
-    "evolved_at": "2026-10-29T20:02:05+05:30",
-    "tags": [
-      "LogSanitization",
-      "Secrets",
-      "Privacy",
-      "IncidentResponse"
-    ]
-  },
-  {
     "id": "jsonl-audit",
     "title": "JSONL Audit",
     "category": "software-development",
@@ -529,6 +514,21 @@
       "SHA256",
       "SupplyChain",
       "ArtifactAudit"
+    ]
+  },
+  {
+    "id": "log-scrub",
+    "title": "Log Scrub",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories.",
+    "cli": "log-scrub",
+    "evolved_at": "2026-10-30T22:31:56.502628",
+    "tags": [
+      "LogSanitization",
+      "Secrets",
+      "Privacy",
+      "IncidentResponse"
     ]
   }
 ]

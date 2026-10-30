@@ -384,3 +384,8 @@
 - **Title**: Artifact Integrity Manifest & Verifier
 - **Category**: software-development
 - **Description**: Create deterministic SHA-256 manifests for release artifacts and verify exact file inventories, detecting tampering, missing files, and unexpected additions.
+
+### [2026-10-30 22:31:56] - Evolved `log-scrub`
+- **Title**: Log Scrub
+- **Category**: software-development
+- **Description**: Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories.
