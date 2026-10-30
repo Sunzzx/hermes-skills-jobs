@@ -142,20 +142,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v7",
-    "title": "Workflow Accelerator Suite #7",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "High-performance workflow automation, filesystem indexing & context cache accelerator for Hermes cycle #7.",
-    "cli": "accelerate-7",
-    "evolved_at": "2026-10-28T02:26:15.688172",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "mamba-ssm",
     "title": "Selective State Space Mamba Engine & Blelloch Parallel Scan",
     "category": "research",
@@ -173,20 +159,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v9",
-    "title": "Workflow Accelerator Suite #9",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #9.",
-    "cli": "accelerate-9",
-    "evolved_at": "2026-10-28T03:54:15.926785",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "raft-consensus",
     "title": "Distributed Raft Consensus Engine & Split-Brain Chaos Simulator",
     "category": "systems",
@@ -200,48 +172,6 @@
       "Consensus",
       "FaultTolerance",
       "StateMachines"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v11",
-    "title": "Workflow Accelerator Suite #11",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #11.",
-    "cli": "accelerate-11",
-    "evolved_at": "2026-10-28T05:07:15.843884",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v12",
-    "title": "Workflow Accelerator Suite #12",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #12.",
-    "cli": "accelerate-12",
-    "evolved_at": "2026-10-28T08:10:42.208266",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v13",
-    "title": "Workflow Accelerator Suite #13",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #13.",
-    "cli": "accelerate-13",
-    "evolved_at": "2026-10-28T09:19:37.978486",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -262,48 +192,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v14",
-    "title": "Workflow Accelerator Suite #14",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #14.",
-    "cli": "accelerate-14",
-    "evolved_at": "2026-10-28T10:34:38.110796",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v15",
-    "title": "Workflow Accelerator Suite #15",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #15.",
-    "cli": "accelerate-15",
-    "evolved_at": "2026-10-28T10:36:45.153672",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v16",
-    "title": "Workflow Accelerator Suite #16",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #16.",
-    "cli": "accelerate-16",
-    "evolved_at": "2026-10-28T11:37:37.921686",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "bounty-hunter",
     "title": "Autonomous Cash Bounty Hunter & Revenue Engine",
     "category": "finance",
@@ -317,20 +205,6 @@
       "Stripe",
       "Revenue",
       "Algora"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v17",
-    "title": "Workflow Accelerator Suite #17",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #17.",
-    "cli": "accelerate-17",
-    "evolved_at": "2026-10-28T12:40:37.883891",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -417,20 +291,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v19",
-    "title": "Workflow Accelerator Suite #19",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #19.",
-    "cli": "accelerate-19",
-    "evolved_at": "2026-10-28T14:32:37.958327",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "bytecode-vm",
     "title": "Hermes Stack-Based Virtual Machine (HVM) & Bytecode Compiler",
     "category": "systems",
@@ -445,20 +305,6 @@
       "Closures",
       "GarbageCollection",
       "ComputerScience"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v20",
-    "title": "Workflow Accelerator Suite #20",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #20.",
-    "cli": "accelerate-20",
-    "evolved_at": "2026-10-28T18:17:37.905892",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -477,20 +323,6 @@
       "NBody",
       "OrbitalMechanics",
       "ComputerScience"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v21",
-    "title": "Workflow Accelerator Suite #21",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #21.",
-    "cli": "accelerate-21",
-    "evolved_at": "2026-10-28T19:42:38.013620",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -530,20 +362,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v22",
-    "title": "Workflow Accelerator Suite #22",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #22.",
-    "cli": "accelerate-22",
-    "evolved_at": "2026-10-28T22:40:38.059387",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "lockfree-concurrency",
     "title": "Lock-Free Concurrency & Chase-Lev Work-Stealing Runtime",
     "category": "systems",
@@ -561,20 +379,6 @@
       "Disruptor",
       "EpochBasedReclamation",
       "Linearizability"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v23",
-    "title": "Workflow Accelerator Suite #23",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #23.",
-    "cli": "accelerate-23",
-    "evolved_at": "2026-10-28T23:56:37.946992",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -596,20 +400,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v24",
-    "title": "Workflow Accelerator Suite #24",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #24.",
-    "cli": "accelerate-24",
-    "evolved_at": "2026-10-29T13:46:38.009952",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "flow-matching",
     "title": "Flow Matching & Continuous Normalizing Flows (CNF) Engine",
     "category": "research",
@@ -626,20 +416,6 @@
       "ODENumerics",
       "VectorFields",
       "BrailleVisualizer"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v25",
-    "title": "Workflow Accelerator Suite #25",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #25.",
-    "cli": "accelerate-25",
-    "evolved_at": "2026-10-29T15:04:38.093714",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   },
   {
@@ -739,20 +515,6 @@
     ]
   },
   {
-    "id": "workflow-accelerator-v26",
-    "title": "Workflow Accelerator Suite #26",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #26.",
-    "cli": "accelerate-26",
-    "evolved_at": "2026-10-29T23:18:38.163508",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
-    ]
-  },
-  {
     "id": "env-guard",
     "title": "Environment Drift, Secret Leak, and Schema Enforcement Engine",
     "category": "software-development",
@@ -767,20 +529,6 @@
       "Security",
       "SchemaValidation",
       "DeveloperTools"
-    ]
-  },
-  {
-    "id": "workflow-accelerator-v28",
-    "title": "Workflow Accelerator Suite #28",
-    "category": "productivity",
-    "type": "skill+tool",
-    "description": "Automated filesystem indexing & context cache accelerator for Hermes cycle #28.",
-    "cli": "accelerate-28",
-    "evolved_at": "2026-10-30T17:11:56.451087",
-    "tags": [
-      "Automation",
-      "Productivity",
-      "Evolution"
     ]
   }
 ]
