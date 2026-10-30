@@ -577,5 +577,22 @@
       "Generative-Aesthetics",
       "Yamaha-DX7"
     ]
+  },
+  {
+    "id": "lbm-cfd",
+    "title": "Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer.",
+    "cli": "lbm-cfd",
+    "evolved_at": "2026-10-31T04:44:00.404823",
+    "tags": [
+      "ComputationalPhysics",
+      "FluidDynamics",
+      "LatticeBoltzmann",
+      "CFD",
+      "NavierStokes",
+      "D2Q9"
+    ]
   }
 ]

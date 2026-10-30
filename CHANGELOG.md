@@ -420,3 +420,8 @@
 - **Title**: Polyphonic 6-Operator Algorithmic FM Synthesizer & Phase Modulation DSP Engine
 - **Category**: creative
 - **Description**: All 32 Yamaha DX7 routing topologies, 4-Rate/4-Level exponential envelopes, feedback anti-aliasing loops, 16-voice dynamic polyphony with priority voice stealing, Braille oscilloscope, and 16-bit 44.1kHz stereo WAV export.
+
+### [2026-10-31 04:44:00] - Evolved `lbm-cfd`
+- **Title**: Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine
+- **Category**: computational-science
+- **Description**: Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer.
