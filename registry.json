@@ -388,21 +388,6 @@
     ]
   },
   {
-    "id": "jsonl-audit",
-    "title": "JSONL Audit",
-    "category": "software-development",
-    "type": "skill+tool",
-    "description": "Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues.",
-    "cli": "jsonl-audit",
-    "evolved_at": "2026-10-29T21:30:00+05:30",
-    "tags": [
-      "JSONL",
-      "DataQuality",
-      "SchemaValidation",
-      "ETL"
-    ]
-  },
-  {
     "id": "release-gate",
     "title": "Git Release Readiness Gate",
     "category": "software-development",
@@ -529,6 +514,21 @@
       "Secrets",
       "Privacy",
       "IncidentResponse"
+    ]
+  },
+  {
+    "id": "jsonl-audit",
+    "title": "JSONL Audit",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues.",
+    "cli": "jsonl-audit",
+    "evolved_at": "2026-10-30T23:34:56.657278",
+    "tags": [
+      "JSONL",
+      "DataQuality",
+      "SchemaValidation",
+      "ETL"
     ]
   }
 ]

@@ -389,3 +389,8 @@
 - **Title**: Log Scrub
 - **Category**: software-development
 - **Description**: Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories.
+
+### [2026-10-30 23:34:56] - Evolved `jsonl-audit`
+- **Title**: JSONL Audit
+- **Category**: software-development
+- **Description**: Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues.
