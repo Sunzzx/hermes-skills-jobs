@@ -394,3 +394,8 @@
 - **Title**: JSONL Audit
 - **Category**: software-development
 - **Description**: Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues.
+
+### [2026-10-30 23:36:22] - Evolved `release-gate`
+- **Title**: Git Release Readiness Gate
+- **Category**: software-development
+- **Description**: Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.

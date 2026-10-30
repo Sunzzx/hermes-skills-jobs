@@ -388,21 +388,6 @@
     ]
   },
   {
-    "id": "release-gate",
-    "title": "Git Release Readiness Gate",
-    "category": "software-development",
-    "type": "skill+tool",
-    "description": "Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.",
-    "cli": "release-gate",
-    "evolved_at": "2026-10-29T22:20:00+05:30",
-    "tags": [
-      "Git",
-      "Release",
-      "SemVer",
-      "SupplyChain"
-    ]
-  },
-  {
     "id": "env-guard",
     "title": "Environment Drift, Secret Leak, and Schema Enforcement Engine",
     "category": "software-development",
@@ -529,6 +514,21 @@
       "DataQuality",
       "SchemaValidation",
       "ETL"
+    ]
+  },
+  {
+    "id": "release-gate",
+    "title": "Git Release Readiness Gate",
+    "category": "software-development",
+    "type": "skill+tool",
+    "description": "Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.",
+    "cli": "release-gate",
+    "evolved_at": "2026-10-30T23:36:22.452271",
+    "tags": [
+      "Git",
+      "Release",
+      "SemVer",
+      "SupplyChain"
     ]
   }
 ]
