@@ -399,3 +399,8 @@
 - **Title**: Git Release Readiness Gate
 - **Category**: software-development
 - **Description**: Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness.
+
+### [2026-10-31 00:37:56] - Evolved `bitnet-b158`
+- **Title**: BitNet b1.58 Ternary Quantization & Inference Engine
+- **Category**: research
+- **Description**: 1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation.

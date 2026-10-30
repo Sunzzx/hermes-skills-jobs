@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-32-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-33-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (32 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (33 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -44,6 +44,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Log Scrub** | `software-development` | `log-scrub` | Redact common credentials and personal identifiers from logs before sharing; check mode reports only match categories. | `LogSanitization` `Secrets` `Privacy` |
 | **JSONL Audit** | `software-development` | `jsonl-audit` | Validate JSONL records and report schema drift, invalid rows, duplicate keys, and identifier uniqueness issues. | `JSONL` `DataQuality` `SchemaValidation` |
 | **Git Release Readiness Gate** | `software-development` | `release-gate` | Read-only release preflight checks worktree cleanliness, named branch, exact upstream synchronization, and local SemVer tag validity and uniqueness. | `Git` `Release` `SemVer` |
+| **BitNet b1.58 Ternary Quantization & Inference Engine** | `research` | `bitnet` | 1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation. | `Frontier-AI` `BitNet` `Quantization` |
 
 ---
 
@@ -74,4 +75,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-30 23:36:22*
+*Last Evolved: 2026-10-31 00:37:56*

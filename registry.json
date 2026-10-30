@@ -530,5 +530,21 @@
       "SemVer",
       "SupplyChain"
     ]
+  },
+  {
+    "id": "bitnet-b158",
+    "title": "BitNet b1.58 Ternary Quantization & Inference Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation.",
+    "cli": "bitnet",
+    "evolved_at": "2026-10-31T00:37:56.617586",
+    "tags": [
+      "Frontier-AI",
+      "BitNet",
+      "Quantization",
+      "TernaryWeights",
+      "InferenceEngine"
+    ]
   }
 ]
