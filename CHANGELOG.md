@@ -369,3 +369,8 @@
 - **Title**: Hyperdimensional 4D Fractal Raymarcher & Quaternion Julia Engine
 - **Category**: creative
 - **Description**: Production-grade 4D raymarcher in pure Python: Quaternion Julia sets, Mandelbulbs, Clifford Tori, SO(4) rotations, Blinn-Phong lighting, ambient occlusion, and Truecolor ANSI terminal visualization.
+
+### [2026-10-30 19:24:48] - Evolved `sparse-autoencoders`
+- **Title**: Sparse Autoencoders & Mechanistic Interpretability Engine
+- **Category**: research
+- **Description**: Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation.

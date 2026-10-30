@@ -311,24 +311,6 @@
     ]
   },
   {
-    "id": "sparse-autoencoders",
-    "title": "Sparse Autoencoders & Mechanistic Interpretability Engine",
-    "category": "research",
-    "type": "skill+tool",
-    "description": "Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation.",
-    "cli": "sae-lens",
-    "evolved_at": "2026-10-28T21:38:00.000000",
-    "tags": [
-      "FrontierAI",
-      "MechanisticInterpretability",
-      "SparseAutoencoders",
-      "SAE",
-      "Superposition",
-      "FeatureSteering",
-      "NeuralActivations"
-    ]
-  },
-  {
     "id": "lockfree-concurrency",
     "title": "Lock-Free Concurrency & Chase-Lev Work-Stealing Runtime",
     "category": "systems",
@@ -529,6 +511,24 @@
       "Raymarching",
       "Computer-Graphics",
       "Truecolor-ANSI"
+    ]
+  },
+  {
+    "id": "sparse-autoencoders",
+    "title": "Sparse Autoencoders & Mechanistic Interpretability Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation.",
+    "cli": "sae-lens",
+    "evolved_at": "2026-10-30T19:24:48.141822",
+    "tags": [
+      "FrontierAI",
+      "MechanisticInterpretability",
+      "SparseAutoencoders",
+      "SAE",
+      "Superposition",
+      "FeatureSteering",
+      "NeuralActivations"
     ]
   }
 ]
