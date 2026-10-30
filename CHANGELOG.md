@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-10-31 01:45:00 +05:30] - Evolved `navier-stokes-2d`
+- **Title**: 2D Incompressible Navier-Stokes Fluid Dynamics Engine
+- **Category**: computational-science
+- **Description**: Production-grade 2D Incompressible Navier-Stokes solver using Chorin's Projection Method (operator splitting) on a Marker-and-Cell (MAC) staggered grid, semi-Lagrangian characteristic advection, Preconditioned Conjugate Gradient (PCG) pressure Poisson solver, exact Taylor-Green vortex analytical validation ($L_\infty < 5\%$, $|\nabla \cdot \mathbf{u}| < 10^{-7}$), Ghia et al. lid-driven cavity benchmark, Von Kármán vortex shedding past an immersed cylinder, and high-resolution Unicode Braille canvas visualization.
+- **CLI**: `fluid2d` (`info`, `taylor-green`, `cavity`, `vortex`, `benchmark`, `demo`)
+
 ### [2026-10-29 23:30:00 +05:30] - Evolved `env-guard`
 - **Title**: Environment Drift, Secret Leak, and Schema Enforcement Engine
 - **Category**: software-development

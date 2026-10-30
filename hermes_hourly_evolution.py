@@ -141,7 +141,7 @@ def main():
 if __name__ == '__main__':
     main()
 """,
-        "skill_md": """---
+        "skill_md": r"""---
 name: bitnet-b158
 description: "1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation."
 version: 1.0.0
@@ -235,7 +235,7 @@ def main():
 if __name__ == '__main__':
     main()
 """,
-        "skill_md": """---
+        "skill_md": r"""---
 name: navier-stokes-2d
 description: "Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization."
 version: 1.0.0
