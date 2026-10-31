@@ -430,3 +430,8 @@
 - **Title**: Binaural 3D Spatial Audio & Ambisonics DSP Engine
 - **Category**: creative
 - **Description**: Production-grade 3D binaural spatial audio engine: Woodworth spherical head diffraction ITD with cubic Lagrange fractional delay, Duda-Brown ILD head shadow biquad filtering, pinna elevation spectral notch cues, Ambisonics B-format spherical harmonics encoding, Image Source Method room acoustics, FDN reverberation, Braille polar soundfield radar, and 16-bit 44.1kHz stereo WAV export.
+
+### [2026-10-31 16:19:18] - Evolved `ebpf-engine`
+- **Title**: Extended Berkeley Packet Filter (eBPF) 64-bit Register VM & Verifier Engine
+- **Category**: systems
+- **Description**: Production-grade 64-bit eBPF register virtual machine, static abstract interpretation safety verifier (DAG termination, packet bounds verification, stack frame isolation, zero-division prevention), stateful BPF maps (Hash, Array, RingBuffer), high-speed XDP SYN-flood DDoS firewall, assembly disassembler, and ingress microbenchmark suite.

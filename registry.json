@@ -612,5 +612,23 @@
       "Acoustics",
       "Generative-Aesthetics"
     ]
+  },
+  {
+    "id": "ebpf-engine",
+    "title": "Extended Berkeley Packet Filter (eBPF) 64-bit Register VM & Verifier Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade 64-bit eBPF register virtual machine, static abstract interpretation safety verifier (DAG termination, packet bounds verification, stack frame isolation, zero-division prevention), stateful BPF maps (Hash, Array, RingBuffer), high-speed XDP SYN-flood DDoS firewall, assembly disassembler, and ingress microbenchmark suite.",
+    "cli": "ebpf-engine",
+    "evolved_at": "2026-10-31T16:19:18.863658",
+    "tags": [
+      "SystemsArchitecture",
+      "eBPF",
+      "LinuxKernel",
+      "FormalVerification",
+      "XDP",
+      "ComputerScience",
+      "NetworkSecurity"
+    ]
   }
 ]
