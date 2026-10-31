@@ -440,3 +440,8 @@
 - **Title**: FlashAttention-2 & Online Softmax IO-Aware Tiling Engine
 - **Category**: research
 - **Description**: FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV.
+
+### [2026-11-01 02:37:53] - Evolved `kerr-geodesic`
+- **Title**: Kerr Metric General Relativistic Geodesic Raytracer & Black Hole Shadow Engine
+- **Category**: computational-science
+- **Description**: General relativistic raytracing engine in Kerr spacetime with Carter constant Mino Hamiltonian integration, Bardeen analytical critical curves, and Novikov-Thorne accretion disk Doppler beaming.

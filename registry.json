@@ -646,5 +646,22 @@
       "Transformers",
       "DeepLearning"
     ]
+  },
+  {
+    "id": "kerr-geodesic",
+    "title": "Kerr Metric General Relativistic Geodesic Raytracer & Black Hole Shadow Engine",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "General relativistic raytracing engine in Kerr spacetime with Carter constant Mino Hamiltonian integration, Bardeen analytical critical curves, and Novikov-Thorne accretion disk Doppler beaming.",
+    "cli": "kerr-sim",
+    "tags": [
+      "Astrophysics",
+      "GeneralRelativity",
+      "KerrMetric",
+      "BlackHoleShadow",
+      "RelativisticRaytracing",
+      "ComputationalPhysics"
+    ],
+    "evolved_at": "2026-11-01T02:37:46.038803"
   }
 ]
