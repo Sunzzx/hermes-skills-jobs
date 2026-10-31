@@ -1,0 +1,641 @@
+#!/usr/bin/env python3
+"""FlashAttention-2 & Online Softmax IO-Aware Tiling Engine.
+
+A mathematically rigorous, production-grade implementation of FlashAttention-2,
+featuring:
+- IO-aware SRAM tiling with O(N) peak working memory (never materializes N x N attention matrix)
+- Numerically stable Online Softmax fusion with continuous running max and rescaling
+- Block-level causal triangular pruning (skips upper triangular blocks with 0 FLOPs)
+- Exact analytic backward pass recomputing attention on-the-fly from saved logsumexp L
+- FlashDecoding split-KV inference engine for long-context autoregressive generation
+- Multi-Head (MHA), Grouped-Query (GQA), and Multi-Query Attention (MQA) support
+- Analytical High-Bandwidth Memory (HBM) vs On-Chip SRAM IO complexity profiler
+"""
+
+import argparse
+import math
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+# ANSI Color codes for rich CLI terminal rendering
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+RED = "\033[31m"
+RESET = "\033[0m"
+
+BANNER = f"""{CYAN}{BOLD}
+ ⚡ FlashAttention-2 & Online Softmax IO-Aware Tiling Engine
+    Frontier AI Attention Kernel with O(N) Working Memory & FlashDecoding
+{RESET}"""
+
+
+class FlashAttentionEngine:
+    """Production-grade FlashAttention-2 kernel with online softmax and IO-aware tiling."""
+
+    @staticmethod
+    def naive_attention(
+        Q: np.ndarray, K: np.ndarray, V: np.ndarray, causal: bool = False
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Standard quadratic attention O(N^2) for numerical reference.
+
+        Args:
+            Q: (B, H, N_q, d)
+            K: (B, H, N_kv, d)
+            V: (B, H, N_kv, d)
+            causal: Whether to apply causal autoregressive masking
+
+        Returns:
+            O: (B, H, N_q, d)
+            P: (B, H, N_q, N_kv) attention weights
+            L: (B, H, N_q, 1) logsumexp vector
+        """
+        d = Q.shape[-1]
+        scale = 1.0 / np.sqrt(d)
+        S = np.matmul(Q, K.swapaxes(-2, -1)) * scale
+        if causal:
+            N_q, N_kv = Q.shape[-2], K.shape[-2]
+            mask = np.triu(np.ones((N_q, N_kv), dtype=bool), k=1 + N_kv - N_q)
+            S = np.where(mask, -1e9, S)
+
+        m = np.max(S, axis=-1, keepdims=True)
+        P = np.exp(S - m)
+        l = np.sum(P, axis=-1, keepdims=True)
+        P = P / np.maximum(l, 1e-12)
+        O = np.matmul(P, V)
+        L = m + np.log(np.maximum(l, 1e-12))
+        return O, P, L
+
+    @staticmethod
+    def naive_backward(
+        dO: np.ndarray,
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        O: np.ndarray,
+        P: np.ndarray,
+        causal: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Standard backward pass O(N^2) reference."""
+        d = Q.shape[-1]
+        scale = 1.0 / np.sqrt(d)
+        dV = np.matmul(P.swapaxes(-2, -1), dO)
+        dP = np.matmul(dO, V.swapaxes(-2, -1))
+        D = np.sum(dO * O, axis=-1, keepdims=True)
+        dS = P * (dP - D)
+        if causal:
+            N_q, N_kv = Q.shape[-2], K.shape[-2]
+            mask = np.triu(np.ones((N_q, N_kv), dtype=bool), k=1 + N_kv - N_q)
+            dS = np.where(mask, 0.0, dS)
+        dQ = scale * np.matmul(dS, K)
+        dK = scale * np.matmul(dS.swapaxes(-2, -1), Q)
+        return dQ, dK, dV
+
+    @staticmethod
+    def forward(
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        causal: bool = False,
+        Br: int = 32,
+        Bc: int = 32,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """FlashAttention-2 Forward Pass with Online Softmax.
+
+        Iterates outer-loop over Q blocks (Br) and inner-loop over KV blocks (Bc).
+        Never materializes the (N_q x N_kv) attention matrix, maintaining strict O(N) memory.
+
+        Args:
+            Q: (B, H_q, N_q, d)
+            K: (B, H_kv, N_kv, d)
+            V: (B, H_kv, N_kv, d)
+            causal: Causal lower-triangular mask
+            Br: SRAM Query tile row block size
+            Bc: SRAM Key-Value tile column block size
+
+        Returns:
+            O: (B, H_q, N_q, d)
+            L: (B, H_q, N_q, 1) logsumexp values required for backward pass
+        """
+        B, H_q, N_q, d = Q.shape
+        _, H_kv, N_kv, _ = K.shape
+
+        # Support Grouped Query Attention (GQA / MQA)
+        if H_q != H_kv:
+            if H_q % H_kv != 0:
+                raise ValueError(f"H_q ({H_q}) must be divisible by H_kv ({H_kv})")
+            rep = H_q // H_kv
+            K = np.repeat(K, rep, axis=1)
+            V = np.repeat(V, rep, axis=1)
+            H = H_q
+        else:
+            H = H_q
+
+        scale = 1.0 / np.sqrt(d)
+        O = np.zeros((B, H, N_q, d), dtype=Q.dtype)
+        L = np.zeros((B, H, N_q, 1), dtype=Q.dtype)
+
+        Tr = int(np.ceil(N_q / Br))
+        Tc = int(np.ceil(N_kv / Bc))
+
+        # Outer loop over Q blocks (FlashAttention-2 order keeps Qi in fast SRAM registers)
+        for i in range(Tr):
+            q_start = i * Br
+            q_end = min(q_start + Br, N_q)
+            br = q_end - q_start
+            Qi = Q[:, :, q_start:q_end, :]  # (B, H, br, d)
+
+            Oi = np.zeros((B, H, br, d), dtype=Q.dtype)
+            li = np.zeros((B, H, br, 1), dtype=Q.dtype)
+            mi = np.full((B, H, br, 1), -np.inf, dtype=Q.dtype)
+
+            # Inner loop over KV blocks
+            for j in range(Tc):
+                k_start = j * Bc
+                k_end = min(k_start + Bc, N_kv)
+                bc = k_end - k_start
+
+                # Block-level causal skip: block is entirely in future
+                if causal and (k_start > q_end - 1 + (N_kv - N_q)):
+                    continue
+
+                Kj = K[:, :, k_start:k_end, :]  # (B, H, bc, d)
+                Vj = V[:, :, k_start:k_end, :]  # (B, H, bc, d)
+
+                # 1. Compute tile similarity S_ij in SRAM
+                Sij = np.matmul(Qi, Kj.swapaxes(-2, -1)) * scale  # (B, H, br, bc)
+
+                # 2. Intra-block causal masking if diagonal block
+                if causal:
+                    row_idx = (np.arange(br) + q_start)[:, None]
+                    col_idx = (np.arange(bc) + k_start)[None, :]
+                    mask = col_idx > (row_idx + N_kv - N_q)
+                    Sij = np.where(mask, -1e9, Sij)
+
+                # 3. Online Softmax update
+                mij = np.max(Sij, axis=-1, keepdims=True)  # (B, H, br, 1)
+                m_new = np.maximum(mi, mij)
+                P_tilde = np.exp(Sij - m_new)              # (B, H, br, bc)
+
+                alpha = np.exp(mi - m_new)
+                alpha = np.where(np.isnan(alpha), 0.0, alpha)
+
+                li_new = alpha * li + np.sum(P_tilde, axis=-1, keepdims=True)
+
+                # 4. Accumulate Output block: O_i = alpha * O_i + P_tilde @ V_j
+                Oi = alpha * Oi + np.matmul(P_tilde, Vj)
+
+                mi = m_new
+                li = li_new
+
+            # 5. Final normalization of row block
+            safe_l = np.maximum(li, 1e-12)
+            Oi = Oi / safe_l
+            O[:, :, q_start:q_end, :] = Oi
+            L[:, :, q_start:q_end, :] = mi + np.log(safe_l)
+
+        return O, L
+
+    @staticmethod
+    def backward(
+        dO: np.ndarray,
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        O: np.ndarray,
+        L: np.ndarray,
+        causal: bool = False,
+        Br: int = 32,
+        Bc: int = 32,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """FlashAttention-2 Exact Analytic Backward Pass.
+
+        Recomputes attention scores S_ij on-the-fly from Q and K in SRAM using saved
+        logsumexp L. Never stores the N x N attention matrix P, drastically saving memory.
+
+        Args:
+            dO: Gradient of output (B, H, N_q, d)
+            Q, K, V: Forward activations
+            O: Forward output
+            L: Forward logsumexp (B, H, N_q, 1)
+            causal: Causal mask
+            Br, Bc: SRAM block sizes
+
+        Returns:
+            dQ: Gradient w.r.t Q (B, H, N_q, d)
+            dK: Gradient w.r.t K (B, H, N_kv, d)
+            dV: Gradient w.r.t V (B, H, N_kv, d)
+        """
+        B, H, N_q, d = Q.shape
+        N_kv = K.shape[-2]
+        scale = 1.0 / np.sqrt(d)
+
+        dQ = np.zeros_like(Q)
+        dK = np.zeros_like(K)
+        dV = np.zeros_like(V)
+
+        # Precompute D_i = sum_d (dO_i * O_i) for each row i
+        D = np.sum(dO * O, axis=-1, keepdims=True)  # (B, H, N_q, 1)
+
+        Tr = int(np.ceil(N_q / Br))
+        Tc = int(np.ceil(N_kv / Bc))
+
+        # Outer loop over KV blocks to keep dK_j and dV_j accumulated in SRAM
+        for j in range(Tc):
+            k_start = j * Bc
+            k_end = min(k_start + Bc, N_kv)
+            bc = k_end - k_start
+            Kj = K[:, :, k_start:k_end, :]
+            Vj = V[:, :, k_start:k_end, :]
+
+            dKj = np.zeros_like(Kj)
+            dVj = np.zeros_like(Vj)
+
+            # Inner loop over Q blocks
+            for i in range(Tr):
+                q_start = i * Br
+                q_end = min(q_start + Br, N_q)
+                br = q_end - q_start
+
+                if causal and (k_start > q_end - 1 + (N_kv - N_q)):
+                    continue
+
+                Qi = Q[:, :, q_start:q_end, :]
+                dOi = dO[:, :, q_start:q_end, :]
+                Di = D[:, :, q_start:q_end, :]
+                Li = L[:, :, q_start:q_end, :]
+
+                # Recompute S_ij on the fly
+                Sij = np.matmul(Qi, Kj.swapaxes(-2, -1)) * scale
+                if causal:
+                    row_idx = (np.arange(br) + q_start)[:, None]
+                    col_idx = (np.arange(bc) + k_start)[None, :]
+                    mask = col_idx > (row_idx + N_kv - N_q)
+                    Sij = np.where(mask, -1e9, Sij)
+
+                # Recompute exact P_ij = exp(S_ij - L_i)
+                Pij = np.exp(Sij - Li)
+                if causal:
+                    Pij = np.where(mask, 0.0, Pij)
+
+                # 1. dV_j += P_ij^T @ dO_i
+                dVj += np.matmul(Pij.swapaxes(-2, -1), dOi)
+
+                # 2. dP_ij = dO_i @ V_j^T
+                dPij = np.matmul(dOi, Vj.swapaxes(-2, -1))
+
+                # 3. dS_ij = P_ij * (dP_ij - D_i)
+                dSij = Pij * (dPij - Di)
+
+                # 4. dK_j += scale * (dS_ij^T @ Q_i)
+                dKj += scale * np.matmul(dSij.swapaxes(-2, -1), Qi)
+
+                # 5. dQ_i += scale * (dS_ij @ K_j)
+                dQ[:, :, q_start:q_end, :] += scale * np.matmul(dSij, Kj)
+
+            dK[:, :, k_start:k_end, :] = dKj
+            dV[:, :, k_start:k_end, :] = dVj
+
+        return dQ, dK, dV
+
+    @staticmethod
+    def flash_decoding(
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        num_splits: int = 4,
+    ) -> np.ndarray:
+        """FlashDecoding for Long-Context Autoregressive Generation (N_q = 1).
+
+        Splits the sequence dimension of KV cache across multiple worker chunks,
+        computes partial softmaxes in parallel, then reduces via logsumexp reduction.
+
+        Args:
+            Q: (B, H, 1, d) Query for current decoding step
+            K: (B, H, N_kv, d) Key cache
+            V: (B, H, N_kv, d) Value cache
+            num_splits: Parallel KV chunk splits
+
+        Returns:
+            O: (B, H, 1, d) Decoded attention output
+        """
+        B, H, _, d = Q.shape
+        N_kv = K.shape[-2]
+        scale = 1.0 / np.sqrt(d)
+
+        split_size = int(np.ceil(N_kv / num_splits))
+        partial_O = []
+        partial_m = []
+        partial_l = []
+
+        for s in range(num_splits):
+            k_start = s * split_size
+            k_end = min(k_start + split_size, N_kv)
+            if k_start >= N_kv:
+                break
+            Ks = K[:, :, k_start:k_end, :]
+            Vs = V[:, :, k_start:k_end, :]
+
+            Ss = np.matmul(Q, Ks.swapaxes(-2, -1)) * scale  # (B, H, 1, split_len)
+            ms = np.max(Ss, axis=-1, keepdims=True)         # (B, H, 1, 1)
+            Ps = np.exp(Ss - ms)
+            ls = np.sum(Ps, axis=-1, keepdims=True)         # (B, H, 1, 1)
+            Os = np.matmul(Ps, Vs)                          # (B, H, 1, d) unnormalized
+
+            partial_O.append(Os)
+            partial_m.append(ms)
+            partial_l.append(ls)
+
+        # Parallel reduction kernel across splits
+        all_m = np.concatenate(partial_m, axis=-1)  # (B, H, 1, splits)
+        m_global = np.max(all_m, axis=-1, keepdims=True)  # (B, H, 1, 1)
+
+        total_l = np.zeros_like(m_global)
+        final_O = np.zeros_like(Q)
+
+        for s in range(len(partial_O)):
+            alpha = np.exp(partial_m[s] - m_global)
+            total_l += alpha * partial_l[s]
+            final_O += alpha * partial_O[s]
+
+        final_O = final_O / np.maximum(total_l, 1e-12)
+        return final_O
+
+    @staticmethod
+    def profile_io(N: int, d: int = 64, bytes_per_elem: int = 4, sram_kb: int = 128) -> Dict[str, float]:
+        """Calculate theoretical IO bandwidth and SRAM transfer complexity."""
+        sram_bytes = sram_kb * 1024
+        # Standard attention: Q, K, V read from DRAM, S written to DRAM, S read, P written, P read, O written
+        # Total DRAM traffic: 4 * N * d + 4 * N^2 floats
+        standard_dram_bytes = (4 * N * d + 4 * N * N) * bytes_per_elem
+
+        # FlashAttention: Blocks loaded into SRAM, P never written to DRAM
+        # Bc = sram_bytes / (4 * d * bytes_per_elem)
+        Bc = max(16, min(256, int(sram_bytes / (4 * d * bytes_per_elem))))
+        # FlashAttention DRAM traffic: ~ (2 * N * d + N^2 * d / Bc) * bytes_per_elem
+        flash_dram_bytes = (2 * N * d + (N * N * d) / Bc) * bytes_per_elem
+
+        # Peak memory: Standard needs N x N matrix, FlashAttention needs only Br x Bc block
+        standard_peak_mem_mb = (N * N * bytes_per_elem) / (1024 * 1024)
+        flash_peak_mem_mb = (Bc * Bc * bytes_per_elem) / (1024 * 1024)
+
+        return {
+            "seq_len": N,
+            "standard_dram_mb": standard_dram_bytes / (1024 * 1024),
+            "flash_dram_mb": flash_dram_bytes / (1024 * 1024),
+            "io_reduction_factor": standard_dram_bytes / max(flash_dram_bytes, 1e-6),
+            "standard_peak_mem_mb": standard_peak_mem_mb,
+            "flash_peak_mem_mb": flash_peak_mem_mb,
+            "mem_saving_factor": standard_peak_mem_mb / max(flash_peak_mem_mb, 1e-6),
+        }
+
+
+def run_verification():
+    print(BANNER)
+    print(f"{BOLD}=== 🔬 Rigorous Mathematical & Numerical Verification ==={RESET}\n")
+
+    rng = np.random.RandomState(42)
+    B, H, N_q, N_kv, d = 2, 4, 128, 128, 64
+    Q = rng.randn(B, H, N_q, d)
+    K = rng.randn(B, H, N_kv, d)
+    V = rng.randn(B, H, N_kv, d)
+    dO = rng.randn(B, H, N_q, d)
+
+    print(f"[1/5] Testing Non-Causal Forward Pass Parity (B={B}, H={H}, N={N_q}, d={d})...")
+    O_ref, P_ref, L_ref = FlashAttentionEngine.naive_attention(Q, K, V, causal=False)
+    O_fa, L_fa = FlashAttentionEngine.forward(Q, K, V, causal=False, Br=32, Bc=32)
+    err_fwd = np.max(np.abs(O_ref - O_fa))
+    err_L = np.max(np.abs(L_ref - L_fa))
+    print(f"  • Max Output Error:      {GREEN}{err_fwd:.2e}{RESET} (Tolerance: 1e-10)")
+    print(f"  • Max LogSumExp Error:   {GREEN}{err_L:.2e}{RESET} (Tolerance: 1e-10)")
+    assert err_fwd < 1e-10, f"Forward non-causal error too high: {err_fwd}"
+    assert err_L < 1e-10, f"Logsumexp error too high: {err_L}"
+
+    print(f"\n[2/5] Testing Causal Forward Pass Parity with Block Pruning...")
+    O_ref_c, P_ref_c, L_ref_c = FlashAttentionEngine.naive_attention(Q, K, V, causal=True)
+    O_fa_c, L_fa_c = FlashAttentionEngine.forward(Q, K, V, causal=True, Br=32, Bc=32)
+    err_fwd_c = np.max(np.abs(O_ref_c - O_fa_c))
+    err_L_c = np.max(np.abs(L_ref_c - L_fa_c))
+    print(f"  • Max Causal Output Error:    {GREEN}{err_fwd_c:.2e}{RESET}")
+    print(f"  • Max Causal LogSumExp Error: {GREEN}{err_L_c:.2e}{RESET}")
+    assert err_fwd_c < 1e-10, f"Forward causal error too high: {err_fwd_c}"
+    assert err_L_c < 1e-10, f"Causal logsumexp error too high: {err_L_c}"
+
+    print(f"\n[3/5] Testing Exact Backward Pass Gradients (dQ, dK, dV) without N x N Matrix...")
+    dQ_ref, dK_ref, dV_ref = FlashAttentionEngine.naive_backward(dO, Q, K, V, O_ref_c, P_ref_c, causal=True)
+    dQ_fa, dK_fa, dV_fa = FlashAttentionEngine.backward(dO, Q, K, V, O_fa_c, L_fa_c, causal=True, Br=32, Bc=32)
+    err_dQ = np.max(np.abs(dQ_ref - dQ_fa))
+    err_dK = np.max(np.abs(dK_ref - dK_fa))
+    err_dV = np.max(np.abs(dV_ref - dV_fa))
+    print(f"  • Max dQ Gradient Error: {GREEN}{err_dQ:.2e}{RESET}")
+    print(f"  • Max dK Gradient Error: {GREEN}{err_dK:.2e}{RESET}")
+    print(f"  • Max dV Gradient Error: {GREEN}{err_dV:.2e}{RESET}")
+    assert err_dQ < 1e-10, f"dQ error too high: {err_dQ}"
+    assert err_dK < 1e-10, f"dK error too high: {err_dK}"
+    assert err_dV < 1e-10, f"dV error too high: {err_dV}"
+
+    print(f"\n[4/5] Testing FlashDecoding Split-KV Long-Context Engine (N_kv=2048, splits=8)...")
+    Q_dec = rng.randn(B, H, 1, d)
+    K_long = rng.randn(B, H, 2048, d)
+    V_long = rng.randn(B, H, 2048, d)
+    O_dec_ref, _, _ = FlashAttentionEngine.naive_attention(Q_dec, K_long, V_long, causal=False)
+    O_dec_fa = FlashAttentionEngine.flash_decoding(Q_dec, K_long, V_long, num_splits=8)
+    err_decode = np.max(np.abs(O_dec_ref - O_dec_fa))
+    print(f"  • Max FlashDecoding Error: {GREEN}{err_decode:.2e}{RESET}")
+    assert err_decode < 1e-10, f"FlashDecoding error too high: {err_decode}"
+
+    print(f"\n[5/5] Testing Grouped-Query Attention (GQA: H_q=8, H_kv=2)...")
+    Q_gqa = rng.randn(B, 8, 64, d)
+    K_gqa = rng.randn(B, 2, 64, d)
+    V_gqa = rng.randn(B, 2, 64, d)
+    O_gqa, _ = FlashAttentionEngine.forward(Q_gqa, K_gqa, V_gqa, causal=True, Br=16, Bc=16)
+    K_rep = np.repeat(K_gqa, 4, axis=1)
+    V_rep = np.repeat(V_gqa, 4, axis=1)
+    O_gqa_ref, _, _ = FlashAttentionEngine.naive_attention(Q_gqa, K_rep, V_rep, causal=True)
+    err_gqa = np.max(np.abs(O_gqa - O_gqa_ref))
+    print(f"  • Max GQA Output Error:   {GREEN}{err_gqa:.2e}{RESET}")
+    assert err_gqa < 1e-10, f"GQA error too high: {err_gqa}"
+
+    print(f"\n{GREEN}{BOLD}✅ All 5 Verification Checkpoints Passed with Machine-Precision Accuracy!{RESET}\n")
+
+
+def run_demo():
+    print(BANNER)
+    print(f"{BOLD}=== 🖥️ Interactive FlashAttention-2 Architecture & IO Walkthrough ==={RESET}\n")
+
+    N_demo = 128
+    Br_demo = 32
+    Bc_demo = 32
+    Tr = N_demo // Br_demo
+    Tc = N_demo // Bc_demo
+
+    print(f"{CYAN}Sequence Length:{RESET} N = {N_demo} tokens")
+    print(f"{CYAN}SRAM Block Sizes:{RESET} Br = {Br_demo}, Bc = {Bc_demo}")
+    print(f"{CYAN}Grid Dimensions:{RESET} Tr = {Tr} query blocks, Tc = {Tc} key-value blocks\n")
+
+    print(f"{BOLD}IO-Aware Block Tiling & Causal Pruning Matrix:{RESET}")
+    print("      " + "  ".join([f"KV_blk {j}" for j in range(Tc)]))
+
+    computed_blocks = 0
+    skipped_blocks = 0
+    for i in range(Tr):
+        row_str = f"Q_blk {i} | "
+        for j in range(Tc):
+            k_start = j * Bc_demo
+            q_end = (i + 1) * Br_demo
+            if k_start > q_end - 1:
+                row_str += f"{DIM}[ SKIP ]{RESET}  "
+                skipped_blocks += 1
+            elif (j + 1) * Bc_demo <= (i * Br_demo + 1):
+                row_str += f"{GREEN}[ FULL ]{RESET}  "
+                computed_blocks += 1
+            else:
+                row_str += f"{YELLOW}[ MASK ]{RESET}  "
+                computed_blocks += 1
+        print(row_str)
+
+    print(f"\n{BOLD}Causal Pruning Summary:{RESET}")
+    print(f"  • Active Computed Blocks:  {GREEN}{computed_blocks}{RESET} / {Tr * Tc}")
+    print(f"  • Zero-FLOP Skipped Blocks: {CYAN}{skipped_blocks}{RESET} ({skipped_blocks / (Tr * Tc) * 100:.1f}% compute eliminated)")
+
+    print(f"\n{BOLD}Theoretical Memory Hierarchy & DRAM Traffic Comparison:{RESET}")
+    header = f"| {'Sequence':<10} | {'Standard DRAM (MB)':<18} | {'Flash DRAM (MB)':<16} | {'Bandwidth Saved':<16} | {'Peak Mem Saving':<16} |"
+    sep = "|-" + "-" * 10 + "-|-" + "-" * 18 + "-|-" + "-" * 16 + "-|-" + "-" * 16 + "-|-" + "-" * 16 + "-|"
+    print(header)
+    print(sep)
+
+    for N in [512, 1024, 2048, 4096, 8192, 16384]:
+        prof = FlashAttentionEngine.profile_io(N, d=64, sram_kb=128)
+        row = (
+            f"| {N:<10} "
+            f"| {prof['standard_dram_mb']:<18.2f} "
+            f"| {prof['flash_dram_mb']:<16.2f} "
+            f"| {prof['io_reduction_factor']:<15.1f}x "
+            f"| {prof['mem_saving_factor']:<15.1f}x |"
+        )
+        print(row)
+    print(sep)
+    print(f"\n{GREEN}✅ Demonstration complete.{RESET}\n")
+
+
+def run_benchmark():
+    print(BANNER)
+    print(f"{BOLD}=== ⚡ FlashAttention-2 Execution & Latency Benchmark ==={RESET}\n")
+
+    rng = np.random.RandomState(42)
+    B, H, d = 1, 4, 64
+    test_lengths = [256, 512, 1024, 2048]
+
+    header = f"| {'Seq Len':<8} | {'Standard Attn (ms)':<18} | {'FlashAttention (ms)':<19} | {'Speedup':<9} | {'Max Abs Error':<14} |"
+    sep = "|-" + "-" * 8 + "-|-" + "-" * 18 + "-|-" + "-" * 19 + "-|-" + "-" * 9 + "-|-" + "-" * 14 + "-|"
+    print(header)
+    print(sep)
+
+    for N in test_lengths:
+        Q = rng.randn(B, H, N, d)
+        K = rng.randn(B, H, N, d)
+        V = rng.randn(B, H, N, d)
+
+        # Warmup
+        FlashAttentionEngine.naive_attention(Q, K, V, causal=True)
+        FlashAttentionEngine.forward(Q, K, V, causal=True, Br=64, Bc=64)
+
+        # Standard attention timing
+        t0 = time.perf_counter()
+        runs = 5 if N <= 1024 else 2
+        for _ in range(runs):
+            O_ref, _, _ = FlashAttentionEngine.naive_attention(Q, K, V, causal=True)
+        t_std = ((time.perf_counter() - t0) / runs) * 1000
+
+        # FlashAttention timing
+        t0 = time.perf_counter()
+        for _ in range(runs):
+            O_fa, _ = FlashAttentionEngine.forward(Q, K, V, causal=True, Br=64, Bc=64)
+        t_fa = ((time.perf_counter() - t0) / runs) * 1000
+
+        diff = np.max(np.abs(O_ref - O_fa))
+        speedup = t_std / max(t_fa, 1e-4)
+        print(f"| {N:<8} | {t_std:<18.2f} | {t_fa:<19.2f} | {speedup:<8.2f}x | {diff:<14.2e} |")
+
+    print(sep)
+    print(f"\n{GREEN}✅ Benchmark complete.{RESET}\n")
+
+
+def run_decode():
+    print(BANNER)
+    print(f"{BOLD}=== 🚀 FlashDecoding Split-KV Long-Context Evaluation ==={RESET}\n")
+
+    rng = np.random.RandomState(42)
+    B, H, d = 1, 8, 64
+    long_contexts = [1024, 2048, 4096, 8192]
+
+    header = f"| {'Context N_kv':<14} | {'Splits':<8} | {'Standard (ms)':<14} | {'FlashDecode (ms)':<16} | {'Max Error':<12} |"
+    sep = "|-" + "-" * 14 + "-|-" + "-" * 8 + "-|-" + "-" * 14 + "-|-" + "-" * 16 + "-|-" + "-" * 12 + "-|"
+    print(header)
+    print(sep)
+
+    for N_kv in long_contexts:
+        Q = rng.randn(B, H, 1, d)
+        K = rng.randn(B, H, N_kv, d)
+        V = rng.randn(B, H, N_kv, d)
+
+        splits = 8 if N_kv >= 2048 else 4
+
+        # Warmup
+        FlashAttentionEngine.naive_attention(Q, K, V)
+        FlashAttentionEngine.flash_decoding(Q, K, V, num_splits=splits)
+
+        t0 = time.perf_counter()
+        runs = 10
+        for _ in range(runs):
+            O_ref, _, _ = FlashAttentionEngine.naive_attention(Q, K, V)
+        t_std = ((time.perf_counter() - t0) / runs) * 1000
+
+        t0 = time.perf_counter()
+        for _ in range(runs):
+            O_fa = FlashAttentionEngine.flash_decoding(Q, K, V, num_splits=splits)
+        t_fa = ((time.perf_counter() - t0) / runs) * 1000
+
+        diff = np.max(np.abs(O_ref - O_fa))
+        print(f"| {N_kv:<14} | {splits:<8} | {t_std:<14.2f} | {t_fa:<16.2f} | {diff:<12.2e} |")
+
+    print(sep)
+    print(f"\n{GREEN}✅ FlashDecoding evaluation complete.{RESET}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="FlashAttention-2 & Online Softmax IO-Aware Tiling Engine",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Engine subcommands")
+
+    subparsers.add_parser("verify", help="Run machine-precision mathematical tests")
+    subparsers.add_parser("demo", help="Interactive block tiling and memory hierarchy visualization")
+    subparsers.add_parser("bench", help="Benchmark latency and memory vs standard attention")
+    subparsers.add_parser("decode", help="Evaluate FlashDecoding split-KV engine on long sequences")
+
+    args = parser.parse_args()
+
+    if args.command == "verify":
+        run_verification()
+    elif args.command == "demo":
+        run_demo()
+    elif args.command == "bench":
+        run_benchmark()
+    elif args.command == "decode":
+        run_decode()
+    else:
+        run_verification()
+
+
+if __name__ == "__main__":
+    main()
