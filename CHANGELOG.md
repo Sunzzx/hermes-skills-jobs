@@ -425,3 +425,8 @@
 - **Title**: Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine
 - **Category**: computational-science
 - **Description**: Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer.
+
+### [2026-10-31 05:57:26] - Evolved `binaural-spatial-audio`
+- **Title**: Binaural 3D Spatial Audio & Ambisonics DSP Engine
+- **Category**: creative
+- **Description**: Production-grade 3D binaural spatial audio engine: Woodworth spherical head diffraction ITD with cubic Lagrange fractional delay, Duda-Brown ILD head shadow biquad filtering, pinna elevation spectral notch cues, Ambisonics B-format spherical harmonics encoding, Image Source Method room acoustics, FDN reverberation, Braille polar soundfield radar, and 16-bit 44.1kHz stereo WAV export.
