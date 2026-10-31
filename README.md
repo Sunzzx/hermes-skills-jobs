@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-38-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-39-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (38 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (39 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -50,6 +50,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine** | `computational-science` | `lbm-cfd` | Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer. | `ComputationalPhysics` `FluidDynamics` `LatticeBoltzmann` |
 | **Binaural 3D Spatial Audio & Ambisonics DSP Engine** | `creative` | `spatial-audio` | Production-grade 3D binaural spatial audio engine: Woodworth spherical head diffraction ITD with cubic Lagrange fractional delay, Duda-Brown ILD head shadow biquad filtering, pinna elevation spectral notch cues, Ambisonics B-format spherical harmonics encoding, Image Source Method room acoustics, FDN reverberation, Braille polar soundfield radar, and 16-bit 44.1kHz stereo WAV export. | `Audio-DSP` `Spatial-Audio` `Binaural` |
 | **Extended Berkeley Packet Filter (eBPF) 64-bit Register VM & Verifier Engine** | `systems` | `ebpf-engine` | Production-grade 64-bit eBPF register virtual machine, static abstract interpretation safety verifier (DAG termination, packet bounds verification, stack frame isolation, zero-division prevention), stateful BPF maps (Hash, Array, RingBuffer), high-speed XDP SYN-flood DDoS firewall, assembly disassembler, and ingress microbenchmark suite. | `SystemsArchitecture` `eBPF` `LinuxKernel` |
+| **FlashAttention-2 & Online Softmax IO-Aware Tiling Engine** | `research` | `flash-attn` | FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV. | `Frontier-AI` `FlashAttention` `OnlineSoftmax` |
 
 ---
 
@@ -80,4 +81,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-10-31 16:19:18*
+*Last Evolved: 2026-10-31 21:04:41*

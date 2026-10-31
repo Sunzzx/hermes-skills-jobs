@@ -630,5 +630,21 @@
       "ComputerScience",
       "NetworkSecurity"
     ]
+  },
+  {
+    "id": "flash-attention",
+    "title": "FlashAttention-2 & Online Softmax IO-Aware Tiling Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV.",
+    "cli": "flash-attn",
+    "tags": [
+      "Frontier-AI",
+      "FlashAttention",
+      "OnlineSoftmax",
+      "IO-Aware",
+      "Transformers",
+      "DeepLearning"
+    ]
   }
 ]

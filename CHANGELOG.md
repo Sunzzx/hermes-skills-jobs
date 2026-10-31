@@ -435,3 +435,8 @@
 - **Title**: Extended Berkeley Packet Filter (eBPF) 64-bit Register VM & Verifier Engine
 - **Category**: systems
 - **Description**: Production-grade 64-bit eBPF register virtual machine, static abstract interpretation safety verifier (DAG termination, packet bounds verification, stack frame isolation, zero-division prevention), stateful BPF maps (Hash, Array, RingBuffer), high-speed XDP SYN-flood DDoS firewall, assembly disassembler, and ingress microbenchmark suite.
+
+### [2026-10-31 21:04:41] - Evolved `flash-attention`
+- **Title**: FlashAttention-2 & Online Softmax IO-Aware Tiling Engine
+- **Category**: research
+- **Description**: FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV.
