@@ -748,5 +748,21 @@
       "EventualConsistency",
       "CollaborativeEditing"
     ]
+  },
+  {
+    "id": "zksnark-prover",
+    "title": "Zero-Knowledge SNARK & R1CS-to-QAP Arithmetic Circuit Verification Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade Zero-Knowledge SNARK engine featuring R1CS constraint compilation, Quadratic Arithmetic Program (QAP) reduction, Lagrange polynomial interpolation, trusted setup toxic waste generation, Groth16 proof generation with blinding scalars, and succinct O(1) verification.",
+    "cli": "zksnark",
+    "evolved_at": "2026-11-02T05:18:22.016611",
+    "tags": [
+      "ZeroKnowledgeProofs",
+      "R1CS",
+      "QuadraticArithmeticPrograms",
+      "Groth16",
+      "Cryptography"
+    ]
   }
 ]

@@ -470,3 +470,8 @@
 - **Title**: Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine
 - **Category**: systems
 - **Description**: Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine for real-time collaborative text editing, state-based counters, sets, and partition-tolerant synchronization.
+
+### [2026-11-02 05:18:22] - Evolved `zksnark-prover`
+- **Title**: Zero-Knowledge SNARK & R1CS-to-QAP Arithmetic Circuit Verification Engine
+- **Category**: systems
+- **Description**: Production-grade Zero-Knowledge SNARK engine featuring R1CS constraint compilation, Quadratic Arithmetic Program (QAP) reduction, Lagrange polynomial interpolation, trusted setup toxic waste generation, Groth16 proof generation with blinding scalars, and succinct O(1) verification.
