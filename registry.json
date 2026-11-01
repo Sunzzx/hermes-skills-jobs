@@ -680,5 +680,22 @@
       "SoundDesign"
     ],
     "evolved_at": "2026-11-01T18:58:00.000000"
+  },
+  {
+    "id": "speculative-decoding",
+    "title": "Speculative Decoding & Medusa Multi-Head Tree Attention Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Inference acceleration engine implementing exact Speculative Rejection Sampling (Leviathan/Chen) with provable Zero Distributional Shift, Medusa Cartesian candidate tree construction, 2D causal tree attention mask verification, dynamic KV-cache rollback, and roofline memory bandwidth profiler.",
+    "cli": "spec-decode",
+    "tags": [
+      "FrontierAI",
+      "SpeculativeDecoding",
+      "Medusa",
+      "TreeAttention",
+      "InferenceAcceleration",
+      "KVCache"
+    ],
+    "evolved_at": "2026-11-01T20:15:51.705119"
   }
 ]

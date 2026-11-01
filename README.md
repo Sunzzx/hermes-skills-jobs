@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-41-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-42-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (41 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (42 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -53,6 +53,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **FlashAttention-2 & Online Softmax IO-Aware Tiling Engine** | `research` | `flash-attn` | FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV. | `Frontier-AI` `FlashAttention` `OnlineSoftmax` |
 | **Kerr Metric General Relativistic Geodesic Raytracer & Black Hole Shadow Engine** | `computational-science` | `kerr-sim` | General relativistic raytracing engine in Kerr spacetime with Carter constant Mino Hamiltonian integration, Bardeen analytical critical curves, and Novikov-Thorne accretion disk Doppler beaming. | `Astrophysics` `GeneralRelativity` `KerrMetric` |
 | **Granular Synthesis & Dynamic Gabor Acoustic Texture DSP Engine** | `creative` | `grain-synth` | Curtis Roads and Dennis Gabor granular synthesis engine with Catmull-Rom Hermite sub-sample interpolation, Poisson stochastic scheduling, time-scale modification, infinite freeze, constant-power panning, and 16-bit 44.1kHz WAV export. | `Audio-DSP` `GranularSynthesis` `GaborAcoustics` |
+| **Speculative Decoding & Medusa Multi-Head Tree Attention Engine** | `research` | `spec-decode` | Inference acceleration engine implementing exact Speculative Rejection Sampling (Leviathan/Chen) with provable Zero Distributional Shift, Medusa Cartesian candidate tree construction, 2D causal tree attention mask verification, dynamic KV-cache rollback, and roofline memory bandwidth profiler. | `FrontierAI` `SpeculativeDecoding` `Medusa` |
 
 ---
 
@@ -83,4 +84,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-01 18:58:00*
+*Last Evolved: 2026-11-01 20:15:51*
