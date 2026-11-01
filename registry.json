@@ -697,5 +697,23 @@
       "KVCache"
     ],
     "evolved_at": "2026-11-01T20:15:51.705119"
+  },
+  {
+    "id": "io-uring",
+    "title": "io_uring High-Performance Asynchronous I/O Engine & Lock-Free Ring Buffer Runtime",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "High-performance Linux io_uring asynchronous I/O engine, lock-free SPSC circular ring buffers, zero-syscall SQPOLL mode, and chained IOSQE_IO_LINK pipelines.",
+    "cli": "io-uring",
+    "tags": [
+      "Systems",
+      "Linux",
+      "io_uring",
+      "AsyncIO",
+      "RingBuffer",
+      "ZeroSyscall",
+      "SQPOLL"
+    ],
+    "evolved_at": "2026-11-02T00:11:32.744557"
   }
 ]

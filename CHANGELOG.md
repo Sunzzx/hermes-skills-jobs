@@ -455,3 +455,8 @@
 - **Title**: Speculative Decoding & Medusa Multi-Head Tree Attention Engine
 - **Category**: research
 - **Description**: Inference acceleration engine implementing exact Speculative Rejection Sampling (Leviathan/Chen) with provable Zero Distributional Shift, Medusa Cartesian candidate tree construction, 2D causal tree attention mask verification, dynamic KV-cache rollback, and roofline memory bandwidth profiler.
+
+### [2026-11-02 00:11:32] - Evolved `io-uring`
+- **Title**: io_uring High-Performance Asynchronous I/O Engine & Lock-Free Ring Buffer Runtime
+- **Category**: systems
+- **Description**: High-performance Linux io_uring asynchronous I/O engine, lock-free SPSC circular ring buffers, zero-syscall SQPOLL mode, and chained IOSQE_IO_LINK pipelines.
