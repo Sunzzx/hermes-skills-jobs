@@ -663,5 +663,22 @@
       "ComputationalPhysics"
     ],
     "evolved_at": "2026-11-01T02:37:46.038803"
+  },
+  {
+    "id": "granular-synth",
+    "title": "Granular Synthesis & Dynamic Gabor Acoustic Texture DSP Engine",
+    "category": "creative",
+    "type": "skill+tool",
+    "description": "Curtis Roads and Dennis Gabor granular synthesis engine with Catmull-Rom Hermite sub-sample interpolation, Poisson stochastic scheduling, time-scale modification, infinite freeze, constant-power panning, and 16-bit 44.1kHz WAV export.",
+    "cli": "grain-synth",
+    "tags": [
+      "Audio-DSP",
+      "GranularSynthesis",
+      "GaborAcoustics",
+      "GenerativeAesthetics",
+      "TimeStretching",
+      "SoundDesign"
+    ],
+    "evolved_at": "2026-11-01T18:58:00.000000"
   }
 ]

@@ -445,3 +445,8 @@
 - **Title**: Kerr Metric General Relativistic Geodesic Raytracer & Black Hole Shadow Engine
 - **Category**: computational-science
 - **Description**: General relativistic raytracing engine in Kerr spacetime with Carter constant Mino Hamiltonian integration, Bardeen analytical critical curves, and Novikov-Thorne accretion disk Doppler beaming.
+
+### [2026-11-01 18:58:00] - Evolved `granular-synth`
+- **Title**: Granular Synthesis & Dynamic Gabor Acoustic Texture DSP Engine
+- **Category**: creative
+- **Description**: Curtis Roads and Dennis Gabor granular synthesis engine with Catmull-Rom Hermite sub-sample interpolation, Poisson stochastic scheduling, time-scale modification, infinite freeze, constant-power panning, and 16-bit 44.1kHz WAV export.
