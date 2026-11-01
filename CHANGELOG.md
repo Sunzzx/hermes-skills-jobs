@@ -460,3 +460,8 @@
 - **Title**: io_uring High-Performance Asynchronous I/O Engine & Lock-Free Ring Buffer Runtime
 - **Category**: systems
 - **Description**: High-performance Linux io_uring asynchronous I/O engine, lock-free SPSC circular ring buffers, zero-syscall SQPOLL mode, and chained IOSQE_IO_LINK pipelines.
+
+### [2026-11-02 02:45:03] - Evolved `hnsw-vector-search`
+- **Title**: HNSW High-Dimensional Vector Search Engine & Quantized Proximity Graph
+- **Category**: data-science
+- **Description**: Hierarchical Navigable Small World (HNSW) approximate nearest neighbor vector search engine with multi-layer geometric skip-graphs, heuristic spatial diversity pruning, and SQ8 quantization.

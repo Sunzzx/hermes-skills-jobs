@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-43-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-44-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (43 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (44 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -55,6 +55,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Granular Synthesis & Dynamic Gabor Acoustic Texture DSP Engine** | `creative` | `grain-synth` | Curtis Roads and Dennis Gabor granular synthesis engine with Catmull-Rom Hermite sub-sample interpolation, Poisson stochastic scheduling, time-scale modification, infinite freeze, constant-power panning, and 16-bit 44.1kHz WAV export. | `Audio-DSP` `GranularSynthesis` `GaborAcoustics` |
 | **Speculative Decoding & Medusa Multi-Head Tree Attention Engine** | `research` | `spec-decode` | Inference acceleration engine implementing exact Speculative Rejection Sampling (Leviathan/Chen) with provable Zero Distributional Shift, Medusa Cartesian candidate tree construction, 2D causal tree attention mask verification, dynamic KV-cache rollback, and roofline memory bandwidth profiler. | `FrontierAI` `SpeculativeDecoding` `Medusa` |
 | **io_uring High-Performance Asynchronous I/O Engine & Lock-Free Ring Buffer Runtime** | `systems` | `io-uring` | High-performance Linux io_uring asynchronous I/O engine, lock-free SPSC circular ring buffers, zero-syscall SQPOLL mode, and chained IOSQE_IO_LINK pipelines. | `Systems` `Linux` `io_uring` |
+| **HNSW High-Dimensional Vector Search Engine & Quantized Proximity Graph** | `data-science` | `hnsw-search` | Hierarchical Navigable Small World (HNSW) approximate nearest neighbor vector search engine with multi-layer geometric skip-graphs, heuristic spatial diversity pruning, and SQ8 quantization. | `VectorSearch` `HNSW` `Embeddings` |
 
 ---
 
@@ -85,4 +86,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-02 00:11:32*
+*Last Evolved: 2026-11-02 02:45:03*

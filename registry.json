@@ -715,5 +715,22 @@
       "SQPOLL"
     ],
     "evolved_at": "2026-11-02T00:11:32.744557"
+  },
+  {
+    "id": "hnsw-vector-search",
+    "title": "HNSW High-Dimensional Vector Search Engine & Quantized Proximity Graph",
+    "category": "data-science",
+    "type": "skill+tool",
+    "description": "Hierarchical Navigable Small World (HNSW) approximate nearest neighbor vector search engine with multi-layer geometric skip-graphs, heuristic spatial diversity pruning, and SQ8 quantization.",
+    "cli": "hnsw-search",
+    "tags": [
+      "VectorSearch",
+      "HNSW",
+      "Embeddings",
+      "Quantization",
+      "ApproximateNearestNeighbor",
+      "GraphAlgorithms"
+    ],
+    "evolved_at": "2026-11-02T02:45:03.005131"
   }
 ]
