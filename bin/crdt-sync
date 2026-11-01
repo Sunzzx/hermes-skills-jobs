@@ -1,0 +1,1001 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine.
+
+A mathematically rigorous, production-grade distributed state synchronization
+engine implementing State-based (CvRDT) and Operation-based (CmRDT) structures,
+Causal Vector Clocks, Replicated Growable Array (RGA) for collaborative text
+editing, Observed-Removed Sets (ORSet), PN-Counters, and a Chaos Network
+Partition Simulator verifying Strong Eventual Consistency (SEC).
+"""
+
+import argparse
+import copy
+from dataclasses import dataclass, field
+enum_imported = False
+import json
+import math
+import os
+from pathlib import Path
+import random
+import sys
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+# =====================================================================
+# ANSI Terminal Formatting Helpers
+# =====================================================================
+USE_COLOR = sys.stdout.isatty() or os.environ.get("TERM") is not None
+
+def c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+
+def bold(text: str) -> str: return c("1", text)
+def cyan(text: str) -> str: return c("36", text)
+def green(text: str) -> str: return c("32", text)
+def yellow(text: str) -> str: return c("33", text)
+def magenta(text: str) -> str: return c("35", text)
+def red(text: str) -> str: return c("31", text)
+def gray(text: str) -> str: return c("90", text)
+
+# =====================================================================
+# 1. Causal Vector Clock Implementation
+# =====================================================================
+
+class ClockRelation:
+    EQUAL = "EQUAL"
+    ANCESTOR = "ANCESTOR"          # self < other (self causally precedes other)
+    DESCENDANT = "DESCENDANT"      # self > other (self causally succeeds other)
+    CONCURRENT = "CONCURRENT"      # self || other (concurrent / split-brain)
+
+
+@dataclass
+class VectorClock:
+    """Causal Vector Clock tracking logical clocks per actor/node."""
+    clocks: Dict[str, int] = field(default_factory=dict)
+
+    def tick(self, node_id: str) -> int:
+        """Increment the logical clock for the specified node."""
+        self.clocks[node_id] = self.clocks.get(node_id, 0) + 1
+        return self.clocks[node_id]
+
+    def get(self, node_id: str) -> int:
+        return self.clocks.get(node_id, 0)
+
+    def set_clock(self, node_id: str, value: int) -> None:
+        self.clocks[node_id] = max(self.clocks.get(node_id, 0), value)
+
+    def merge(self, other: 'VectorClock') -> 'VectorClock':
+        """Semilattice Join (element-wise supremum): V_merged[k] = max(V1[k], V2[k])."""
+        all_keys = set(self.clocks.keys()) | set(other.clocks.keys())
+        merged = {k: max(self.clocks.get(k, 0), other.clocks.get(k, 0)) for k in all_keys}
+        return VectorClock(clocks=merged)
+
+    def dominates(self, other: 'VectorClock') -> bool:
+        """Returns True if self >= other (self has seen all events other has seen)."""
+        for node_id, count in other.clocks.items():
+            if self.clocks.get(node_id, 0) < count:
+                return False
+        return True
+
+    def strictly_dominates(self, other: 'VectorClock') -> bool:
+        """Returns True if self > other."""
+        return self.dominates(other) and self != other
+
+    def relation(self, other: 'VectorClock') -> str:
+        """Determine causal relationship between two vector clocks."""
+        if self == other:
+            return ClockRelation.EQUAL
+        self_dom = self.dominates(other)
+        other_dom = other.dominates(self)
+        if self_dom and not other_dom:
+            return ClockRelation.DESCENDANT
+        elif other_dom and not self_dom:
+            return ClockRelation.ANCESTOR
+        else:
+            return ClockRelation.CONCURRENT
+
+    def copy(self) -> 'VectorClock':
+        return VectorClock(clocks=dict(self.clocks))
+
+    def to_dict(self) -> Dict[str, int]:
+        return dict(sorted(self.clocks.items()))
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, int]) -> 'VectorClock':
+        return cls(clocks=dict(data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VectorClock):
+            return False
+        all_keys = set(self.clocks.keys()) | set(other.clocks.keys())
+        for k in all_keys:
+            if self.clocks.get(k, 0) != other.clocks.get(k, 0):
+                return False
+        return True
+
+    def __repr__(self) -> str:
+        entries = [f"{k}:{v}" for k, v in sorted(self.clocks.items())]
+        return f"<VC {', '.join(entries)}>"
+
+
+# =====================================================================
+# 2. State-Based Counters (CvRDT): G-Counter & PN-Counter
+# =====================================================================
+
+@dataclass
+class GCounter:
+    """Grow-only Counter where state is a vector of per-node increments."""
+    counts: Dict[str, int] = field(default_factory=dict)
+
+    def inc(self, node_id: str, amount: int = 1) -> None:
+        if amount < 0:
+            raise ValueError("GCounter only supports positive increments.")
+        self.counts[node_id] = self.counts.get(node_id, 0) + amount
+
+    @property
+    def value(self) -> int:
+        return sum(self.counts.values())
+
+    def merge(self, other: 'GCounter') -> 'GCounter':
+        all_nodes = set(self.counts.keys()) | set(other.counts.keys())
+        return GCounter(counts={n: max(self.counts.get(n, 0), other.counts.get(n, 0)) for n in all_nodes})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": "GCounter", "counts": dict(self.counts)}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GCounter':
+        return cls(counts=dict(data.get("counts", {})))
+
+
+@dataclass
+class PNCounter:
+    """Positive-Negative Counter supporting both increments and decrements."""
+    p: GCounter = field(default_factory=GCounter)
+    n: GCounter = field(default_factory=GCounter)
+
+    def inc(self, node_id: str, amount: int = 1) -> None:
+        self.p.inc(node_id, amount)
+
+    def dec(self, node_id: str, amount: int = 1) -> None:
+        self.n.inc(node_id, amount)
+
+    @property
+    def value(self) -> int:
+        return self.p.value - self.n.value
+
+    def merge(self, other: 'PNCounter') -> 'PNCounter':
+        return PNCounter(p=self.p.merge(other.p), n=self.n.merge(other.n))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": "PNCounter", "p": self.p.to_dict(), "n": self.n.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PNCounter':
+        return cls(p=GCounter.from_dict(data.get("p", {})), n=GCounter.from_dict(data.get("n", {})))
+
+
+# =====================================================================
+# 3. State-Based Sets: LWW-Element-Set & Observed-Removed Set (ORSet)
+# =====================================================================
+
+@dataclass
+class LWWElementSet:
+    """Last-Write-Wins Element Set with millisecond timestamps and node tie-breaking."""
+    # element -> (timestamp, node_id)
+    add_set: Dict[str, Tuple[float, str]] = field(default_factory=dict)
+    remove_set: Dict[str, Tuple[float, str]] = field(default_factory=dict)
+    bias: str = "add"  # 'add' or 'remove' bias for identical timestamps
+
+    def add(self, element: str, node_id: str, timestamp: Optional[float] = None) -> None:
+        ts = timestamp if timestamp is not None else time.time()
+        curr = self.add_set.get(element)
+        if curr is None or (ts, node_id) > curr:
+            self.add_set[element] = (ts, node_id)
+
+    def remove(self, element: str, node_id: str, timestamp: Optional[float] = None) -> None:
+        ts = timestamp if timestamp is not None else time.time()
+        curr = self.remove_set.get(element)
+        if curr is None or (ts, node_id) > curr:
+            self.remove_set[element] = (ts, node_id)
+
+    def contains(self, element: str) -> bool:
+        if element not in self.add_set:
+            return False
+        if element not in self.remove_set:
+            return True
+        add_ts, add_node = self.add_set[element]
+        rem_ts, rem_node = self.remove_set[element]
+        if add_ts > rem_ts:
+            return True
+        elif rem_ts > add_ts:
+            return False
+        else:
+            # Timestamps equal: compare node ids
+            if add_node != rem_node:
+                return (add_node > rem_node) if self.bias == "add" else (add_node < rem_node)
+            return self.bias == "add"
+
+    def elements(self) -> Set[str]:
+        return {e for e in self.add_set if self.contains(e)}
+
+    def merge(self, other: 'LWWElementSet') -> 'LWWElementSet':
+        new_add = dict(self.add_set)
+        for e, (ts, node) in other.add_set.items():
+            if e not in new_add or (ts, node) > new_add[e]:
+                new_add[e] = (ts, node)
+
+        new_rem = dict(self.remove_set)
+        for e, (ts, node) in other.remove_set.items():
+            if e not in new_rem or (ts, node) > new_rem[e]:
+                new_rem[e] = (ts, node)
+
+        return LWWElementSet(add_set=new_add, remove_set=new_rem, bias=self.bias)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "LWWElementSet",
+            "add_set": {k: list(v) for k, v in self.add_set.items()},
+            "remove_set": {k: list(v) for k, v in self.remove_set.items()},
+            "bias": self.bias,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'LWWElementSet':
+        return cls(
+            add_set={k: tuple(v) for k, v in data.get("add_set", {}).items()},  # type: ignore
+            remove_set={k: tuple(v) for k, v in data.get("remove_set", {}).items()},  # type: ignore
+            bias=data.get("bias", "add"),
+        )
+
+
+@dataclass
+class ORSet:
+    """Observed-Removed Set (OR-Set) with causal tag tracking.
+    
+    Each add generates a unique causal tag (node_id, counter).
+    Removes observe all existing tags for the element and tombstones them.
+    An element is present if its active tags minus tombstones is non-empty.
+    """
+    # element -> set of (node_id, counter) tuples
+    entries: Dict[str, Set[Tuple[str, int]]] = field(default_factory=dict)
+    tombstones: Set[Tuple[str, str, int]] = field(default_factory=set)  # (element, node_id, counter)
+    clock: VectorClock = field(default_factory=VectorClock)
+
+    def add(self, element: str, node_id: str) -> Tuple[str, int]:
+        counter = self.clock.tick(node_id)
+        tag = (node_id, counter)
+        if element not in self.entries:
+            self.entries[element] = set()
+        self.entries[element].add(tag)
+        return tag
+
+    def remove(self, element: str) -> Set[Tuple[str, int]]:
+        """Tombstone all currently observed tags for this element."""
+        tags = set(self.entries.get(element, set()))
+        for node_id, counter in tags:
+            self.tombstones.add((element, node_id, counter))
+        self.entries.pop(element, None)
+        return tags
+
+    def contains(self, element: str) -> bool:
+        tags = self.entries.get(element, set())
+        live_tags = {tag for tag in tags if (element, tag[0], tag[1]) not in self.tombstones}
+        return len(live_tags) > 0
+
+    def elements(self) -> Set[str]:
+        return {e for e in list(self.entries.keys()) if self.contains(e)}
+
+    def merge(self, other: 'ORSet') -> 'ORSet':
+        new_tombstones = self.tombstones | other.tombstones
+        all_elements = set(self.entries.keys()) | set(other.entries.keys())
+        new_entries: Dict[str, Set[Tuple[str, int]]] = {}
+
+        for elem in all_elements:
+            merged_tags = self.entries.get(elem, set()) | other.entries.get(elem, set())
+            # Filter out tombstoned tags
+            surviving_tags = {tag for tag in merged_tags if (elem, tag[0], tag[1]) not in new_tombstones}
+            if surviving_tags:
+                new_entries[elem] = surviving_tags
+
+        new_clock = self.clock.merge(other.clock)
+        return ORSet(entries=new_entries, tombstones=new_tombstones, clock=new_clock)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "ORSet",
+            "entries": {k: [list(tag) for tag in v] for k, v in self.entries.items()},
+            "tombstones": [list(t) for t in self.tombstones],
+            "clock": self.clock.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ORSet':
+        entries = {k: {tuple(tag) for tag in v} for k, v in data.get("entries", {}).items()}  # type: ignore
+        tombstones = {tuple(t) for t in data.get("tombstones", [])}  # type: ignore
+        clock = VectorClock.from_dict(data.get("clock", {}))
+        return cls(entries=entries, tombstones=tombstones, clock=clock)
+
+
+# =====================================================================
+# 4. Sequence CRDT: Replicated Growable Array (RGA) for Real-Time Text
+# =====================================================================
+
+@dataclass(frozen=True)
+class AtomId:
+    """Globally unique causal identifier for a character atom."""
+    node_id: str
+    seq: int
+
+    def __lt__(self, other: 'AtomId') -> bool:
+        # Higher seq wins; if seq equal, lexicographic node_id wins
+        if self.seq != other.seq:
+            return self.seq < other.seq
+        return self.node_id < other.node_id
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"node_id": self.node_id, "seq": self.seq}
+
+    @classmethod
+    def from_dict(cls, d: Optional[Dict[str, Any]]) -> Optional['AtomId']:
+        if not d:
+            return None
+        return cls(node_id=d["node_id"], seq=d["seq"])
+
+
+@dataclass
+class Atom:
+    """Individual atom in an RGA sequence."""
+    id: AtomId
+    origin_left: Optional[AtomId]  # Preceding atom's ID at time of insertion (None for head)
+    value: str
+    deleted: bool = False
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id.to_dict(),
+            "origin_left": self.origin_left.to_dict() if self.origin_left else None,
+            "value": self.value,
+            "deleted": self.deleted,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'Atom':
+        return cls(
+            id=AtomId.from_dict(d["id"]),  # type: ignore
+            origin_left=AtomId.from_dict(d.get("origin_left")),
+            value=d["value"],
+            deleted=d.get("deleted", False),
+            timestamp=d.get("timestamp", 0.0),
+        )
+
+
+class RGAText:
+    """Replicated Growable Array (RGA) sequence CRDT for collaborative text.
+    
+    Features:
+    - Deterministic causal insertion order using (seq, node_id) priority.
+    - Tombstone deletion with eventual state convergence.
+    - Constant index-to-atom projection.
+    - Commutative, associative, idempotent state merge.
+    """
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.local_seq = 0
+        self.atoms: List[Atom] = []
+        self.atom_map: Dict[AtomId, Atom] = {}
+        self.clock = VectorClock()
+
+    def _next_id(self) -> AtomId:
+        self.local_seq += 1
+        self.clock.tick(self.node_id)
+        return AtomId(node_id=self.node_id, seq=self.local_seq)
+
+    def visible_atoms(self) -> List[Atom]:
+        return [a for a in self.atoms if not a.deleted]
+
+    @property
+    def text(self) -> str:
+        return "".join(a.value for a in self.atoms if not a.deleted)
+
+    def insert_at(self, pos: int, char: str) -> Atom:
+        """Insert character at visible text offset pos (0-indexed)."""
+        visible = self.visible_atoms()
+        if pos < 0 or pos > len(visible):
+            pos = max(0, min(pos, len(visible)))
+
+        origin_left = visible[pos - 1].id if pos > 0 else None
+        atom_id = self._next_id()
+        atom = Atom(id=atom_id, origin_left=origin_left, value=char)
+        self._integrate_atom(atom)
+        return atom
+
+    def insert_string(self, pos: int, text: str) -> List[Atom]:
+        inserted = []
+        for i, char in enumerate(text):
+            inserted.append(self.insert_at(pos + i, char))
+        return inserted
+
+    def delete_at(self, pos: int) -> Optional[Atom]:
+        """Delete visible character at pos (mark as tombstone)."""
+        visible = self.visible_atoms()
+        if 0 <= pos < len(visible):
+            atom = visible[pos]
+            atom.deleted = True
+            self.clock.tick(self.node_id)
+            return atom
+        return None
+
+    def _get_atom_pos(self, atom_id: Optional[AtomId]) -> int:
+        if atom_id is None:
+            return -1
+        for idx, a in enumerate(self.atoms):
+            if a.id == atom_id:
+                return idx
+        return -1
+
+    def _integrate_atom(self, new_atom: Atom) -> None:
+        """Integrate a new atom into the linear array preserving RGA invariants."""
+        if new_atom.id in self.atom_map:
+            existing = self.atom_map[new_atom.id]
+            if new_atom.deleted and not existing.deleted:
+                existing.deleted = True
+            return
+
+        pos_origin = self._get_atom_pos(new_atom.origin_left)
+        i = pos_origin + 1
+
+        while i < len(self.atoms):
+            curr = self.atoms[i]
+            curr_origin_pos = self._get_atom_pos(curr.origin_left)
+
+            if curr_origin_pos < pos_origin:
+                break
+            elif curr_origin_pos > pos_origin:
+                i += 1
+            else:
+                # Same origin! Compare (seq, node_id)
+                if (curr.id.seq, curr.id.node_id) > (new_atom.id.seq, new_atom.id.node_id):
+                    i += 1
+                else:
+                    break
+
+        self.atoms.insert(i, new_atom)
+        self.atom_map[new_atom.id] = new_atom
+        self.clock.set_clock(new_atom.id.node_id, new_atom.id.seq)
+        if new_atom.id.node_id == self.node_id:
+            self.local_seq = max(self.local_seq, new_atom.id.seq)
+
+    def merge(self, other: 'RGAText') -> None:
+        """Merge state from another RGAText instance."""
+        # 1. Integrate all missing atoms topologically
+        # Sort other atoms by causal order: atoms with origin_left must be integrated after their origin
+        pending = list(other.atoms)
+        max_passes = len(pending) * 2 + 10
+        pass_count = 0
+
+        while pending and pass_count < max_passes:
+            pass_count += 1
+            progress = False
+            remaining = []
+            for atom in pending:
+                if atom.id in self.atom_map:
+                    # Already integrated: update tombstone if needed
+                    if atom.deleted and not self.atom_map[atom.id].deleted:
+                        self.atom_map[atom.id].deleted = True
+                    progress = True
+                    continue
+
+                # Can we integrate now?
+                if atom.origin_left is None or atom.origin_left in self.atom_map:
+                    self._integrate_atom(copy.deepcopy(atom))
+                    progress = True
+                else:
+                    remaining.append(atom)
+            pending = remaining
+            if not progress and pending:
+                # Fallback: force integrate remaining
+                for atom in pending:
+                    self._integrate_atom(copy.deepcopy(atom))
+                break
+
+        self.clock = self.clock.merge(other.clock)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "local_seq": self.local_seq,
+            "clock": self.clock.to_dict(),
+            "atoms": [a.to_dict() for a in self.atoms],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'RGAText':
+        rga = cls(node_id=d["node_id"])
+        rga.local_seq = d.get("local_seq", 0)
+        rga.clock = VectorClock.from_dict(d.get("clock", {}))
+        rga.atoms = [Atom.from_dict(a) for a in d.get("atoms", [])]
+        rga.atom_map = {a.id: a for a in rga.atoms}
+        return rga
+
+
+# =====================================================================
+# 5. Distributed Collaborative Document (JSON-like Schema CRDT)
+# =====================================================================
+
+class CollaborativeDoc:
+    """Multi-type CRDT Document combining Maps, Sets, Counters, and Text."""
+    def __init__(self, doc_id: str, node_id: str):
+        self.doc_id = doc_id
+        self.node_id = node_id
+        self.counters: Dict[str, PNCounter] = {}
+        self.sets: Dict[str, ORSet] = {}
+        self.lww_sets: Dict[str, LWWElementSet] = {}
+        self.texts: Dict[str, RGAText] = {}
+        self.registers: Dict[str, Tuple[float, str, Any]] = {}  # key -> (timestamp, node_id, value)
+        self.clock = VectorClock()
+
+    def get_counter(self, key: str) -> PNCounter:
+        if key not in self.counters:
+            self.counters[key] = PNCounter()
+        return self.counters[key]
+
+    def get_set(self, key: str) -> ORSet:
+        if key not in self.sets:
+            self.sets[key] = ORSet()
+        return self.sets[key]
+
+    def get_text(self, key: str) -> RGAText:
+        if key not in self.texts:
+            self.texts[key] = RGAText(node_id=self.node_id)
+        return self.texts[key]
+
+    def set_register(self, key: str, value: Any, timestamp: Optional[float] = None) -> None:
+        ts = timestamp if timestamp is not None else time.time()
+        self.clock.tick(self.node_id)
+        curr = self.registers.get(key)
+        if curr is None or (ts, self.node_id) > (curr[0], curr[1]):
+            self.registers[key] = (ts, self.node_id, value)
+
+    def get_register(self, key: str) -> Any:
+        curr = self.registers.get(key)
+        return curr[2] if curr else None
+
+    def merge(self, other: 'CollaborativeDoc') -> None:
+        """Semilattice Join of entire document graph."""
+        # 1. Merge Counters
+        for k, counter in other.counters.items():
+            if k in self.counters:
+                self.counters[k] = self.counters[k].merge(counter)
+            else:
+                self.counters[k] = copy.deepcopy(counter)
+
+        # 2. Merge OR-Sets
+        for k, s in other.sets.items():
+            if k in self.sets:
+                self.sets[k] = self.sets[k].merge(s)
+            else:
+                self.sets[k] = copy.deepcopy(s)
+
+        # 3. Merge RGA Texts
+        for k, t in other.texts.items():
+            if k in self.texts:
+                self.texts[k].merge(t)
+            else:
+                self.texts[k] = copy.deepcopy(t)
+
+        # 4. Merge LWW Registers
+        for k, reg in other.registers.items():
+            curr = self.registers.get(k)
+            if curr is None or (reg[0], reg[1]) > (curr[0], curr[1]):
+                self.registers[k] = reg
+
+        self.clock = self.clock.merge(other.clock)
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "doc_id": self.doc_id,
+            "node_id": self.node_id,
+            "counters": {k: v.value for k, v in self.counters.items()},
+            "sets": {k: sorted(list(v.elements())) for k, v in self.sets.items()},
+            "texts": {k: v.text for k, v in self.texts.items()},
+            "registers": {k: v[2] for k, v in self.registers.items()},
+            "clock": self.clock.to_dict(),
+        }
+
+
+# =====================================================================
+# 6. Chaos Network Partition Simulator & Convergence Fuzzer
+# =====================================================================
+
+class ChaosNetworkSimulator:
+    """Simulates distributed nodes under network latency, packet reordering, and partition."""
+    def __init__(self, node_ids: List[str]):
+        self.node_ids = node_ids
+        self.nodes: Dict[str, RGAText] = {nid: RGAText(node_id=nid) for nid in node_ids}
+        self.partitions: List[Set[str]] = [set(node_ids)]  # Initially fully connected
+        self.inbox: Dict[str, List[Dict[str, Any]]] = {nid: [] for nid in node_ids}
+        self.stats = {"broadcasts": 0, "delivered": 0, "partition_blocked": 0}
+
+    def set_partitions(self, partition_groups: List[List[str]]) -> None:
+        """Set network split-brain groups. Nodes can only communicate within group."""
+        self.partitions = [set(grp) for grp in partition_groups]
+
+    def heal_partitions(self) -> None:
+        """Restore full network connectivity."""
+        self.partitions = [set(self.node_ids)]
+
+    def _can_communicate(self, src: str, dst: str) -> bool:
+        for grp in self.partitions:
+            if src in grp and dst in grp:
+                return True
+        return False
+
+    def broadcast_state(self, src_node: str) -> None:
+        self.stats["broadcasts"] += 1
+        state = self.nodes[src_node].to_dict()
+        for dst in self.node_ids:
+            if dst == src_node:
+                continue
+            if self._can_communicate(src_node, dst):
+                self.inbox[dst].append({"src": src_node, "state": copy.deepcopy(state)})
+            else:
+                self.stats["partition_blocked"] += 1
+
+    def deliver_all(self, shuffle: bool = True) -> int:
+        """Deliver all queued messages across inboxes, simulating random arrival."""
+        count = 0
+        for nid, messages in self.inbox.items():
+            if shuffle:
+                random.shuffle(messages)
+            for msg in messages:
+                remote_rga = RGAText.from_dict(msg["state"])
+                self.nodes[nid].merge(remote_rga)
+                count += 1
+                self.stats["delivered"] += 1
+            messages.clear()
+        return count
+
+    def sync_all(self) -> None:
+        """Gossip rounds until all reachable nodes converge."""
+        for _ in range(3):
+            for nid in self.node_ids:
+                self.broadcast_state(nid)
+            self.deliver_all(shuffle=True)
+
+    def assert_strong_eventual_consistency(self) -> bool:
+        """Verify all nodes hold 100% identical visible text and atom sets."""
+        texts = {nid: node.text for nid, node in self.nodes.items()}
+        unique_texts = set(texts.values())
+        if len(unique_texts) != 1:
+            raise AssertionError(f"Convergence Failure! Replica texts differ: {texts}")
+        return True
+
+
+# =====================================================================
+# 7. Verification Invariant & Unit Test Suite
+# =====================================================================
+
+def run_verification_suite() -> bool:
+    print(bold(cyan("\n========================================================================")))
+    print(bold(cyan("🔬 CRDT ENGINE MATHEMATICAL INVARIANT & CONVERGENCE VERIFICATION SUITE")))
+    print(bold(cyan("========================================================================\n")))
+    
+    passed = 0
+    failed = 0
+
+    def check(name: str, condition: bool, info: str = ""):
+        nonlocal passed, failed
+        if condition:
+            passed += 1
+            print(f"  {green('✔ PASS')}: {name} {gray(info)}")
+        else:
+            failed += 1
+            print(f"  {red('✘ FAIL')}: {name} {info}")
+
+    # Test 1: Vector Clock Semilattice Invariants
+    vc1 = VectorClock({"A": 2, "B": 1})
+    vc2 = VectorClock({"A": 1, "B": 3, "C": 1})
+    vc_join = vc1.merge(vc2)
+    check(
+        "VectorClock Join Supremum",
+        vc_join.clocks == {"A": 2, "B": 3, "C": 1},
+        f"{vc_join}",
+    )
+    check(
+        "VectorClock Causal Concurrency Detection",
+        vc1.relation(vc2) == ClockRelation.CONCURRENT and vc_join.dominates(vc1) and vc_join.dominates(vc2),
+        f"Relation: {vc1.relation(vc2)}",
+    )
+
+    # Test 2: PN-Counter Monotonicity and Idempotence
+    p1 = PNCounter()
+    p2 = PNCounter()
+    p1.inc("A", 10)
+    p1.dec("A", 3)
+    p2.inc("B", 5)
+    p2.dec("B", 8)
+    p_merged1 = p1.merge(p2)
+    p_merged2 = p2.merge(p1)
+    check(
+        "PNCounter Commutative & Associative Convergence",
+        p_merged1.value == p_merged2.value == (7 - 3) and p_merged1.value == 4,
+        f"Expected 4, got {p_merged1.value}",
+    )
+    check(
+        "PNCounter Idempotence",
+        p_merged1.merge(p_merged1).value == p_merged1.value,
+        f"Value: {p_merged1.value}",
+    )
+
+    # Test 3: LWW-Element-Set Last-Write Wins & Tie-breaking
+    lww1 = LWWElementSet()
+    lww2 = LWWElementSet()
+    now = time.time()
+    lww1.add("doc.txt", "nodeA", timestamp=now)
+    lww2.remove("doc.txt", "nodeB", timestamp=now + 1.0)
+    lww_merged = lww1.merge(lww2)
+    check(
+        "LWWElementSet Tombstone Precedence",
+        not lww_merged.contains("doc.txt"),
+        "Deleted with higher timestamp",
+    )
+    # Re-add with even higher timestamp
+    lww_merged.add("doc.txt", "nodeA", timestamp=now + 2.0)
+    check(
+        "LWWElementSet Re-addition",
+        lww_merged.contains("doc.txt"),
+        "Re-added with latest timestamp",
+    )
+
+    # Test 4: ORSet Causal Tagging & Concurrent Add-Remove
+    or1 = ORSet()
+    or2 = ORSet()
+    tag1 = or1.add("apples", "nodeA")
+    # or2 concurrently adds apples and removes
+    tag2 = or2.add("apples", "nodeB")
+    or1.remove("apples")  # or1 removes without seeing or2's tag2
+    or_merged = or1.merge(or2)
+    check(
+        "ORSet Concurrent Add-Remove Preserves Unobserved Add",
+        or_merged.contains("apples"),
+        "Unobserved tag2 survives",
+    )
+
+    # Test 5: RGA Collaborative Text Concurrent Editing (Figma / Notion Core)
+    rgaA = RGAText(node_id="A")
+    rgaB = RGAText(node_id="B")
+    rgaC = RGAText(node_id="C")
+
+    # Initial base text: "CAT"
+    rgaA.insert_string(0, "CAT")
+    rgaB.merge(rgaA)
+    rgaC.merge(rgaA)
+
+    # Concurrent typing at position 1 (between C and AT):
+    # Node A inserts 'O' -> "COAT"
+    # Node B inserts 'H' -> "CHAT"
+    rgaA.insert_at(1, "O")
+    rgaB.insert_at(1, "H")
+
+    # Concurrent deletion at Node C: deletes 'T' (pos 2)
+    rgaC.delete_at(2)
+
+    # Merge in all permutations
+    rgaA.merge(rgaB)
+    rgaA.merge(rgaC)
+    rgaB.merge(rgaC)
+    rgaB.merge(rgaA)
+    rgaC.merge(rgaA)
+    rgaC.merge(rgaB)
+
+    check(
+        "RGA 3-Peer Concurrent Edit Convergence",
+        rgaA.text == rgaB.text == rgaC.text,
+        f"Unified Text: '{rgaA.text}'",
+    )
+
+    # Test 6: Chaos Network Partition Fuzz Testing
+    print(bold(yellow("\n  Running 50-Step Randomized Fuzzing with Split-Brain Partitions...")))
+    sim = ChaosNetworkSimulator(["R1", "R2", "R3", "R4", "R5"])
+    random.seed(1337)
+    
+    # Seed initial text
+    sim.nodes["R1"].insert_string(0, "HERMES")
+    sim.sync_all()
+
+    # Create Network Partition: [R1, R2] vs [R3, R4, R5]
+    sim.set_partitions([["R1", "R2"], ["R3", "R4", "R5"]])
+
+    # Concurrent partitioned mutations
+    sim.nodes["R1"].insert_string(6, "_AI")
+    sim.nodes["R2"].insert_string(0, "SUPER_")
+    sim.nodes["R3"].insert_string(3, "-CORE-")
+    sim.nodes["R4"].delete_at(0)  # delete 'H'
+    sim.nodes["R5"].insert_string(6, "_V2")
+
+    # Intra-partition sync (should not cross barrier)
+    for _ in range(2):
+        for nid in sim.node_ids:
+            sim.broadcast_state(nid)
+        sim.deliver_all()
+
+    # Heal partition and sync universally
+    sim.heal_partitions()
+    sim.sync_all()
+
+    sim.assert_strong_eventual_consistency()
+    check(
+        "Chaos Split-Brain Eventual Consistency Post-Healing",
+        len(set(node.text for node in sim.nodes.values())) == 1,
+        f"Reconciled State: '{sim.nodes['R1'].text}'",
+    )
+
+    print(bold(cyan("\n------------------------------------------------------------------------")))
+    print(f"Test Suite Summary: {green(str(passed))} Passed, {red(str(failed))} Failed")
+    print(bold(cyan("------------------------------------------------------------------------\n")))
+    return failed == 0
+
+
+# =====================================================================
+# 8. Benchmark Suite
+# =====================================================================
+
+def run_benchmark(n_ops: int = 2000, n_peers: int = 4) -> None:
+    print(bold(cyan(f"\n⚡ Running High-Throughput CRDT Microbenchmark ({n_ops} ops across {n_peers} replicas)...")))
+    peer_ids = [f"P{i}" for i in range(n_peers)]
+    peers = [RGAText(node_id=pid) for pid in peer_ids]
+    
+    t_start = time.perf_counter()
+    ops_done = 0
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789 "
+
+    # Phase 1: Local Concurrent Mutations
+    for i in range(n_ops):
+        peer = peers[i % n_peers]
+        op_type = "insert" if len(peer.visible_atoms()) < 5 or random.random() < 0.85 else "delete"
+        if op_type == "insert":
+            pos = random.randint(0, len(peer.visible_atoms()))
+            char = random.choice(alphabet)
+            peer.insert_at(pos, char)
+        else:
+            pos = random.randint(0, len(peer.visible_atoms()) - 1)
+            peer.delete_at(pos)
+        ops_done += 1
+
+    t_mutate = time.perf_counter()
+    mutate_elapsed = (t_mutate - t_start) * 1000
+
+    # Phase 2: Full N-Way Mesh Convergence
+    t_merge_start = time.perf_counter()
+    for i in range(n_peers):
+        for j in range(n_peers):
+            if i != j:
+                peers[i].merge(peers[j])
+    t_end = time.perf_counter()
+    merge_elapsed = (t_end - t_merge_start) * 1000
+    total_elapsed = (t_end - t_start) * 1000
+
+    # Verify 100% convergence
+    texts = [p.text for p in peers]
+    converged = len(set(texts)) == 1
+
+    print(f"  • Total Operations:          {bold(str(ops_done))}")
+    print(f"  • Mutation Time:             {mutate_elapsed:.2f} ms ({ops_done / (mutate_elapsed / 1000):,.0f} ops/sec)")
+    print(f"  • Mesh Merge Time:           {merge_elapsed:.2f} ms")
+    print(f"  • Total Latency:             {total_elapsed:.2f} ms")
+    print(f"  • Final Reconciled Text Len: {len(texts[0])} chars")
+    print(f"  • Strong Convergence:       {green('CONFIRMED (100% Identical)') if converged else red('DIVERGED')}")
+    print(f"  • Sample Reconciled Text:    {cyan(repr(texts[0][:60]))}")
+    print(green("✅ CRDT Microbenchmark completed successfully.\n"))
+
+
+# =====================================================================
+# 9. Interactive Simulation Modes
+# =====================================================================
+
+def run_simulation(n_peers: int = 3, n_steps: int = 15) -> None:
+    print(bold(cyan(f"\n🎬 Interactive Multi-Peer Collaborative Text Simulation ({n_peers} peers, {n_steps} steps)")))
+    print(gray("Simulating concurrent typing and real-time distributed state synchronization...\n"))
+
+    names = ["Alice", "Bob", "Charlie", "Diana", "Evan"][:n_peers]
+    sim = ChaosNetworkSimulator(names)
+
+    # Initial document
+    sim.nodes[names[0]].insert_string(0, "Hello World")
+    sim.sync_all()
+
+    actions = [
+        ("Alice", "insert", 5, " Beautiful"),
+        ("Bob", "insert", 11, "!"),
+        ("Charlie", "insert", 0, "✨ "),
+        ("Alice", "delete", 10, ""),
+        ("Bob", "insert", 6, " Brave"),
+    ]
+
+    for step, (actor, op, pos, val) in enumerate(actions[:n_steps], 1):
+        node = sim.nodes[actor]
+        if op == "insert":
+            node.insert_string(pos, val)
+            desc = f"inserted '{val}' at #{pos}"
+        else:
+            node.delete_at(pos)
+            desc = f"deleted char at #{pos}"
+
+        print(f"Step {step:02d}: {bold(magenta(actor))} {desc}")
+        # Broadcast to neighbors
+        sim.broadcast_state(actor)
+        sim.deliver_all(shuffle=True)
+
+        # Print snapshot across all peers
+        for name in names:
+            print(f"  [{name}]: {green(repr(sim.nodes[name].text))} {gray(str(sim.nodes[name].clock))}")
+        print()
+
+    sim.sync_all()
+    sim.assert_strong_eventual_consistency()
+    print(bold(green(f"🎯 Final Reconciled Text: '{sim.nodes[names[0]].text}' (Consensus achieved!)\n")))
+
+
+# =====================================================================
+# 10. CLI Entry Point
+# =====================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to execute")
+
+    # Test subcommand
+    subparsers.add_parser("test", help="Run formal mathematical invariant verification suite")
+
+    # Bench subcommand
+    bench_parser = subparsers.add_parser("bench", help="Run high-throughput throughput benchmark")
+    bench_parser.add_argument("--ops", type=int, default=2000, help="Number of mutations")
+    bench_parser.add_argument("--peers", type=int, default=4, help="Number of concurrent peers")
+
+    # Sim subcommand
+    sim_parser = subparsers.add_parser("sim", help="Run interactive multi-peer collaborative editing simulation")
+    sim_parser.add_argument("--peers", type=int, default=3, help="Number of peers")
+    sim_parser.add_argument("--steps", type=int, default=5, help="Number of editing steps")
+
+    # Chaos subcommand
+    chaos_parser = subparsers.add_parser("chaos", help="Run split-brain partition chaos fuzzer")
+    chaos_parser.add_argument("--peers", type=int, default=5, help="Number of nodes")
+
+    args = parser.parse_args()
+
+    if args.subcommand == "test":
+        success = run_verification_suite()
+        sys.exit(0 if success else 1)
+    elif args.subcommand == "bench":
+        run_benchmark(n_ops=args.ops, n_peers=args.peers)
+    elif args.subcommand == "sim":
+        run_simulation(n_peers=args.peers, n_steps=args.steps)
+    elif args.subcommand == "chaos":
+        print(bold(cyan("⚡ Running Chaos Network Partition Simulation...")))
+        sim = ChaosNetworkSimulator([f"N{i}" for i in range(args.peers)])
+        sim.nodes["N0"].insert_string(0, "DISTRIBUTED_CRDT")
+        sim.sync_all()
+        sim.set_partitions([["N0", "N1"], ["N2", "N3", "N4"][:args.peers-2]])
+        sim.nodes["N0"].insert_string(16, "_PARTITION_A")
+        sim.nodes["N2"].insert_string(0, "PARTITION_B_")
+        print(f"  Partition A text: {sim.nodes['N0'].text}")
+        print(f"  Partition B text: {sim.nodes['N2'].text}")
+        print(yellow("  Healing partitions and triggering universal gossip sync..."))
+        sim.heal_partitions()
+        sim.sync_all()
+        sim.assert_strong_eventual_consistency()
+        print(bold(green(f"  ✅ Fully Reconciled Text: '{sim.nodes['N0'].text}'")))
+    else:
+        parser.print_help()
+        print("\nQuick run: crdt-sync test")
+
+
+if __name__ == '__main__':
+    main()

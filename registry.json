@@ -732,5 +732,21 @@
       "GraphAlgorithms"
     ],
     "evolved_at": "2026-11-02T02:45:03.005131"
+  },
+  {
+    "id": "crdt-sync",
+    "title": "Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine for real-time collaborative text editing, state-based counters, sets, and partition-tolerant synchronization.",
+    "cli": "crdt-sync",
+    "evolved_at": "2026-11-02T04:01:36.567133",
+    "tags": [
+      "DistributedSystems",
+      "CRDT",
+      "VectorClocks",
+      "EventualConsistency",
+      "CollaborativeEditing"
+    ]
   }
 ]

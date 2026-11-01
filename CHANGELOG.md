@@ -465,3 +465,8 @@
 - **Title**: HNSW High-Dimensional Vector Search Engine & Quantized Proximity Graph
 - **Category**: data-science
 - **Description**: Hierarchical Navigable Small World (HNSW) approximate nearest neighbor vector search engine with multi-layer geometric skip-graphs, heuristic spatial diversity pruning, and SQ8 quantization.
+
+### [2026-11-02 04:01:49] - Evolved `crdt-sync`
+- **Title**: Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine
+- **Category**: systems
+- **Description**: Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine for real-time collaborative text editing, state-based counters, sets, and partition-tolerant synchronization.
