@@ -492,3 +492,8 @@
 - **Category**: research
 - **Description**: Process-supervised Reward Model (PRM) featuring multi-delineation step tokenization, step-level credit assignment via Monte Carlo rollouts (Math-Shepherd), worst-step bottleneck & product score aggregation, dynamic beam search pruning on mathematical fallacies, and PRM-weighted self-consistency.
 - **CLI**: `prm-engine` (`test`, `bench`, `verify`, `beam`, `mc-supervise`, `compare`)
+
+### [2026-11-02 17:32:14] - Evolved `quantum-circuit-simulator`
+- **Title**: Quantum Circuit Simulator & Multi-Qubit Entanglement Engine
+- **Category**: computational-science
+- **Description**: Production-grade quantum statevector simulator in complex Hilbert space C^{2^N}: universal gate set (Pauli, Hadamard, Phase, Rotations, CNOT, Toffoli CCX, Fredkin CSWAP), in-place O(2^N) tensor contraction, reduced density matrix partial trace, Von Neumann entanglement entropy, and landmark quantum algorithms (Teleportation, Grover, QFT).

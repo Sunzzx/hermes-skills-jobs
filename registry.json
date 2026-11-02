@@ -817,5 +817,22 @@
       "Reasoning",
       "MathShepherd"
     ]
+  },
+  {
+    "id": "quantum-circuit-simulator",
+    "title": "Quantum Circuit Simulator & Multi-Qubit Entanglement Engine",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Production-grade quantum statevector simulator in complex Hilbert space C^{2^N}: universal gate set (Pauli, Hadamard, Phase, Rotations, CNOT, Toffoli CCX, Fredkin CSWAP), in-place O(2^N) tensor contraction, reduced density matrix partial trace, Von Neumann entanglement entropy, and landmark quantum algorithms (Teleportation, Grover, QFT).",
+    "cli": "quantum-sim",
+    "evolved_at": "2026-11-02T17:32:14.648743",
+    "tags": [
+      "QuantumComputing",
+      "ComputationalPhysics",
+      "Entanglement",
+      "GroverAlgorithm",
+      "StatevectorSimulator",
+      "QuantumInformation"
+    ]
   }
 ]
