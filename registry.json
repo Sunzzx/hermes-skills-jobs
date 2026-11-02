@@ -919,5 +919,21 @@
       "DeepLearning",
       "vLLM"
     ]
+  },
+  {
+    "id": "tensor-parallel",
+    "title": "Megatron-LM 1D Tensor Parallelism Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade 1D Tensor Parallelism execution engine: ColumnParallelLinear, RowParallelLinear, parallel multi-head self-attention with split QKV, parallel MLP with GeLU, vocab-parallel cross entropy, and simulated ring all-reduce/all-gather communication primitives with exact mathematical equivalence.",
+    "cli": "tensor-parallel",
+    "evolved_at": "2026-11-03T04:37:41.191630",
+    "tags": [
+      "TensorParallelism",
+      "MegatronLM",
+      "DistributedTraining",
+      "DistributedInference",
+      "SPMD"
+    ]
   }
 ]

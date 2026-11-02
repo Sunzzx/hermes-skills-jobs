@@ -528,3 +528,8 @@
 - **Title**: PagedAttention & Block-Paged KV-Cache Virtual Memory Engine
 - **Category**: research
 - **Description**: Production-grade PagedAttention and virtual memory KV-cache engine: non-contiguous physical block allocation, zero external fragmentation, dynamic Copy-on-Write branching, Radix prefix caching, and online softmax over block memory.
+
+### [2026-11-03 04:37:41] - Evolved `tensor-parallel`
+- **Title**: Megatron-LM 1D Tensor Parallelism Engine
+- **Category**: systems
+- **Description**: Production-grade 1D Tensor Parallelism execution engine: ColumnParallelLinear, RowParallelLinear, parallel multi-head self-attention with split QKV, parallel MLP with GeLU, vocab-parallel cross entropy, and simulated ring all-reduce/all-gather communication primitives with exact mathematical equivalence.
