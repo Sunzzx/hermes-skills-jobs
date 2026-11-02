@@ -480,3 +480,9 @@
 - **Title**: Sparse Mixture-of-Experts (MoE) Top-K Gating & Capacity-Constrained Routing Engine
 - **Category**: research
 - **Description**: Sparse Mixture-of-Experts routing engine featuring Top-K gating with Gumbel/Gaussian noise, auxiliary load balancing loss, PaLM/ST-MoE Router Z-loss, DeepSeek-V3 shared expert partitioning, and capacity-constrained dispatch.
+
+### [2026-11-02 08:11:45] - Evolved `kademlia-dht`
+- **Title**: Kademlia Distributed Hash Table and P2P Autonomous Overlay Routing Engine
+- **Category**: systems
+- **Description**: Kademlia distributed hash table implementing 160-bit SHA-1 XOR metric routing, 160 k-buckets with LRU replacement cache, alpha=3 concurrent iterative lookups, distributed key-value storage with replication factor k, and proactive cache-on-miss propagation.
+- **CLI**: `kademlia` (`test`, `sim`, `table`, `bench`)

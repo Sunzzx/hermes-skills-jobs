@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-47-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-48-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (47 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (48 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -59,6 +59,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine** | `systems` | `crdt-sync` | Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine for real-time collaborative text editing, state-based counters, sets, and partition-tolerant synchronization. | `DistributedSystems` `CRDT` `VectorClocks` |
 | **Zero-Knowledge SNARK & R1CS-to-QAP Arithmetic Circuit Verification Engine** | `systems` | `zksnark` | Production-grade Zero-Knowledge SNARK engine featuring R1CS constraint compilation, Quadratic Arithmetic Program (QAP) reduction, Lagrange polynomial interpolation, trusted setup toxic waste generation, Groth16 proof generation with blinding scalars, and succinct O(1) verification. | `ZeroKnowledgeProofs` `R1CS` `QuadraticArithmeticPrograms` |
 | **Sparse Mixture-of-Experts (MoE) Top-K Gating & Capacity-Constrained Routing Engine** | `research` | `sparse-moe` | Sparse Mixture-of-Experts routing engine featuring Top-K gating with Gumbel/Gaussian noise, auxiliary load balancing loss, PaLM/ST-MoE Router Z-loss, DeepSeek-V3 shared expert partitioning, and capacity-constrained dispatch. | `Frontier-AI` `MixtureOfExperts` `SparseGating` |
+| **Kademlia Distributed Hash Table and P2P Autonomous Overlay Routing Engine** | `systems` | `kademlia` | Kademlia distributed hash table implementing 160-bit SHA-1 XOR metric routing, 160 k-buckets with LRU replacement cache, alpha=3 concurrent iterative lookups, distributed key-value storage with replication factor k, and proactive cache-on-miss propagation. | `DistributedSystems` `Kademlia` `DHT` |
 
 ---
 
@@ -85,8 +86,11 @@ ports free 3000
 
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
+
+# Example: Simulate Kademlia P2P distributed hash table
+kademlia sim --nodes 50 --churn 0.2
 ```
 
 ---
 
-*Last Evolved: 2026-11-02 06:57:42*
+*Last Evolved: 2026-11-02 08:11:45*
