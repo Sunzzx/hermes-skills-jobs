@@ -513,3 +513,8 @@
 - **Title**: Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine
 - **Category**: systems
 - **Description**: Production-grade static analysis & AST transformation engine with inter-procedural call graphs, breadth-first transitive reachability, unused import detection, post-terminator pruning, and bytecode-safe surgical code incineration.
+
+### [2026-11-02 23:33:40] - Evolved `tachyon-register-bytecode-jit-engine`
+- **Title**: Tachyon: Register Bytecode Virtual Machine and Tracing JIT Engine
+- **Category**: systems
+- **Description**: High-Performance Register Bytecode Virtual Machine and Tracing JIT Engine: 3-address register ISA, CFG basic block partitioning, dominator tree analysis, loop detection, algebraic peephole optimizer, constant folding, and runtime tracing JIT compiler.

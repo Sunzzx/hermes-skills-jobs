@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-53-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-54-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (53 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (54 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -65,6 +65,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **3D Gaussian Splatting & Real-Time Radiance Field Rasterization Engine** | `creative` | `gaussian-splat` | Production-grade 3D Gaussian Splatting (3DGS) rasterizer and radiance field engine: SO(3) quaternion covariance representation, closed-form affine Jacobian projective camera projection, Zwicker screen-space 2D covariance, degree 0/1 Spherical Harmonics, front-to-back volumetric alpha compositing, differentiable photometric gradient optimization, and dual-pixel Truecolor ANSI visualization. | `GenerativeAesthetics` `3DGaussianSplatting` `RadianceFields` |
 | **Lehman-Yao B-Link Tree & High-Concurrency Latch-Free Storage Engine** | `systems` | `blink-tree` | Production-grade Lehman-Yao B-Link tree storage engine with high-key invariants, horizontal right-link pointers, latch-free search traversal, atomic two-phase split protocol, WAL durability with CRC32 framing, and linear range scans. | `BLinkTree` `StorageEngine` `ConcurrentBTree` |
 | **Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine** | `systems` | `necro-prune` | Production-grade static analysis & AST transformation engine with inter-procedural call graphs, breadth-first transitive reachability, unused import detection, post-terminator pruning, and bytecode-safe surgical code incineration. | `AST` `StaticAnalysis` `DeadCodeElimination` |
+| **Tachyon: Register Bytecode Virtual Machine and Tracing JIT Engine** | `systems` | `tachyon-jit` | High-Performance Register Bytecode Virtual Machine and Tracing JIT Engine: 3-address register ISA, CFG basic block partitioning, dominator tree analysis, loop detection, algebraic peephole optimizer, constant folding, and runtime tracing JIT compiler. | `BytecodeVM` `RegisterVM` `TracingJIT` |
 
 ---
 
@@ -95,4 +96,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-02 21:47:23*
+*Last Evolved: 2026-11-02 23:33:40*
