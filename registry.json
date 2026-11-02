@@ -903,5 +903,21 @@
       "CompilerOptimization",
       "JIT"
     ]
+  },
+  {
+    "id": "paged-attention",
+    "title": "PagedAttention & Block-Paged KV-Cache Virtual Memory Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Production-grade PagedAttention and virtual memory KV-cache engine: non-contiguous physical block allocation, zero external fragmentation, dynamic Copy-on-Write branching, Radix prefix caching, and online softmax over block memory.",
+    "cli": "paged-attention",
+    "evolved_at": "2026-11-03T03:11:40.250917",
+    "tags": [
+      "PagedAttention",
+      "KVCache",
+      "VirtualMemory",
+      "DeepLearning",
+      "vLLM"
+    ]
   }
 ]

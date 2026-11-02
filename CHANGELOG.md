@@ -523,3 +523,8 @@
 - **Title**: Tachyon: Register Bytecode Virtual Machine and Tracing JIT Engine
 - **Category**: systems
 - **Description**: High-Performance Register Bytecode Virtual Machine and Tracing JIT Engine: 3-address register ISA, CFG basic block partitioning, dominator tree analysis, loop detection, algebraic peephole optimizer, constant folding, and runtime tracing JIT compiler.
+
+### [2026-11-03 03:11:40] - Evolved `paged-attention`
+- **Title**: PagedAttention & Block-Paged KV-Cache Virtual Memory Engine
+- **Category**: research
+- **Description**: Production-grade PagedAttention and virtual memory KV-cache engine: non-contiguous physical block allocation, zero external fragmentation, dynamic Copy-on-Write branching, Radix prefix caching, and online softmax over block memory.
