@@ -486,3 +486,9 @@
 - **Category**: systems
 - **Description**: Kademlia distributed hash table implementing 160-bit SHA-1 XOR metric routing, 160 k-buckets with LRU replacement cache, alpha=3 concurrent iterative lookups, distributed key-value storage with replication factor k, and proactive cache-on-miss propagation.
 - **CLI**: `kademlia` (`test`, `sim`, `table`, `bench`)
+
+### [2026-11-02 16:07:13] - Evolved `process-reward-model`
+- **Title**: Process Reward Model (PRM) & Step-Level Value Verification Engine
+- **Category**: research
+- **Description**: Process-supervised Reward Model (PRM) featuring multi-delineation step tokenization, step-level credit assignment via Monte Carlo rollouts (Math-Shepherd), worst-step bottleneck & product score aggregation, dynamic beam search pruning on mathematical fallacies, and PRM-weighted self-consistency.
+- **CLI**: `prm-engine` (`test`, `bench`, `verify`, `beam`, `mc-supervise`, `compare`)

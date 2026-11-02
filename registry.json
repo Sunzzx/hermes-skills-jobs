@@ -799,5 +799,23 @@
       "OverlayRouting",
       "HighAvailability"
     ]
+  },
+  {
+    "id": "process-reward-model",
+    "title": "Process Reward Model (PRM) & Step-Level Value Verification Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Process-supervised Reward Model (PRM) featuring multi-delineation step tokenization, step-level credit assignment via Monte Carlo rollouts (Math-Shepherd), worst-step bottleneck & product score aggregation, dynamic beam search pruning on mathematical fallacies, and PRM-weighted self-consistency.",
+    "cli": "prm-engine",
+    "evolved_at": "2026-11-02T16:07:13.340627",
+    "tags": [
+      "Frontier-AI",
+      "ProcessRewardModel",
+      "PRM",
+      "StepLevelVerification",
+      "TestTimeCompute",
+      "Reasoning",
+      "MathShepherd"
+    ]
   }
 ]
