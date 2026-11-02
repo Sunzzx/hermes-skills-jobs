@@ -764,5 +764,22 @@
       "Groth16",
       "Cryptography"
     ]
+  },
+  {
+    "id": "sparse-moe",
+    "title": "Sparse Mixture-of-Experts (MoE) Top-K Gating & Capacity-Constrained Routing Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Sparse Mixture-of-Experts routing engine featuring Top-K gating with Gumbel/Gaussian noise, auxiliary load balancing loss, PaLM/ST-MoE Router Z-loss, DeepSeek-V3 shared expert partitioning, and capacity-constrained dispatch.",
+    "cli": "sparse-moe",
+    "evolved_at": "2026-11-02T06:57:42.047415",
+    "tags": [
+      "Frontier-AI",
+      "MixtureOfExperts",
+      "SparseGating",
+      "DeepSeekV3",
+      "SwiGLU",
+      "LoadBalancing"
+    ]
   }
 ]

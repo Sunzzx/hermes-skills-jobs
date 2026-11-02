@@ -475,3 +475,8 @@
 - **Title**: Zero-Knowledge SNARK & R1CS-to-QAP Arithmetic Circuit Verification Engine
 - **Category**: systems
 - **Description**: Production-grade Zero-Knowledge SNARK engine featuring R1CS constraint compilation, Quadratic Arithmetic Program (QAP) reduction, Lagrange polynomial interpolation, trusted setup toxic waste generation, Groth16 proof generation with blinding scalars, and succinct O(1) verification.
+
+### [2026-11-02 06:57:42] - Evolved `sparse-moe`
+- **Title**: Sparse Mixture-of-Experts (MoE) Top-K Gating & Capacity-Constrained Routing Engine
+- **Category**: research
+- **Description**: Sparse Mixture-of-Experts routing engine featuring Top-K gating with Gumbel/Gaussian noise, auxiliary load balancing loss, PaLM/ST-MoE Router Z-loss, DeepSeek-V3 shared expert partitioning, and capacity-constrained dispatch.

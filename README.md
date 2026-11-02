@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-46-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-47-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (46 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (47 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -58,6 +58,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **HNSW High-Dimensional Vector Search Engine & Quantized Proximity Graph** | `data-science` | `hnsw-search` | Hierarchical Navigable Small World (HNSW) approximate nearest neighbor vector search engine with multi-layer geometric skip-graphs, heuristic spatial diversity pruning, and SQ8 quantization. | `VectorSearch` `HNSW` `Embeddings` |
 | **Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine** | `systems` | `crdt-sync` | Conflict-Free Replicated Data Types (CRDT) & Causal Vector Clock Engine for real-time collaborative text editing, state-based counters, sets, and partition-tolerant synchronization. | `DistributedSystems` `CRDT` `VectorClocks` |
 | **Zero-Knowledge SNARK & R1CS-to-QAP Arithmetic Circuit Verification Engine** | `systems` | `zksnark` | Production-grade Zero-Knowledge SNARK engine featuring R1CS constraint compilation, Quadratic Arithmetic Program (QAP) reduction, Lagrange polynomial interpolation, trusted setup toxic waste generation, Groth16 proof generation with blinding scalars, and succinct O(1) verification. | `ZeroKnowledgeProofs` `R1CS` `QuadraticArithmeticPrograms` |
+| **Sparse Mixture-of-Experts (MoE) Top-K Gating & Capacity-Constrained Routing Engine** | `research` | `sparse-moe` | Sparse Mixture-of-Experts routing engine featuring Top-K gating with Gumbel/Gaussian noise, auxiliary load balancing loss, PaLM/ST-MoE Router Z-loss, DeepSeek-V3 shared expert partitioning, and capacity-constrained dispatch. | `Frontier-AI` `MixtureOfExperts` `SparseGating` |
 
 ---
 
@@ -88,4 +89,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-02 05:18:22*
+*Last Evolved: 2026-11-02 06:57:42*
