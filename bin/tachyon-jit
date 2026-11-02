@@ -1,0 +1,1611 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Tachyon: High-Performance Register Bytecode Virtual Machine & Tracing JIT Engine."""
+from __future__ import annotations
+import argparse, ast, dataclasses, os, re, sys, time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+"""Instruction Set Architecture (ISA) definitions for Tachyon VM."""
+
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, List, Dict, Optional, Tuple, Union
+
+
+class OpCode(Enum):
+    # Data Movement
+    NOP = auto()
+    MOV = auto()           # MOV dst, src
+    LOAD_CONST = auto()    # LOAD_CONST dst, const_val
+    LOAD_GLOBAL = auto()   # LOAD_GLOBAL dst, var_name
+    STORE_GLOBAL = auto()  # STORE_GLOBAL var_name, src
+
+    # Arithmetic (Integer / Float)
+    ADD = auto()           # ADD dst, src1, src2
+    SUB = auto()           # SUB dst, src1, src2
+    MUL = auto()           # MUL dst, src1, src2
+    DIV = auto()           # DIV dst, src1, src2
+    MOD = auto()           # MOD dst, src1, src2
+    POW = auto()           # POW dst, src1, src2
+    NEG = auto()           # NEG dst, src
+
+    # Bitwise & Logic
+    AND = auto()           # AND dst, src1, src2
+    OR = auto()            # OR dst, src1, src2
+    XOR = auto()           # XOR dst, src1, src2
+    NOT = auto()           # NOT dst, src
+    SHL = auto()           # SHL dst, src1, shift_amt
+    SHR = auto()           # SHR dst, src1, shift_amt
+
+    # Comparisons
+    CMP_EQ = auto()        # CMP_EQ dst, src1, src2
+    CMP_NE = auto()        # CMP_NE dst, src1, src2
+    CMP_LT = auto()        # CMP_LT dst, src1, src2
+    CMP_LE = auto()        # CMP_LE dst, src1, src2
+    CMP_GT = auto()        # CMP_GT dst, src1, src2
+    CMP_GE = auto()        # CMP_GE dst, src1, src2
+
+    # Control Flow
+    JMP = auto()           # JMP target_pc
+    JMP_IF = auto()        # JMP_IF cond_reg, target_pc
+    JMP_IF_NOT = auto()    # JMP_IF_NOT cond_reg, target_pc
+    LOOP_HEADER = auto()   # LOOP_HEADER loop_id
+
+    # Function Calls
+    CALL = auto()          # CALL dst, func_name, (arg_regs...)
+    RET = auto()           # RET src_reg
+
+    # Heap Memory (Addressable word array)
+    ALLOC = auto()         # ALLOC dst_reg, size_reg
+    LOAD_MEM = auto()      # LOAD_MEM dst, base_ptr, offset_reg_or_imm
+    STORE_MEM = auto()     # STORE_MEM base_ptr, offset_reg_or_imm, src_val
+
+    # System / I/O
+    PRINT = auto()         # PRINT reg
+    STOP = auto()          # STOP execution
+
+
+@dataclass(frozen=True)
+class Register:
+    index: int
+
+    def __repr__(self) -> str:
+        return f"R{self.index}"
+
+    def __str__(self) -> str:
+        return f"R{self.index}"
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, Register):
+            return self.index == other.index
+        return False
+
+    def __hash__(self) -> int:
+        return hash(self.index)
+
+
+def reg(i: int) -> Register:
+    return Register(i)
+
+
+@dataclass
+class Instruction:
+    opcode: OpCode
+    operands: Tuple[Any, ...] = ()
+    pc: int = -1
+    comment: str = ""
+
+    def __repr__(self) -> str:
+        ops = ", ".join(str(op) for op in self.operands)
+        s = f"{self.opcode.name} {ops}" if ops else self.opcode.name
+        if self.pc >= 0:
+            s = f"{self.pc:04d}: {s}"
+        if self.comment:
+            s = f"{s} ; {self.comment}"
+        return s
+
+
+@dataclass
+class FunctionBytecode:
+    name: str
+    instructions: List[Instruction] = field(default_factory=list)
+    constants: List[Any] = field(default_factory=list)
+    num_registers: int = 16
+    num_args: int = 0
+    labels: Dict[str, int] = field(default_factory=dict)
+
+    def reindex(self) -> None:
+        """Set sequential pc attributes on all instructions."""
+        for idx, instr in enumerate(self.instructions):
+            instr.pc = idx
+
+    def add_instruction(self, opcode: OpCode, *operands: Any, comment: str = "") -> Instruction:
+        instr = Instruction(opcode=opcode, operands=operands, pc=len(self.instructions), comment=comment)
+        self.instructions.append(instr)
+        return instr
+
+    def add_constant(self, val: Any) -> int:
+        for i, c in enumerate(self.constants):
+            if type(c) is type(val) and c == val:
+                return i
+        self.constants.append(val)
+        return len(self.constants) - 1
+
+    def copy(self) -> FunctionBytecode:
+        import copy
+        new_fn = FunctionBytecode(
+            name=self.name,
+            instructions=[Instruction(opcode=i.opcode, operands=i.operands, pc=i.pc, comment=i.comment) for i in self.instructions],
+            constants=copy.deepcopy(self.constants),
+            num_registers=self.num_registers,
+            num_args=self.num_args,
+            labels=dict(self.labels)
+        )
+        return new_fn
+
+"""Control Flow Graph (CFG) and Dominator Tree Analysis for Tachyon VM."""
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+
+@dataclass
+class BasicBlock:
+    id: int
+    start_pc: int
+    end_pc: int
+    instructions: List[Instruction] = field(default_factory=list)
+    predecessors: Set[int] = field(default_factory=set)
+    successors: Set[int] = field(default_factory=set)
+    dominators: Set[int] = field(default_factory=set)
+    idom: Optional[int] = None
+    dominance_frontier: Set[int] = field(default_factory=set)
+
+    def __repr__(self) -> str:
+        return (
+            f"Block(B{self.id}, PC=[{self.start_pc}..{self.end_pc}], "
+            f"preds={[f'B{p}' for p in sorted(self.predecessors)]}, "
+            f"succs={[f'B{s}' for s in sorted(self.successors)]})"
+        )
+
+
+class ControlFlowGraph:
+    def __init__(self, func: FunctionBytecode) -> None:
+        self.func = func
+        self.blocks: Dict[int, BasicBlock] = {}
+        self.entry_block_id: int = 0
+        self.exit_block_ids: Set[int] = set()
+        self.loops: List[Dict[str, Any]] = []
+        self.build()
+
+    def build(self) -> None:
+        self.func.reindex()
+        instructions = self.func.instructions
+        if not instructions:
+            return
+
+        n = len(instructions)
+        leaders: Set[int] = {0}
+
+        # Step 1: Identify leaders
+        for i, instr in enumerate(instructions):
+            opcode = instr.opcode
+            if opcode in (OpCode.JMP, OpCode.JMP_IF, OpCode.JMP_IF_NOT):
+                target = instr.operands[-1]
+                target_pc = self.func.labels[target] if isinstance(target, str) else int(target)
+                if 0 <= target_pc < n:
+                    leaders.add(target_pc)
+                if i + 1 < n:
+                    leaders.add(i + 1)
+            elif opcode in (OpCode.RET, OpCode.STOP):
+                if i + 1 < n:
+                    leaders.add(i + 1)
+
+        sorted_leaders = sorted(leaders)
+        pc_to_block_id: Dict[int, int] = {}
+
+        # Step 2: Form Basic Blocks
+        for block_id, start_pc in enumerate(sorted_leaders):
+            next_start = sorted_leaders[block_id + 1] if block_id + 1 < len(sorted_leaders) else n
+            end_pc = next_start - 1
+            block_instrs = instructions[start_pc:end_pc + 1]
+            block = BasicBlock(
+                id=block_id,
+                start_pc=start_pc,
+                end_pc=end_pc,
+                instructions=block_instrs
+            )
+            self.blocks[block_id] = block
+            for pc in range(start_pc, end_pc + 1):
+                pc_to_block_id[pc] = block_id
+
+        # Step 3: Add edges (predecessors / successors)
+        for block in self.blocks.values():
+            if not block.instructions:
+                continue
+            last_instr = block.instructions[-1]
+            opcode = last_instr.opcode
+            
+            if opcode == OpCode.JMP:
+                target = last_instr.operands[-1]
+                target_pc = self.func.labels[target] if isinstance(target, str) else int(target)
+                if target_pc in pc_to_block_id:
+                    succ_id = pc_to_block_id[target_pc]
+                    block.successors.add(succ_id)
+                    self.blocks[succ_id].predecessors.add(block.id)
+
+            elif opcode in (OpCode.JMP_IF, OpCode.JMP_IF_NOT):
+                # Taken branch
+                target = last_instr.operands[-1]
+                target_pc = self.func.labels[target] if isinstance(target, str) else int(target)
+                if target_pc in pc_to_block_id:
+                    succ_id = pc_to_block_id[target_pc]
+                    block.successors.add(succ_id)
+                    self.blocks[succ_id].predecessors.add(block.id)
+                # Fallthrough branch
+                fallthrough_pc = block.end_pc + 1
+                if fallthrough_pc in pc_to_block_id:
+                    succ_id = pc_to_block_id[fallthrough_pc]
+                    block.successors.add(succ_id)
+                    self.blocks[succ_id].predecessors.add(block.id)
+
+            elif opcode in (OpCode.RET, OpCode.STOP):
+                self.exit_block_ids.add(block.id)
+
+            else:
+                # Normal fallthrough
+                fallthrough_pc = block.end_pc + 1
+                if fallthrough_pc in pc_to_block_id:
+                    succ_id = pc_to_block_id[fallthrough_pc]
+                    block.successors.add(succ_id)
+                    self.blocks[succ_id].predecessors.add(block.id)
+                else:
+                    self.exit_block_ids.add(block.id)
+
+        # Step 4: Dominator Analysis
+        self._compute_dominators()
+        # Step 5: Immediate Dominators (idom)
+        self._compute_idoms()
+        # Step 6: Dominance Frontiers
+        self._compute_dominance_frontiers()
+        # Step 7: Natural Loops
+        self._detect_loops()
+
+    def _compute_dominators(self) -> None:
+        all_block_ids = set(self.blocks.keys())
+        for b_id, block in self.blocks.items():
+            if b_id == self.entry_block_id:
+                block.dominators = {self.entry_block_id}
+            else:
+                block.dominators = set(all_block_ids)
+
+        changed = True
+        while changed:
+            changed = False
+            for b_id, block in self.blocks.items():
+                if b_id == self.entry_block_id:
+                    continue
+                if not block.predecessors:
+                    new_dom = {b_id}
+                else:
+                    pred_doms = [self.blocks[p].dominators for p in block.predecessors]
+                    intersect = set.intersection(*pred_doms) if pred_doms else set()
+                    new_dom = {b_id} | intersect
+                if new_dom != block.dominators:
+                    block.dominators = new_dom
+                    changed = True
+
+    def _compute_idoms(self) -> None:
+        for b_id, block in self.blocks.items():
+            if b_id == self.entry_block_id:
+                block.idom = None
+                continue
+            # Strict dominators
+            sdoms = block.dominators - {b_id}
+            candidate = None
+            for d in sdoms:
+                # d is idom if all other strict dominators dominate d
+                is_immediate = True
+                for other in sdoms:
+                    if other != d and other not in self.blocks[d].dominators:
+                        is_immediate = False
+                        break
+                if is_immediate:
+                    candidate = d
+                    break
+            block.idom = candidate
+
+    def _compute_dominance_frontiers(self) -> None:
+        for block in self.blocks.values():
+            block.dominance_frontier.clear()
+
+        for b_id, block in self.blocks.items():
+            if len(block.predecessors) >= 2:
+                for p_id in block.predecessors:
+                    runner: Optional[int] = p_id
+                    while runner is not None and runner != block.idom:
+                        self.blocks[runner].dominance_frontier.add(b_id)
+                        runner = self.blocks[runner].idom
+
+    def _detect_loops(self) -> None:
+        self.loops.clear()
+        # Back edges: edge A -> B where B dominates A
+        for a_id, block in self.blocks.items():
+            for b_id in block.successors:
+                if b_id in block.dominators:
+                    # Natural loop with header b_id and latch a_id
+                    loop_body = self._find_natural_loop(header=b_id, latch=a_id)
+                    self.loops.append({
+                        "header": b_id,
+                        "latch": a_id,
+                        "blocks": sorted(loop_body)
+                    })
+
+    def _find_natural_loop(self, header: int, latch: int) -> Set[int]:
+        loop: Set[int] = {header}
+        stack = [latch]
+        while stack:
+            node = stack.pop()
+            if node not in loop:
+                loop.add(node)
+                for pred in self.blocks[node].predecessors:
+                    stack.append(pred)
+        return loop
+
+    def render_ascii(self) -> str:
+        lines = [f"=== CFG for '{self.func.name}' ({len(self.blocks)} blocks) ==="]
+        for b_id in sorted(self.blocks.keys()):
+            b = self.blocks[b_id]
+            preds_str = ", ".join(f"B{p}" for p in sorted(b.predecessors)) or "none (Entry)"
+            succs_str = ", ".join(f"B{s}" for s in sorted(b.successors)) or "none (Exit)"
+            idom_str = f"B{b.idom}" if b.idom is not None else "none"
+            lines.append(f"┌── [Block B{b.id}] PC: {b.start_pc:04d}..{b.end_pc:04d} | Preds: [{preds_str}] | Succs: [{succs_str}] | idom: {idom_str}")
+            for instr in b.instructions:
+                lines.append(f"│   {instr}")
+            lines.append(f"└── DF: {[f'B{d}' for d in sorted(b.dominance_frontier)]}")
+        if self.loops:
+            lines.append("Detected Natural Loops:")
+            for idx, lp in enumerate(self.loops):
+                lines.append(f"  Loop #{idx}: Header=B{lp['header']}, Latch=B{lp['latch']}, Blocks={[f'B{b}' for b in lp['blocks']]}")
+        return "\n".join(lines)
+
+"""Bytecode and CFG Optimization Passes for Tachyon VM."""
+
+from typing import Any, Dict, List, Optional, Set, Tuple
+import copy
+
+
+
+class Pass:
+    name: str = "BasePass"
+
+    def run(self, func: FunctionBytecode) -> Tuple[FunctionBytecode, bool]:
+        raise NotImplementedError
+
+
+class ConstantFoldingPass(Pass):
+    name = "ConstantFolding"
+
+    ALU_OPS = {
+        OpCode.ADD: lambda a, b: a + b,
+        OpCode.SUB: lambda a, b: a - b,
+        OpCode.MUL: lambda a, b: a * b,
+        OpCode.DIV: lambda a, b: a // b if isinstance(a, int) and isinstance(b, int) and b != 0 and a % b == 0 else (a / b if b != 0 else None),
+        OpCode.MOD: lambda a, b: a % b if b != 0 else None,
+        OpCode.POW: lambda a, b: a ** b if abs(b) < 1000 else None,
+        OpCode.AND: lambda a, b: int(a) & int(b),
+        OpCode.OR: lambda a, b: int(a) | int(b),
+        OpCode.XOR: lambda a, b: int(a) ^ int(b),
+        OpCode.SHL: lambda a, b: int(a) << int(b) if 0 <= b < 64 else None,
+        OpCode.SHR: lambda a, b: int(a) >> int(b) if 0 <= b < 64 else None,
+        OpCode.CMP_EQ: lambda a, b: 1 if a == b else 0,
+        OpCode.CMP_NE: lambda a, b: 1 if a != b else 0,
+        OpCode.CMP_LT: lambda a, b: 1 if a < b else 0,
+        OpCode.CMP_LE: lambda a, b: 1 if a <= b else 0,
+        OpCode.CMP_GT: lambda a, b: 1 if a > b else 0,
+        OpCode.CMP_GE: lambda a, b: 1 if a >= b else 0,
+    }
+
+    def run(self, func: FunctionBytecode) -> Tuple[FunctionBytecode, bool]:
+        cfg = ControlFlowGraph(func)
+        changed = False
+        new_instructions: List[Instruction] = []
+
+        for block_id in sorted(cfg.blocks.keys()):
+            block = cfg.blocks[block_id]
+            # Known constants per register in this basic block
+            reg_consts: Dict[int, Any] = {}
+
+            for instr in block.instructions:
+                op = instr.opcode
+                ops = instr.operands
+
+                if op == OpCode.LOAD_CONST:
+                    dst, val = ops[0], ops[1]
+                    reg_consts[dst.index] = val
+                    new_instructions.append(instr)
+
+                elif op == OpCode.MOV:
+                    dst, src = ops[0], ops[1]
+                    if isinstance(src, Register) and src.index in reg_consts:
+                        val = reg_consts[src.index]
+                        reg_consts[dst.index] = val
+                        # Turn into LOAD_CONST
+                        new_instructions.append(Instruction(
+                            opcode=OpCode.LOAD_CONST,
+                            operands=(dst, val),
+                            comment=f"propagated from R{src.index}"
+                        ))
+                        changed = True
+                    else:
+                        if dst.index in reg_consts:
+                            del reg_consts[dst.index]
+                        new_instructions.append(instr)
+
+                elif op in self.ALU_OPS:
+                    dst, s1, s2 = ops[0], ops[1], ops[2]
+                    v1 = reg_consts.get(s1.index) if isinstance(s1, Register) else s1
+                    v2 = reg_consts.get(s2.index) if isinstance(s2, Register) else s2
+
+                    if v1 is not None and v2 is not None:
+                        fn = self.ALU_OPS[op]
+                        try:
+                            res = fn(v1, v2)
+                        except Exception:
+                            res = None
+
+                        if res is not None:
+                            reg_consts[dst.index] = res
+                            new_instructions.append(Instruction(
+                                opcode=OpCode.LOAD_CONST,
+                                operands=(dst, res),
+                                comment=f"folded {op.name}"
+                            ))
+                            changed = True
+                            continue
+
+                    if dst.index in reg_consts:
+                        del reg_consts[dst.index]
+                    new_instructions.append(instr)
+
+                elif op == OpCode.JMP_IF:
+                    cond_reg, target = ops[0], ops[1]
+                    val = reg_consts.get(cond_reg.index) if isinstance(cond_reg, Register) else None
+                    if val is not None:
+                        if bool(val):
+                            new_instructions.append(Instruction(opcode=OpCode.JMP, operands=(target,), comment="folded JMP_IF (true)"))
+                        else:
+                            new_instructions.append(Instruction(opcode=OpCode.NOP, comment="eliminated JMP_IF (false)"))
+                        changed = True
+                    else:
+                        new_instructions.append(instr)
+
+                elif op == OpCode.JMP_IF_NOT:
+                    cond_reg, target = ops[0], ops[1]
+                    val = reg_consts.get(cond_reg.index) if isinstance(cond_reg, Register) else None
+                    if val is not None:
+                        if not bool(val):
+                            new_instructions.append(Instruction(opcode=OpCode.JMP, operands=(target,), comment="folded JMP_IF_NOT (false)"))
+                        else:
+                            new_instructions.append(Instruction(opcode=OpCode.NOP, comment="eliminated JMP_IF_NOT (true)"))
+                        changed = True
+                    else:
+                        new_instructions.append(instr)
+
+                else:
+                    # Invalidate dst if instruction writes to a register
+                    if ops and isinstance(ops[0], Register):
+                        reg_consts.pop(ops[0].index, None)
+                    new_instructions.append(instr)
+
+        new_func = func.copy()
+        new_func.instructions = new_instructions
+        new_func.reindex()
+        return new_func, changed
+
+
+class AlgebraicPeepholePass(Pass):
+    name = "AlgebraicPeephole"
+
+    def run(self, func: FunctionBytecode) -> Tuple[FunctionBytecode, bool]:
+        changed = False
+        new_instructions: List[Instruction] = []
+
+        for instr in func.instructions:
+            op = instr.opcode
+            ops = instr.operands
+
+            # MOV Rx, Rx -> NOP
+            if op == OpCode.MOV and isinstance(ops[0], Register) and isinstance(ops[1], Register) and ops[0] == ops[1]:
+                new_instructions.append(Instruction(OpCode.NOP, comment="redundant MOV"))
+                changed = True
+                continue
+
+            # ADD Rx, Ry, 0 or ADD Rx, 0, Ry -> MOV Rx, Ry
+            if op == OpCode.ADD:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                if s2 == 0:
+                    new_instructions.append(Instruction(OpCode.MOV, (dst, s1), comment="x + 0 => x"))
+                    changed = True
+                    continue
+                if s1 == 0:
+                    new_instructions.append(Instruction(OpCode.MOV, (dst, s2), comment="0 + x => x"))
+                    changed = True
+                    continue
+
+            # SUB Rx, Ry, 0 -> MOV Rx, Ry
+            if op == OpCode.SUB:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                if s2 == 0:
+                    new_instructions.append(Instruction(OpCode.MOV, (dst, s1), comment="x - 0 => x"))
+                    changed = True
+                    continue
+                if isinstance(s1, Register) and isinstance(s2, Register) and s1 == s2:
+                    new_instructions.append(Instruction(OpCode.LOAD_CONST, (dst, 0), comment="x - x => 0"))
+                    changed = True
+                    continue
+
+            # MUL Rx, Ry, 1 -> MOV Rx, Ry | MUL Rx, Ry, 0 -> LOAD_CONST Rx, 0
+            if op == OpCode.MUL:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                if s2 == 1:
+                    new_instructions.append(Instruction(OpCode.MOV, (dst, s1), comment="x * 1 => x"))
+                    changed = True
+                    continue
+                if s1 == 1:
+                    new_instructions.append(Instruction(OpCode.MOV, (dst, s2), comment="1 * x => x"))
+                    changed = True
+                    continue
+                if s2 == 0 or s1 == 0:
+                    new_instructions.append(Instruction(OpCode.LOAD_CONST, (dst, 0), comment="x * 0 => 0"))
+                    changed = True
+                    continue
+
+            # NOP elimination (unless jump targets point to it)
+            new_instructions.append(instr)
+
+        new_func = func.copy()
+        new_func.instructions = new_instructions
+        new_func.reindex()
+        return new_func, changed
+
+
+class DeadCodeEliminationPass(Pass):
+    name = "DeadCodeElimination"
+
+    SIDE_EFFECT_OPS = {
+        OpCode.PRINT,
+        OpCode.STORE_GLOBAL,
+        OpCode.STORE_MEM,
+        OpCode.CALL,
+        OpCode.RET,
+        OpCode.STOP,
+        OpCode.JMP,
+        OpCode.JMP_IF,
+        OpCode.JMP_IF_NOT,
+        OpCode.LOOP_HEADER,
+    }
+
+    def run(self, func: FunctionBytecode) -> Tuple[FunctionBytecode, bool]:
+        changed = False
+        instructions = func.instructions
+        n = len(instructions)
+
+        # Find used registers across all instructions
+        used_registers: Set[int] = set()
+        for instr in instructions:
+            op = instr.opcode
+            ops = instr.operands
+
+            if op in (OpCode.ADD, OpCode.SUB, OpCode.MUL, OpCode.DIV, OpCode.MOD, OpCode.POW, 
+                      OpCode.AND, OpCode.OR, OpCode.XOR, OpCode.SHL, OpCode.SHR,
+                      OpCode.CMP_EQ, OpCode.CMP_NE, OpCode.CMP_LT, OpCode.CMP_LE, OpCode.CMP_GT, OpCode.CMP_GE):
+                for src in (ops[1], ops[2]):
+                    if isinstance(src, Register):
+                        used_registers.add(src.index)
+            elif op in (OpCode.MOV, OpCode.NEG, OpCode.NOT):
+                src = ops[1]
+                if isinstance(src, Register):
+                    used_registers.add(src.index)
+            elif op in (OpCode.JMP_IF, OpCode.JMP_IF_NOT):
+                cond = ops[0]
+                if isinstance(cond, Register):
+                    used_registers.add(cond.index)
+            elif op in (OpCode.PRINT, OpCode.RET, OpCode.STORE_GLOBAL):
+                src = ops[0] if op != OpCode.STORE_GLOBAL else ops[1]
+                if isinstance(src, Register):
+                    used_registers.add(src.index)
+            elif op == OpCode.CALL:
+                for arg in ops[2]:
+                    if isinstance(arg, Register):
+                        used_registers.add(arg.index)
+            elif op == OpCode.STORE_MEM:
+                for r in (ops[0], ops[1], ops[2]):
+                    if isinstance(r, Register):
+                        used_registers.add(r.index)
+            elif op == OpCode.LOAD_MEM:
+                for r in (ops[1], ops[2]):
+                    if isinstance(r, Register):
+                        used_registers.add(r.index)
+            elif op == OpCode.ALLOC:
+                if isinstance(ops[1], Register):
+                    used_registers.add(ops[1].index)
+
+        new_instructions: List[Instruction] = []
+        for instr in instructions:
+            op = instr.opcode
+            ops = instr.operands
+
+            # If instruction produces a value in dst and has no side effects
+            if op not in self.SIDE_EFFECT_OPS and op != OpCode.NOP:
+                if ops and isinstance(ops[0], Register):
+                    dst_reg = ops[0].index
+                    if dst_reg not in used_registers:
+                        # Dead write
+                        new_instructions.append(Instruction(OpCode.NOP, comment=f"dead write to R{dst_reg}"))
+                        changed = True
+                        continue
+            new_instructions.append(instr)
+
+        new_func = func.copy()
+        new_func.instructions = new_instructions
+        new_func.reindex()
+        return new_func, changed
+
+
+class PassManager:
+    def __init__(self) -> None:
+        self.passes: List[Pass] = [
+            ConstantFoldingPass(),
+            AlgebraicPeepholePass(),
+            DeadCodeEliminationPass(),
+        ]
+
+    def run(self, func: FunctionBytecode, max_iterations: int = 10) -> FunctionBytecode:
+        current_func = func.copy()
+        for _ in range(max_iterations):
+            any_changed = False
+            for p in self.passes:
+                current_func, changed = p.run(current_func)
+                if changed:
+                    any_changed = True
+            if not any_changed:
+                break
+        return current_func
+
+
+def optimize_bytecode(func: FunctionBytecode) -> FunctionBytecode:
+    pm = PassManager()
+    return pm.run(func)
+
+"""Assembler and Disassembler for Tachyon Register Bytecode."""
+
+import re
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+
+OPCODE_MAP = {op.name: op for op in OpCode}
+
+
+def _parse_token(token: str) -> Any:
+    token = token.strip()
+    # Register check: R0, R1, etc.
+    reg_match = re.match(r"^[rR](\d+)$", token)
+    if reg_match:
+        return Register(int(reg_match.group(1)))
+    # Integer
+    try:
+        return int(token)
+    except ValueError:
+        pass
+    # Float
+    try:
+        return float(token)
+    except ValueError:
+        pass
+    # String constant
+    if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+        return token[1:-1]
+    # Label or identifier name
+    return token
+
+
+def assemble(source: str, func_name: str = "main") -> FunctionBytecode:
+    lines = source.splitlines()
+    raw_instructions: List[Tuple[Optional[str], str, List[str], str]] = []
+    labels: Dict[str, int] = {}
+    
+    # Pass 1: Extract labels and instructions
+    current_pc = 0
+    for line in lines:
+        # Strip comments
+        comment = ""
+        if ";" in line:
+            line, comment = line.split(";", 1)
+            comment = comment.strip()
+        elif "#" in line:
+            line, comment = line.split("#", 1)
+            comment = comment.strip()
+
+        line = line.strip()
+        if not line:
+            continue
+
+        # Check for label definition: "label:" or "label: INSTR ..."
+        label_def = None
+        if ";" not in line and ":" in line:
+            parts = line.split(":", 1)
+            lbl = parts[0].strip()
+            label_def = lbl
+            labels[lbl] = current_pc
+            line = parts[1].strip()
+            if not line:
+                continue
+
+        # Parse instruction mnemonic and operands
+        tokens = line.replace(",", " ").split()
+        if not tokens:
+            continue
+        mnemonic = tokens[0].upper()
+        operands_raw = tokens[1:]
+        raw_instructions.append((label_def, mnemonic, operands_raw, comment))
+        current_pc += 1
+
+    # Pass 2: Assemble instructions and resolve labels
+    func = FunctionBytecode(name=func_name, labels=labels)
+    max_reg = 15
+
+    for pc, (lbl, mnemonic, ops_raw, comment) in enumerate(raw_instructions):
+        if mnemonic not in OPCODE_MAP:
+            raise ValueError(f"Unknown opcode '{mnemonic}' at PC {pc}")
+        opcode = OPCODE_MAP[mnemonic]
+        resolved_ops: List[Any] = []
+
+        # Special handling for CALL opcode: CALL dst, func_name, (args...)
+        if opcode == OpCode.CALL:
+            dst = _parse_token(ops_raw[0])
+            callee_name = ops_raw[1]
+            arg_regs = [_parse_token(t) for t in ops_raw[2:]]
+            resolved_ops = [dst, callee_name, arg_regs]
+            if isinstance(dst, Register) and dst.index > max_reg:
+                max_reg = dst.index
+            for a in arg_regs:
+                if isinstance(a, Register) and a.index > max_reg:
+                    max_reg = a.index
+        else:
+            for tok in ops_raw:
+                val = _parse_token(tok)
+                if isinstance(val, str) and val in labels and opcode in (OpCode.JMP, OpCode.JMP_IF, OpCode.JMP_IF_NOT):
+                    val = labels[val]
+                if isinstance(val, Register) and val.index > max_reg:
+                    max_reg = val.index
+                resolved_ops.append(val)
+
+        func.instructions.append(Instruction(
+            opcode=opcode,
+            operands=tuple(resolved_ops),
+            pc=pc,
+            comment=comment
+        ))
+
+    func.num_registers = max_reg + 1
+    return func
+
+
+def disassemble(func: FunctionBytecode) -> str:
+    reverse_labels: Dict[int, List[str]] = {}
+    for lbl, pc in func.labels.items():
+        reverse_labels.setdefault(pc, []).append(lbl)
+
+    lines = [f".function {func.name} (regs: {func.num_registers}, args: {func.num_args})"]
+    for pc, instr in enumerate(func.instructions):
+        if pc in reverse_labels:
+            for lbl in reverse_labels[pc]:
+                lines.append(f"{lbl}:")
+        
+        ops_strs: List[str] = []
+        if instr.opcode == OpCode.CALL:
+            dst, callee, args = instr.operands[0], instr.operands[1], instr.operands[2]
+            args_s = ", ".join(str(a) for a in args)
+            ops_strs = [str(dst), callee, f"({args_s})"]
+        else:
+            for op in instr.operands:
+                if isinstance(op, int) and instr.opcode in (OpCode.JMP, OpCode.JMP_IF, OpCode.JMP_IF_NOT):
+                    # Check if there is a named label for this target
+                    names = reverse_labels.get(op)
+                    ops_strs.append(names[0] if names else f"pc_{op:04d}")
+                else:
+                    ops_strs.append(str(op))
+
+        ops_formatted = ", ".join(ops_strs)
+        ins_str = f"    {pc:04d}:  {instr.opcode.name:<12} {ops_formatted}"
+        if instr.comment:
+            ins_str = f"{ins_str:<42} ; {instr.comment}"
+        lines.append(ins_str)
+    lines.append(".end")
+    return "\n".join(lines)
+
+"""Tracing Dynamic Just-In-Time (JIT) Compiler for Tachyon VM."""
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import time
+
+
+
+@dataclass
+class CompiledTrace:
+    loop_id: int
+    func_name: str
+    code_fn: Callable[[List[Any], List[Any], Dict[str, Any]], Tuple[int, Any]]
+    invocations: int = 0
+    source_code: str = ""
+
+
+class TracingJITCompiler:
+    def __init__(self) -> None:
+        self.compiled_traces: Dict[Tuple[str, int], CompiledTrace] = {}
+        self.total_compile_time: float = 0.0
+        self.total_jit_executions: int = 0
+
+    def compile_loop(self, func: FunctionBytecode, loop_id: int) -> Optional[CompiledTrace]:
+        """Compile a detected loop into native Python executable code."""
+        key = (func.name, loop_id)
+        if key in self.compiled_traces:
+            return self.compiled_traces[key]
+
+        t0 = time.perf_counter()
+        cfg = ControlFlowGraph(func)
+        target_loop = None
+        for lp in cfg.loops:
+            if lp["header"] == loop_id:
+                target_loop = lp
+                break
+
+        # Extract instructions belonging to this loop
+        if target_loop is None:
+            # Fallback: find all instructions starting at loop_id up to the back jump
+            loop_instrs: List[Instruction] = []
+            start = False
+            for instr in func.instructions:
+                if instr.opcode == OpCode.LOOP_HEADER and instr.operands and instr.operands[0] == loop_id:
+                    start = True
+                if start:
+                    loop_instrs.append(instr)
+                    if instr.opcode == OpCode.JMP and instr.operands and instr.operands[0] == loop_id:
+                        break
+        else:
+            loop_instrs = []
+            for b_id in target_loop["blocks"]:
+                loop_instrs.extend(cfg.blocks[b_id].instructions)
+
+        if not loop_instrs:
+            return None
+
+        # Synthesize Python code
+        py_lines = [
+            "def __jit_trace__(regs, heap, globals_dict):",
+            "    # Unpacked register access",
+            "    step_count = 0",
+        ]
+
+        # Determine all registers used in the loop
+        used_regs: Set[int] = set()
+        for instr in loop_instrs:
+            for op in instr.operands:
+                if isinstance(op, Register):
+                    used_regs.add(op.index)
+                elif isinstance(op, (list, tuple)):
+                    for sub in op:
+                        if isinstance(sub, Register):
+                            used_regs.add(sub.index)
+
+        # Read in initial registers
+        for r in sorted(used_regs):
+            py_lines.append(f"    r{r} = regs[{r}] if {r} < len(regs) else 0")
+
+        py_lines.append("    while True:")
+        py_lines.append("        step_count += 1")
+
+        # Generate inlined statements
+        for instr in loop_instrs:
+            op = instr.opcode
+            ops = instr.operands
+
+            if op == OpCode.NOP or op == OpCode.LOOP_HEADER:
+                continue
+
+            elif op == OpCode.MOV:
+                dst, src = ops[0], ops[1]
+                src_repr = f"r{src.index}" if isinstance(src, Register) else repr(src)
+                py_lines.append(f"        r{dst.index} = {src_repr}")
+
+            elif op == OpCode.LOAD_CONST:
+                dst, val = ops[0], ops[1]
+                py_lines.append(f"        r{dst.index} = {repr(val)}")
+
+            elif op == OpCode.ADD:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = {v1} + {v2}")
+
+            elif op == OpCode.SUB:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = {v1} - {v2}")
+
+            elif op == OpCode.MUL:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = {v1} * {v2}")
+
+            elif op == OpCode.DIV:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = ({v1} // {v2}) if isinstance({v1}, int) and isinstance({v2}, int) and {v1} % {v2} == 0 else ({v1} / {v2})")
+
+            elif op == OpCode.MOD:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = {v1} % {v2}")
+
+            elif op == OpCode.CMP_EQ:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = 1 if {v1} == {v2} else 0")
+
+            elif op == OpCode.CMP_LT:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = 1 if {v1} < {v2} else 0")
+
+            elif op == OpCode.CMP_LE:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = 1 if {v1} <= {v2} else 0")
+
+            elif op == OpCode.CMP_GT:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = 1 if {v1} > {v2} else 0")
+
+            elif op == OpCode.CMP_GE:
+                dst, s1, s2 = ops[0], ops[1], ops[2]
+                v1 = f"r{s1.index}" if isinstance(s1, Register) else repr(s1)
+                v2 = f"r{s2.index}" if isinstance(s2, Register) else repr(s2)
+                py_lines.append(f"        r{dst.index} = 1 if {v1} >= {v2} else 0")
+
+            elif op == OpCode.JMP_IF_NOT:
+                cond, target = ops[0], ops[1]
+                c_repr = f"r{cond.index}" if isinstance(cond, Register) else repr(cond)
+                target_pc = func.labels[target] if isinstance(target, str) else int(target)
+                py_lines.append(f"        if not bool({c_repr}):")
+                # Synchronize registers and exit loop
+                for r in sorted(used_regs):
+                    py_lines.append(f"            regs[{r}] = r{r}")
+                py_lines.append(f"            return ({target_pc}, step_count)")
+
+            elif op == OpCode.JMP_IF:
+                cond, target = ops[0], ops[1]
+                c_repr = f"r{cond.index}" if isinstance(cond, Register) else repr(cond)
+                target_pc = func.labels[target] if isinstance(target, str) else int(target)
+                py_lines.append(f"        if bool({c_repr}):")
+                for r in sorted(used_regs):
+                    py_lines.append(f"            regs[{r}] = r{r}")
+                py_lines.append(f"            return ({target_pc}, step_count)")
+
+            elif op == OpCode.JMP:
+                target = ops[0]
+                target_pc = func.labels[target] if isinstance(target, str) else int(target)
+                # If jumping back to loop header, continue natively
+                header_pc = None
+                for i, ins in enumerate(func.instructions):
+                    if ins.opcode == OpCode.LOOP_HEADER and ins.operands and ins.operands[0] == loop_id:
+                        header_pc = i
+                        break
+                if target_pc == header_pc:
+                    # Loop back
+                    continue
+                else:
+                    for r in sorted(used_regs):
+                        py_lines.append(f"            regs[{r}] = r{r}")
+                    py_lines.append(f"            return ({target_pc}, step_count)")
+
+            elif op == OpCode.STORE_MEM:
+                b_ptr, off, src = ops[0], ops[1], ops[2]
+                b_repr = f"r{b_ptr.index}" if isinstance(b_ptr, Register) else repr(b_ptr)
+                o_repr = f"r{off.index}" if isinstance(off, Register) else repr(off)
+                s_repr = f"r{src.index}" if isinstance(src, Register) else repr(src)
+                py_lines.append(f"        heap[{b_repr} + {o_repr}] = {s_repr}")
+
+            elif op == OpCode.LOAD_MEM:
+                dst, b_ptr, off = ops[0], ops[1], ops[2]
+                b_repr = f"r{b_ptr.index}" if isinstance(b_ptr, Register) else repr(b_ptr)
+                o_repr = f"r{off.index}" if isinstance(off, Register) else repr(off)
+                py_lines.append(f"        r{dst.index} = heap[{b_repr} + {o_repr}]")
+
+        source_code = "\n".join(py_lines)
+        namespace: Dict[str, Any] = {}
+        try:
+            exec(source_code, namespace)
+            fn = namespace["__jit_trace__"]
+            compile_time = time.perf_counter() - t0
+            self.total_compile_time += compile_time
+            compiled = CompiledTrace(
+                loop_id=loop_id,
+                func_name=func.name,
+                code_fn=fn,
+                source_code=source_code
+            )
+            self.compiled_traces[key] = compiled
+            return compiled
+        except Exception:
+            return None
+
+    def maybe_execute_jit(self, vm: Any, frame: Any, loop_id: int) -> bool:
+        """Attempt to execute a JIT-compiled trace."""
+        key = (frame.func.name, loop_id)
+        trace = self.compiled_traces.get(key)
+        if trace is None:
+            trace = self.compile_loop(frame.func, loop_id)
+        if trace is None:
+            return False
+
+        try:
+            next_pc, steps = trace.code_fn(frame.registers, vm.heap, vm.globals)
+            frame.pc = next_pc
+            vm.instruction_count += steps
+            trace.invocations += 1
+            self.total_jit_executions += 1
+            return True
+        except Exception:
+            # Guard failure or bail-out -> deoptimize and continue interpreted
+            return False
+
+"""Tachyon Virtual Machine Execution Engine."""
+
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+
+class VMStatus(Enum):
+    READY = auto()
+    RUNNING = auto()
+    HALTED = auto()
+    ERROR = auto()
+
+
+VMState = VMStatus
+
+
+@dataclass
+class Frame:
+    func: FunctionBytecode
+    pc: int = 0
+    registers: List[Any] = field(default_factory=list)
+    dest_register_in_caller: Optional[Register] = None
+
+    def __post_init__(self) -> None:
+        if not self.registers:
+            self.registers = [0] * max(self.func.num_registers, 32)
+
+    def get_reg(self, reg: Union[Register, int]) -> Any:
+        idx = reg.index if isinstance(reg, Register) else int(reg)
+        if 0 <= idx < len(self.registers):
+            return self.registers[idx]
+        raise IndexError(f"Register index R{idx} out of range [0, {len(self.registers)})")
+
+    def set_reg(self, reg: Union[Register, int], value: Any) -> None:
+        idx = reg.index if isinstance(reg, Register) else int(reg)
+        if idx >= len(self.registers):
+            self.registers.extend([0] * (idx + 1 - len(self.registers)))
+        self.registers[idx] = value
+
+
+class VirtualMachine:
+    def __init__(self, enable_jit: bool = False, jit_threshold: int = 50) -> None:
+        self.globals: Dict[str, Any] = {}
+        self.functions: Dict[str, FunctionBytecode] = {}
+        self.call_stack: List[Frame] = []
+        self.heap: List[Any] = []
+        self.output_buffer: List[str] = []
+        self.status: VMStatus = VMStatus.READY
+        self.instruction_count: int = 0
+        self.enable_jit: bool = enable_jit
+        self.jit_threshold: int = jit_threshold
+        self.loop_counters: Dict[Tuple[str, int], int] = {}
+        self.jit_compiler: Optional[Any] = None
+        self.last_return_value: Any = None
+
+    def register_function(self, func: FunctionBytecode) -> None:
+        func.reindex()
+        self.functions[func.name] = func
+
+    def call_function(
+        self, 
+        func_name: str, 
+        args: List[Any], 
+        dest_reg: Optional[Register] = None
+    ) -> Frame:
+        if func_name not in self.functions:
+            raise RuntimeError(f"Unknown function: '{func_name}'")
+        func = self.functions[func_name]
+        frame = Frame(func=func, pc=0, dest_register_in_caller=dest_reg)
+        for i, arg in enumerate(args):
+            if i < len(frame.registers):
+                frame.registers[i] = arg
+        self.call_stack.append(frame)
+        return frame
+
+    def step(self) -> bool:
+        if not self.call_stack:
+            self.status = VMStatus.HALTED
+            return False
+
+        frame = self.call_stack[-1]
+        if frame.pc < 0 or frame.pc >= len(frame.func.instructions):
+            # Implicit return 0 if reached end without RET
+            ret_val = 0
+            self.last_return_value = ret_val
+            self.call_stack.pop()
+            if self.call_stack and frame.dest_register_in_caller is not None:
+                self.call_stack[-1].set_reg(frame.dest_register_in_caller, ret_val)
+            return bool(self.call_stack)
+
+        instr = frame.func.instructions[frame.pc]
+        self.instruction_count += 1
+        pc_advanced = False
+
+        opcode = instr.opcode
+        ops = instr.operands
+
+        if opcode == OpCode.NOP:
+            pass
+
+        elif opcode == OpCode.MOV:
+            dst, src = ops[0], ops[1]
+            val = frame.get_reg(src) if isinstance(src, Register) else src
+            frame.set_reg(dst, val)
+
+        elif opcode == OpCode.LOAD_CONST:
+            dst, val = ops[0], ops[1]
+            frame.set_reg(dst, val)
+
+        elif opcode == OpCode.LOAD_GLOBAL:
+            dst, name = ops[0], ops[1]
+            if name not in self.globals:
+                raise NameError(f"Global '{name}' is not defined")
+            frame.set_reg(dst, self.globals[name])
+
+        elif opcode == OpCode.STORE_GLOBAL:
+            name, src = ops[0], ops[1]
+            val = frame.get_reg(src) if isinstance(src, Register) else src
+            self.globals[name] = val
+
+        # Arithmetic
+        elif opcode == OpCode.ADD:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, v1 + v2)
+
+        elif opcode == OpCode.SUB:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, v1 - v2)
+
+        elif opcode == OpCode.MUL:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, v1 * v2)
+
+        elif opcode == OpCode.DIV:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            if v2 == 0:
+                raise ZeroDivisionError("Division by zero in Tachyon VM")
+            frame.set_reg(dst, v1 // v2 if isinstance(v1, int) and isinstance(v2, int) and v1 % v2 == 0 else v1 / v2)
+
+        elif opcode == OpCode.MOD:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, v1 % v2)
+
+        elif opcode == OpCode.POW:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, v1 ** v2)
+
+        elif opcode == OpCode.NEG:
+            dst, s = ops[0], ops[1]
+            v = frame.get_reg(s) if isinstance(s, Register) else s
+            frame.set_reg(dst, -v)
+
+        # Bitwise
+        elif opcode == OpCode.AND:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = int(frame.get_reg(s1) if isinstance(s1, Register) else s1)
+            v2 = int(frame.get_reg(s2) if isinstance(s2, Register) else s2)
+            frame.set_reg(dst, v1 & v2)
+
+        elif opcode == OpCode.OR:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = int(frame.get_reg(s1) if isinstance(s1, Register) else s1)
+            v2 = int(frame.get_reg(s2) if isinstance(s2, Register) else s2)
+            frame.set_reg(dst, v1 | v2)
+
+        elif opcode == OpCode.XOR:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = int(frame.get_reg(s1) if isinstance(s1, Register) else s1)
+            v2 = int(frame.get_reg(s2) if isinstance(s2, Register) else s2)
+            frame.set_reg(dst, v1 ^ v2)
+
+        elif opcode == OpCode.NOT:
+            dst, s = ops[0], ops[1]
+            v = int(frame.get_reg(s) if isinstance(s, Register) else s)
+            frame.set_reg(dst, ~v)
+
+        elif opcode == OpCode.SHL:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = int(frame.get_reg(s1) if isinstance(s1, Register) else s1)
+            v2 = int(frame.get_reg(s2) if isinstance(s2, Register) else s2)
+            frame.set_reg(dst, v1 << v2)
+
+        elif opcode == OpCode.SHR:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = int(frame.get_reg(s1) if isinstance(s1, Register) else s1)
+            v2 = int(frame.get_reg(s2) if isinstance(s2, Register) else s2)
+            frame.set_reg(dst, v1 >> v2)
+
+        # Comparisons (result = 1 or 0)
+        elif opcode == OpCode.CMP_EQ:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 == v2 else 0)
+
+        elif opcode == OpCode.CMP_NE:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 != v2 else 0)
+
+        elif opcode == OpCode.CMP_LT:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 < v2 else 0)
+
+        elif opcode == OpCode.CMP_LE:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 <= v2 else 0)
+
+        elif opcode == OpCode.CMP_GT:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 > v2 else 0)
+
+        elif opcode == OpCode.CMP_GE:
+            dst, s1, s2 = ops[0], ops[1], ops[2]
+            v1 = frame.get_reg(s1) if isinstance(s1, Register) else s1
+            v2 = frame.get_reg(s2) if isinstance(s2, Register) else s2
+            frame.set_reg(dst, 1 if v1 >= v2 else 0)
+
+        # Control Flow
+        elif opcode == OpCode.JMP:
+            target = ops[0]
+            target_pc = frame.func.labels[target] if isinstance(target, str) else int(target)
+            frame.pc = target_pc
+            pc_advanced = True
+
+        elif opcode == OpCode.JMP_IF:
+            cond_reg, target = ops[0], ops[1]
+            cond = frame.get_reg(cond_reg) if isinstance(cond_reg, Register) else cond_reg
+            if bool(cond):
+                target_pc = frame.func.labels[target] if isinstance(target, str) else int(target)
+                frame.pc = target_pc
+                pc_advanced = True
+
+        elif opcode == OpCode.JMP_IF_NOT:
+            cond_reg, target = ops[0], ops[1]
+            cond = frame.get_reg(cond_reg) if isinstance(cond_reg, Register) else cond_reg
+            if not bool(cond):
+                target_pc = frame.func.labels[target] if isinstance(target, str) else int(target)
+                frame.pc = target_pc
+                pc_advanced = True
+
+        elif opcode == OpCode.LOOP_HEADER:
+            loop_id = ops[0]
+            key = (frame.func.name, loop_id)
+            cnt = self.loop_counters.get(key, 0) + 1
+            self.loop_counters[key] = cnt
+            if self.enable_jit and self.jit_compiler and cnt >= self.jit_threshold:
+                # Trigger JIT trace execution if compiled
+                if self.jit_compiler.maybe_execute_jit(self, frame, loop_id):
+                    pc_advanced = True
+
+        # Subroutines
+        elif opcode == OpCode.CALL:
+            dst, func_name, arg_regs = ops[0], ops[1], ops[2]
+            arg_vals = [frame.get_reg(r) if isinstance(r, Register) else r for r in arg_regs]
+            frame.pc += 1
+            pc_advanced = True
+            self.call_function(func_name, arg_vals, dest_reg=dst)
+
+        elif opcode == OpCode.RET:
+            src = ops[0] if ops else None
+            ret_val = frame.get_reg(src) if isinstance(src, Register) else (src if src is not None else 0)
+            self.last_return_value = ret_val
+            self.call_stack.pop()
+            if self.call_stack and frame.dest_register_in_caller is not None:
+                self.call_stack[-1].set_reg(frame.dest_register_in_caller, ret_val)
+            return bool(self.call_stack)
+
+        # Heap Memory
+        elif opcode == OpCode.ALLOC:
+            dst, size_reg = ops[0], ops[1]
+            size = int(frame.get_reg(size_reg) if isinstance(size_reg, Register) else size_reg)
+            base_ptr = len(self.heap)
+            self.heap.extend([0] * size)
+            frame.set_reg(dst, base_ptr)
+
+        elif opcode == OpCode.LOAD_MEM:
+            dst, base_ptr_reg, offset = ops[0], ops[1], ops[2]
+            base = int(frame.get_reg(base_ptr_reg) if isinstance(base_ptr_reg, Register) else base_ptr_reg)
+            off = int(frame.get_reg(offset) if isinstance(offset, Register) else offset)
+            addr = base + off
+            if 0 <= addr < len(self.heap):
+                frame.set_reg(dst, self.heap[addr])
+            else:
+                raise IndexError(f"Heap memory fault at address {addr} (heap size: {len(self.heap)})")
+
+        elif opcode == OpCode.STORE_MEM:
+            base_ptr_reg, offset, src_reg = ops[0], ops[1], ops[2]
+            base = int(frame.get_reg(base_ptr_reg) if isinstance(base_ptr_reg, Register) else base_ptr_reg)
+            off = int(frame.get_reg(offset) if isinstance(offset, Register) else offset)
+            val = frame.get_reg(src_reg) if isinstance(src_reg, Register) else src_reg
+            addr = base + off
+            if 0 <= addr < len(self.heap):
+                self.heap[addr] = val
+            else:
+                raise IndexError(f"Heap memory fault at address {addr} (heap size: {len(self.heap)})")
+
+        # System / I/O
+        elif opcode == OpCode.PRINT:
+            src = ops[0]
+            val = frame.get_reg(src) if isinstance(src, Register) else src
+            msg = str(val)
+            self.output_buffer.append(msg)
+
+        elif opcode == OpCode.STOP:
+            self.status = VMStatus.HALTED
+            return False
+
+        else:
+            raise NotImplementedError(f"Unsupported opcode: {opcode}")
+
+        if not pc_advanced:
+            frame.pc += 1
+        return True
+
+    def run(self, max_steps: int = 10_000_000) -> Any:
+        self.status = VMStatus.RUNNING
+        steps = 0
+        while steps < max_steps and self.step():
+            steps += 1
+            if self.status == VMStatus.HALTED:
+                break
+        if steps >= max_steps:
+            self.status = VMStatus.ERROR
+            raise TimeoutError(f"VM exceeded maximum step limit ({max_steps})")
+        self.status = VMStatus.HALTED
+        return self.last_return_value
+
+
+ITERATIVE_FIB_ASM = """
+start:
+    LOAD_CONST R1, 0
+    LOAD_CONST R2, 1
+    LOAD_CONST R3, 0
+loop_start:
+    LOOP_HEADER 1
+    CMP_GE R4, R3, R0
+    JMP_IF R4, done
+    ADD R5, R1, R2
+    MOV R1, R2
+    MOV R2, R5
+    ADD R3, R3, 1
+    JMP loop_start
+done:
+    RET R1
+"""
+
+SUM_LOOP_ASM = """
+start:
+    LOAD_CONST R1, 0
+    LOAD_CONST R2, 0
+sum_loop:
+    LOOP_HEADER 10
+    CMP_GE R3, R2, R0
+    JMP_IF R3, done
+    ADD R1, R1, R2
+    ADD R2, R2, 1
+    JMP sum_loop
+done:
+    RET R1
+"""
+
+"""Interactive Terminal Demo for Tachyon Register VM & Tracing JIT."""
+
+import time
+import sys
+
+
+
+ITERATIVE_FIB_ASM = """
+# Iterative Fibonacci in Tachyon Register Bytecode
+# Input: R0 = N
+# Output: R1 = Fib(N)
+start:
+    LOAD_CONST R1, 0      ; Fib(0)
+    LOAD_CONST R2, 1      ; Fib(1)
+    LOAD_CONST R3, 0      ; Counter i
+
+loop_start:
+    LOOP_HEADER 1
+    CMP_GE R4, R3, R0     ; if i >= N then done
+    JMP_IF R4, done
+
+    ADD R5, R1, R2        ; temp = a + b
+    MOV R1, R2            ; a = b
+    MOV R2, R5            ; b = temp
+    ADD R3, R3, 1         ; i++
+    JMP loop_start
+
+done:
+    RET R1
+"""
+
+
+SUM_LOOP_ASM = """
+# Fast Arithmetic Sum 0..N-1
+# Input: R0 = N
+# Output: R1 = sum
+start:
+    LOAD_CONST R1, 0      ; sum
+    LOAD_CONST R2, 0      ; i
+
+sum_loop:
+    LOOP_HEADER 10
+    CMP_GE R3, R2, R0     ; if i >= N then exit
+    JMP_IF R3, done
+
+    ADD R1, R1, R2        ; sum += i
+    ADD R2, R2, 1         ; i++
+    JMP sum_loop
+
+done:
+    RET R1
+"""
+
+
+UNOPTIMIZED_MATH_ASM = """
+# Unoptimized arithmetic showing constant folding, peephole & dead code
+start:
+    LOAD_CONST R1, 10
+    LOAD_CONST R2, 20
+    ADD R3, R1, R2        ; Foldable: 10 + 20 -> 30
+    LOAD_CONST R4, 100    ; Dead write
+    MUL R5, R3, 1         ; Peephole: x * 1 -> x
+    ADD R6, R5, 0         ; Peephole: x + 0 -> x
+    RET R6
+"""
+
+
+def main() -> None:
+    print("=" * 70)
+    print("🚀 TACHYON: REGISTER-BASED BYTECODE VM & TRACING JIT ENGINE")
+    print("=" * 70)
+
+    # --- Demo 1: Iterative Fibonacci Assembly & CFG ---
+    print("\n[1] ASSEMBLING ITERATIVE FIBONACCI (N = 35):")
+    fib_func = assemble(ITERATIVE_FIB_ASM, func_name="fib_iter")
+    print(disassemble(fib_func))
+
+    print("\n[2] CONTROL FLOW GRAPH (CFG) & DOMINATOR ANALYSIS:")
+    cfg = ControlFlowGraph(fib_func)
+    print(cfg.render_ascii())
+
+    # --- Demo 2: Optimization Passes ---
+    print("\n[3] OPTIMIZATION PASSES (Constant Folding, Algebraic Peephole, DCE):")
+    unopt = assemble(UNOPTIMIZED_MATH_ASM, func_name="unopt_math")
+    print("--- Original Bytecode ---")
+    print(disassemble(unopt))
+    
+    opt = optimize_bytecode(unopt)
+    print("\n--- Optimized Bytecode ---")
+    print(disassemble(opt))
+
+    # --- Demo 3: Fibonacci & JIT Execution ---
+    print("\n[4] BENCHMARKING INTERPRETER VS TRACING JIT (Fibonacci N=1000):")
+    test_n = 1000
+
+    # Run purely interpreted
+    vm_interp = VirtualMachine(enable_jit=False)
+    vm_interp.register_function(fib_func)
+    vm_interp.call_function("fib_iter", [test_n])
+    t0 = time.perf_counter()
+    res_interp = vm_interp.run()
+    t_interp = time.perf_counter() - t0
+    print(f"  • Interpreted Result: Fib({test_n}) computed | Instructions = {vm_interp.instruction_count} | Time = {t_interp*1000:.3f} ms")
+
+    # Run with Tracing JIT
+    jit_comp = TracingJITCompiler()
+    vm_jit = VirtualMachine(enable_jit=True, jit_threshold=5)
+    vm_jit.jit_compiler = jit_comp
+    vm_jit.register_function(fib_func)
+    vm_jit.call_function("fib_iter", [test_n])
+    t0 = time.perf_counter()
+    res_jit = vm_jit.run()
+    t_jit = time.perf_counter() - t0
+    print(f"  • JIT Compiled Result: Fib({test_n}) computed | JIT Invocations = {jit_comp.total_jit_executions} | Time = {t_jit*1000:.3f} ms")
+    
+    assert res_interp == res_jit, "JIT execution produced different result than interpreter!"
+    print(f"  ✓ Verification: 100% Numerical Equivalence (Digits: {len(str(res_jit))})")
+    
+    # --- Demo 4: Arithmetic Sum JIT Trace ---
+    print("\n[5] COMPILED TRACE PYTHON SYNTHESIS (Arithmetic Sum N=100000):")
+    sum_fn = assemble(SUM_LOOP_ASM, func_name="sum_loop")
+    vm_sum = VirtualMachine(enable_jit=True, jit_threshold=5)
+    jit_sum = TracingJITCompiler()
+    vm_sum.jit_compiler = jit_sum
+    vm_sum.register_function(sum_fn)
+    vm_sum.call_function("sum_loop", [100000])
+    res_sum = vm_sum.run()
+    print(f"  • Sum(0..99999) = {res_sum} (Expected: 4999950000)")
+    for key, trace in jit_sum.compiled_traces.items():
+        print(f"\n--- JIT Trace for {key} ---")
+        print(trace.source_code)
+
+    print("\n✅ Tachyon VM Engine operational.")
+
+
+def cli_entry():
+    import argparse
+    parser = argparse.ArgumentParser(prog='tachyon-jit', description='Tachyon: Register Bytecode VM & Tracing JIT')
+    sub = parser.add_subparsers(dest='subcommand')
+    sub.add_parser('verify')
+    sub.add_parser('demo')
+    sub.add_parser('benchmark')
+    args = parser.parse_args()
+    main()
+
+if __name__ == '__main__':
+    cli_entry()
+
+
