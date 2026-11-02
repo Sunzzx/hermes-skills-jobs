@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-50-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-51-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (50 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (51 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -62,6 +62,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Kademlia Distributed Hash Table and P2P Autonomous Overlay Routing Engine** | `systems` | `kademlia` | Kademlia distributed hash table implementing 160-bit SHA-1 XOR metric routing, 160 k-buckets with LRU replacement cache, alpha=3 concurrent iterative lookups, distributed key-value storage with replication factor k, and proactive cache-on-miss propagation. | `DistributedSystems` `Kademlia` `DHT` |
 | **Process Reward Model (PRM) & Step-Level Value Verification Engine** | `research` | `prm-engine` | Process-supervised Reward Model (PRM) featuring multi-delineation step tokenization, step-level credit assignment via Monte Carlo rollouts (Math-Shepherd), worst-step bottleneck & product score aggregation, dynamic beam search pruning on mathematical fallacies, and PRM-weighted self-consistency. | `Frontier-AI` `ProcessRewardModel` `PRM` |
 | **Quantum Circuit Simulator & Multi-Qubit Entanglement Engine** | `computational-science` | `quantum-sim` | Production-grade quantum statevector simulator in complex Hilbert space C^{2^N}: universal gate set (Pauli, Hadamard, Phase, Rotations, CNOT, Toffoli CCX, Fredkin CSWAP), in-place O(2^N) tensor contraction, reduced density matrix partial trace, Von Neumann entanglement entropy, and landmark quantum algorithms (Teleportation, Grover, QFT). | `QuantumComputing` `ComputationalPhysics` `Entanglement` |
+| **3D Gaussian Splatting & Real-Time Radiance Field Rasterization Engine** | `creative` | `gaussian-splat` | Production-grade 3D Gaussian Splatting (3DGS) rasterizer and radiance field engine: SO(3) quaternion covariance representation, closed-form affine Jacobian projective camera projection, Zwicker screen-space 2D covariance, degree 0/1 Spherical Harmonics, front-to-back volumetric alpha compositing, differentiable photometric gradient optimization, and dual-pixel Truecolor ANSI visualization. | `GenerativeAesthetics` `3DGaussianSplatting` `RadianceFields` |
 
 ---
 
@@ -92,4 +93,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-02 17:32:14*
+*Last Evolved: 2026-11-02 18:51:45*

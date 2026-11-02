@@ -834,5 +834,22 @@
       "StatevectorSimulator",
       "QuantumInformation"
     ]
+  },
+  {
+    "id": "gaussian-splatting-3d",
+    "title": "3D Gaussian Splatting & Real-Time Radiance Field Rasterization Engine",
+    "category": "creative",
+    "type": "skill+tool",
+    "description": "Production-grade 3D Gaussian Splatting (3DGS) rasterizer and radiance field engine: SO(3) quaternion covariance representation, closed-form affine Jacobian projective camera projection, Zwicker screen-space 2D covariance, degree 0/1 Spherical Harmonics, front-to-back volumetric alpha compositing, differentiable photometric gradient optimization, and dual-pixel Truecolor ANSI visualization.",
+    "cli": "gaussian-splat",
+    "evolved_at": "2026-11-02T18:51:45.197036",
+    "tags": [
+      "GenerativeAesthetics",
+      "3DGaussianSplatting",
+      "RadianceFields",
+      "ComputerVision",
+      "VolumetricRendering",
+      "DifferentiableRasterization"
+    ]
   }
 ]

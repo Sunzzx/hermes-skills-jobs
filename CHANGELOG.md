@@ -497,3 +497,8 @@
 - **Title**: Quantum Circuit Simulator & Multi-Qubit Entanglement Engine
 - **Category**: computational-science
 - **Description**: Production-grade quantum statevector simulator in complex Hilbert space C^{2^N}: universal gate set (Pauli, Hadamard, Phase, Rotations, CNOT, Toffoli CCX, Fredkin CSWAP), in-place O(2^N) tensor contraction, reduced density matrix partial trace, Von Neumann entanglement entropy, and landmark quantum algorithms (Teleportation, Grover, QFT).
+
+### [2026-11-02 18:51:45] - Evolved `gaussian-splatting-3d`
+- **Title**: 3D Gaussian Splatting & Real-Time Radiance Field Rasterization Engine
+- **Category**: creative
+- **Description**: Production-grade 3D Gaussian Splatting (3DGS) rasterizer and radiance field engine: SO(3) quaternion covariance representation, closed-form affine Jacobian projective camera projection, Zwicker screen-space 2D covariance, degree 0/1 Spherical Harmonics, front-to-back volumetric alpha compositing, differentiable photometric gradient optimization, and dual-pixel Truecolor ANSI visualization.
