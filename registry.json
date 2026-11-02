@@ -868,5 +868,22 @@
       "LatchFree",
       "WAL"
     ]
+  },
+  {
+    "id": "necro-prune",
+    "title": "Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade static analysis & AST transformation engine with inter-procedural call graphs, breadth-first transitive reachability, unused import detection, post-terminator pruning, and bytecode-safe surgical code incineration.",
+    "cli": "necro-prune",
+    "evolved_at": "2026-11-02T21:47:23.508324",
+    "tags": [
+      "AST",
+      "StaticAnalysis",
+      "DeadCodeElimination",
+      "CallGraph",
+      "CodePruning",
+      "CompilerOptimization"
+    ]
   }
 ]

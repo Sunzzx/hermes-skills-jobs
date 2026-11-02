@@ -508,3 +508,8 @@
 - **Category**: systems
 - **Description**: Production-grade Lehman-Yao B-Link tree storage engine with high-key invariants, horizontal right-link pointers, latch-free search traversal, atomic two-phase split protocol, WAL durability with CRC32 framing, and linear range scans.
 - **CLI**: `blink-tree`
+
+### [2026-11-02 21:47:23] - Evolved `necro-prune`
+- **Title**: Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine
+- **Category**: systems
+- **Description**: Production-grade static analysis & AST transformation engine with inter-procedural call graphs, breadth-first transitive reachability, unused import detection, post-terminator pruning, and bytecode-safe surgical code incineration.

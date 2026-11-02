@@ -1,0 +1,932 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine.
+
+A mathematically rigorous, production-grade static analysis and AST transformation
+engine that builds inter-procedural call graphs, performs transitive reachability
+analysis from entrypoints, detects unreachable procedures/unused imports/dead blocks,
+and surgically incinerates dead code with compiler-verified AST transformations.
+
+Zero external dependencies. Pure Python 3 standard library.
+"""
+
+import argparse
+import ast
+import dataclasses
+import difflib
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+
+# =====================================================================
+# ANSI Styling & Diagnostics
+# =====================================================================
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+
+    @classmethod
+    def disable(cls):
+        for attr in ["BOLD", "DIM", "RED", "GREEN", "YELLOW", "BLUE", "MAGENTA", "CYAN", "WHITE"]:
+            setattr(cls, attr, "")
+        cls.RESET = ""
+
+
+if not sys.stdout.isatty():
+    Color.disable()
+
+
+# =====================================================================
+# Data Structures: Dead Code Categories & Telemetry
+# =====================================================================
+class DeadCodeKind:
+    UNREACHABLE_FUNCTION = "unreachable_function"
+    UNREACHABLE_CLASS = "unreachable_class"
+    UNUSED_IMPORT = "unused_import"
+    DEAD_BRANCH = "dead_branch"
+    DEAD_POST_TERMINATOR = "dead_post_terminator"
+
+
+@dataclasses.dataclass
+class DeadItem:
+    kind: str
+    name: str
+    lineno: int
+    end_lineno: Optional[int]
+    details: str
+
+
+@dataclasses.dataclass
+class FileAnalysisReport:
+    filepath: Path
+    total_lines: int
+    ast_nodes: int
+    items: List[DeadItem] = dataclasses.field(default_factory=list)
+    error: Optional[str] = None
+
+    @property
+    def is_clean(self) -> bool:
+        return len(self.items) == 0 and self.error is None
+
+    @property
+    def dead_count(self) -> int:
+        return len(self.items)
+
+
+# =====================================================================
+# Call Graph & Reachability Analysis Engine
+# =====================================================================
+class SymbolUsageVisitor(ast.NodeVisitor):
+    """Collects all referenced identifiers throughout an AST node or subtree."""
+
+    def __init__(self):
+        self.referenced_names: Set[str] = set()
+        self.attribute_calls: Set[str] = set()
+
+    def visit_Name(self, node: ast.Name):
+        if isinstance(node.ctx, (ast.Load, ast.Del)):
+            self.referenced_names.add(node.id)
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute):
+        self.attribute_calls.add(node.attr)
+        self.generic_visit(node)
+
+
+class CallGraph:
+    def __init__(self):
+        # Map symbol -> set of symbols called directly by it
+        self.adjacency: Dict[str, Set[str]] = {}
+        # Map symbol -> AST node
+        self.nodes: Dict[str, ast.AST] = {}
+        # Line number ranges
+        self.spans: Dict[str, Tuple[int, int]] = {}
+        # Set of symbols declared as roots / entry points
+        self.entrypoints: Set[str] = set()
+        # Track class methods: class_name -> set of method names
+        self.class_methods: Dict[str, Set[str]] = {}
+        # Track method -> class_name
+        self.method_to_class: Dict[str, str] = {}
+
+    def add_node(self, name: str, node: ast.AST, lineno: int, end_lineno: int):
+        if name not in self.adjacency:
+            self.adjacency[name] = set()
+        self.nodes[name] = node
+        self.spans[name] = (lineno, end_lineno)
+
+    def add_edge(self, caller: str, callee: str):
+        if caller not in self.adjacency:
+            self.adjacency[caller] = set()
+        self.adjacency[caller].add(callee)
+
+    def mark_entrypoint(self, name: str):
+        self.entrypoints.add(name)
+
+    def compute_reachability(self) -> Set[str]:
+        """Computes transitive reachability from all designated entry points via BFS."""
+        reachable: Set[str] = set()
+        queue: List[str] = list(self.entrypoints)
+
+        while queue:
+            curr = queue.pop(0)
+            if curr not in reachable:
+                reachable.add(curr)
+                for neighbor in self.adjacency.get(curr, set()):
+                    if neighbor not in reachable:
+                        queue.append(neighbor)
+        return reachable
+
+
+class CallGraphBuilder(ast.NodeVisitor):
+    """Constructs an inter-procedural call graph from a module's AST."""
+
+    def __init__(self):
+        self.graph = CallGraph()
+        self.current_scope: Optional[str] = None
+        self.top_level_refs: Set[str] = set()
+        self.all_imports: Dict[str, Tuple[ast.AST, int, Optional[str]]] = {}  # imported_as -> (node, lineno, orig_name)
+        self.exported_names: Set[str] = set()
+        self.has_main_guard = False
+
+    def visit_Import(self, node: ast.Import):
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.all_imports[name] = (node, node.lineno, alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.all_imports[name] = (node, node.lineno, alias.name)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign):
+        # Check for __all__ export list
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                if isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                    for elt in node.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            self.exported_names.add(elt.value)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self._process_func(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self._process_func(node)
+
+    def _process_func(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]):
+        func_name = node.name
+        qualname = f"{self.current_scope}.{func_name}" if self.current_scope else func_name
+
+        end_line = getattr(node, "end_lineno", node.lineno)
+        self.graph.add_node(qualname, node, node.lineno, end_line)
+
+        if self.current_scope:
+            self.graph.class_methods.setdefault(self.current_scope, set()).add(qualname)
+            self.graph.method_to_class[qualname] = self.current_scope
+
+        # Entrypoint rules:
+        # 1. Dunder methods (__init__, __str__, __enter__, etc.) are entrypoints if class is reachable
+        if func_name.startswith("__") and func_name.endswith("__"):
+            self.graph.mark_entrypoint(qualname)
+        # 2. Public API methods / tests
+        if func_name.startswith("test_") or func_name == "main":
+            self.graph.mark_entrypoint(qualname)
+        # 3. Exported via __all__
+        if func_name in self.exported_names:
+            self.graph.mark_entrypoint(qualname)
+        # 4. Decorated with frameworks / properties
+        for dec in node.decorator_list:
+            dec_name = ""
+            if isinstance(dec, ast.Name):
+                dec_name = dec.id
+            elif isinstance(dec, ast.Attribute):
+                dec_name = dec.attr
+            elif isinstance(dec, ast.Call):
+                if isinstance(dec.func, ast.Name):
+                    dec_name = dec.func.id
+                elif isinstance(dec.func, ast.Attribute):
+                    dec_name = dec.func.attr
+            if dec_name in {"property", "classmethod", "staticmethod", "abstractmethod", "hook", "command", "route", "task"}:
+                self.graph.mark_entrypoint(qualname)
+
+        # Inspect body references
+        old_scope = self.current_scope
+        self.current_scope = qualname
+        v = SymbolUsageVisitor()
+        for stmt in node.body:
+            v.visit(stmt)
+
+        for ref in v.referenced_names:
+            self.graph.add_edge(qualname, ref)
+            # Also check if it references a method on self
+            if old_scope:
+                self.graph.add_edge(qualname, f"{old_scope}.{ref}")
+        for attr in v.attribute_calls:
+            if old_scope:
+                self.graph.add_edge(qualname, f"{old_scope}.{attr}")
+
+        for stmt in node.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.visit(stmt)
+
+        self.current_scope = old_scope
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        class_name = node.name
+        end_line = getattr(node, "end_lineno", node.lineno)
+        self.graph.add_node(class_name, node, node.lineno, end_line)
+
+        if class_name in self.exported_names:
+            self.graph.mark_entrypoint(class_name)
+
+        # Bases are referenced
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                self.graph.add_edge(class_name, base.id)
+                if base.id in {"TestCase", "unittest.TestCase"}:
+                    self.graph.mark_entrypoint(class_name)
+
+        old_scope = self.current_scope
+        self.current_scope = class_name
+
+        for stmt in node.body:
+            self.visit(stmt)
+
+        self.current_scope = old_scope
+
+    def visit_If(self, node: ast.If):
+        # Detect `if __name__ == '__main__':`
+        is_main = False
+        if isinstance(node.test, ast.Compare):
+            left = node.test.left
+            if isinstance(left, ast.Name) and left.id == "__name__":
+                for comp in node.test.comparators:
+                    if isinstance(comp, ast.Constant) and comp.value == "__main__":
+                        is_main = True
+                        self.has_main_guard = True
+        if is_main:
+            # All references inside main guard are entry points
+            v = SymbolUsageVisitor()
+            for stmt in node.body:
+                v.visit(stmt)
+            for ref in v.referenced_names:
+                self.graph.mark_entrypoint(ref)
+        self.generic_visit(node)
+
+
+# =====================================================================
+# Static AST Inspector & Dead Code Detector
+# =====================================================================
+class DeadCodeAnalyzer:
+    def __init__(self, source_code: str, filepath: Path = Path("<input>")):
+        self.source = source_code
+        self.filepath = filepath
+        self.lines = source_code.splitlines()
+
+    def analyze(self) -> FileAnalysisReport:
+        try:
+            tree = ast.parse(self.source, filename=str(self.filepath))
+        except SyntaxError as e:
+            return FileAnalysisReport(
+                filepath=self.filepath,
+                total_lines=len(self.lines),
+                ast_nodes=0,
+                error=f"SyntaxError at line {e.lineno}: {e.msg}",
+            )
+
+        builder = CallGraphBuilder()
+        builder.visit(tree)
+
+        # Collect global top-level references
+        global_visitor = SymbolUsageVisitor()
+        for stmt in tree.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                global_visitor.visit(stmt)
+
+        # Top-level code executions are entrypoints
+        for ref in global_visitor.referenced_names:
+            builder.graph.mark_entrypoint(ref)
+
+        # Compute reachable graph
+        reachable = builder.graph.compute_reachability()
+
+        # When a class is reachable, all its methods are conditionally reached
+        # if called or if they are public / magic
+        for cls_name in list(reachable):
+            if cls_name in builder.graph.class_methods:
+                for method in builder.graph.class_methods[cls_name]:
+                    # Magic dunder methods are reachable if class is instantiated
+                    m_short = method.split(".")[-1]
+                    if m_short.startswith("__") and m_short.endswith("__"):
+                        reachable.add(method)
+
+        items: List[DeadItem] = []
+
+        # 1. Unreachable functions and classes
+        for name, node in builder.graph.nodes.items():
+            if "." in name:
+                # Method
+                cls_name, m_name = name.split(".", 1)
+                if cls_name in reachable and name not in reachable:
+                    # Class is alive, but method is never called
+                    if not (m_name.startswith("__") and m_name.endswith("__")) and not m_name.startswith("test_"):
+                        start, end = builder.graph.spans[name]
+                        items.append(DeadItem(
+                            kind=DeadCodeKind.UNREACHABLE_FUNCTION,
+                            name=name,
+                            lineno=start,
+                            end_lineno=end,
+                            details=f"Dead method '{name}' never called in reachable flow",
+                        ))
+            else:
+                # Top level class or function
+                if name not in reachable and name not in builder.exported_names:
+                    start, end = builder.graph.spans[name]
+                    kind = (
+                        DeadCodeKind.UNREACHABLE_CLASS
+                        if isinstance(node, ast.ClassDef)
+                        else DeadCodeKind.UNREACHABLE_FUNCTION
+                    )
+                    items.append(DeadItem(
+                        kind=kind,
+                        name=name,
+                        lineno=start,
+                        end_lineno=end,
+                        details=f"Unreachable {kind.replace('_', ' ')} '{name}'",
+                    ))
+
+        # 2. Unused imports
+        all_referenced_symbols: Set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Load, ast.Del)):
+                all_referenced_symbols.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                all_referenced_symbols.add(node.attr)
+
+        for imp_alias, (imp_node, lineno, orig_name) in builder.all_imports.items():
+            if imp_alias not in all_referenced_symbols and imp_alias not in builder.exported_names:
+                items.append(DeadItem(
+                    kind=DeadCodeKind.UNUSED_IMPORT,
+                    name=imp_alias,
+                    lineno=lineno,
+                    end_lineno=getattr(imp_node, "end_lineno", lineno),
+                    details=f"Unused import symbol '{imp_alias}' (from {orig_name or imp_alias})",
+                ))
+
+        # 3. Dead control-flow branches and post-terminator statements
+        class ControlFlowVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.control_dead: List[DeadItem] = []
+
+            def check_body_terminators(self, body: List[ast.stmt]):
+                terminated = False
+                for idx, stmt in enumerate(body):
+                    if terminated:
+                        self.control_dead.append(DeadItem(
+                            kind=DeadCodeKind.DEAD_POST_TERMINATOR,
+                            name=stmt.__class__.__name__,
+                            lineno=stmt.lineno,
+                            end_lineno=getattr(stmt, "end_lineno", stmt.lineno),
+                            details=f"Unreachable code following unconditional terminator on line {body[idx-1].lineno}",
+                        ))
+                    if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                        terminated = True
+
+            def visit_If(self, node: ast.If):
+                # Constant false test
+                if isinstance(node.test, ast.Constant):
+                    if not bool(node.test.value):
+                        self.control_dead.append(DeadItem(
+                            kind=DeadCodeKind.DEAD_BRANCH,
+                            name="if False",
+                            lineno=node.lineno,
+                            end_lineno=getattr(node, "end_lineno", node.lineno),
+                            details=f"Dead conditional branch guarded by constant {node.test.value}",
+                        ))
+                self.check_body_terminators(node.body)
+                if node.orelse:
+                    self.check_body_terminators(node.orelse)
+                self.generic_visit(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef):
+                self.check_body_terminators(node.body)
+                self.generic_visit(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+                self.check_body_terminators(node.body)
+                self.generic_visit(node)
+
+            def visit_For(self, node: ast.For):
+                self.check_body_terminators(node.body)
+                if node.orelse:
+                    self.check_body_terminators(node.orelse)
+                self.generic_visit(node)
+
+            def visit_While(self, node: ast.While):
+                self.check_body_terminators(node.body)
+                if node.orelse:
+                    self.check_body_terminators(node.orelse)
+                self.generic_visit(node)
+
+            def visit_Try(self, node: ast.Try):
+                self.check_body_terminators(node.body)
+                if node.finalbody:
+                    self.check_body_terminators(node.finalbody)
+                self.generic_visit(node)
+
+        cf_visitor = ControlFlowVisitor()
+        cf_visitor.visit(tree)
+        items.extend(cf_visitor.control_dead)
+
+        # Sort items by line number
+        items.sort(key=lambda x: (x.lineno, x.name))
+
+        total_nodes = sum(1 for _ in ast.walk(tree))
+        return FileAnalysisReport(
+            filepath=self.filepath,
+            total_lines=len(self.lines),
+            ast_nodes=total_nodes,
+            items=items,
+        )
+
+
+# =====================================================================
+# Surgical AST Incinerator & Code Transformer
+# =====================================================================
+class NecroTransformer(ast.NodeTransformer):
+    """Transforms an AST by excising identified dead nodes cleanly."""
+
+    def __init__(self, dead_items: List[DeadItem]):
+        self.dead_funcs = {item.name for item in dead_items if item.kind == DeadCodeKind.UNREACHABLE_FUNCTION}
+        self.dead_classes = {item.name for item in dead_items if item.kind == DeadCodeKind.UNREACHABLE_CLASS}
+        self.dead_imports = {item.name for item in dead_items if item.kind == DeadCodeKind.UNUSED_IMPORT}
+        self.dead_branches_lines = {item.lineno for item in dead_items if item.kind == DeadCodeKind.DEAD_BRANCH}
+        self.dead_post_terminators = {item.lineno for item in dead_items if item.kind == DeadCodeKind.DEAD_POST_TERMINATOR}
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        if node.name in self.dead_funcs:
+            return None
+        node = self.generic_visit(node)
+        return self._prune_post_terminators(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        if node.name in self.dead_funcs:
+            return None
+        node = self.generic_visit(node)
+        return self._prune_post_terminators(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        if node.name in self.dead_classes:
+            return None
+        # Filter dead methods within class
+        node.body = [
+            stmt for stmt in node.body
+            if not (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and f"{node.name}.{stmt.name}" in self.dead_funcs)
+        ]
+        if not node.body:
+            node.body = [ast.Pass()]
+        return self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import):
+        new_names = [alias for alias in node.names if (alias.asname or alias.name) not in self.dead_imports]
+        if not new_names:
+            return None
+        node.names = new_names
+        return node
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        new_names = [alias for alias in node.names if (alias.asname or alias.name) not in self.dead_imports]
+        if not new_names:
+            return None
+        node.names = new_names
+        return node
+
+    def visit_If(self, node: ast.If):
+        if node.lineno in self.dead_branches_lines:
+            # Dead branch guarded by constant False; if orelse exists, hoist orelse, else drop
+            if node.orelse:
+                return [self.visit(stmt) for stmt in node.orelse]
+            return None
+        node = self.generic_visit(node)
+        node = self._prune_post_terminators(node)
+        if hasattr(node, "orelse") and node.orelse:
+            node = self._prune_post_terminators_body(node, "orelse")
+        return node
+
+    def _prune_post_terminators(self, node: ast.AST) -> ast.AST:
+        return self._prune_post_terminators_body(node, "body")
+
+    def _prune_post_terminators_body(self, node: ast.AST, attr: str) -> ast.AST:
+        if hasattr(node, attr) and isinstance(getattr(node, attr), list):
+            pruned = []
+            terminated = False
+            for stmt in getattr(node, attr):
+                if terminated or stmt.lineno in self.dead_post_terminators:
+                    continue
+                pruned.append(stmt)
+                if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                    terminated = True
+            if not pruned:
+                pruned = [ast.Pass()]
+            setattr(node, attr, pruned)
+        return node
+
+
+class IncineratorEngine:
+    @staticmethod
+    def transform(source: str, report: FileAnalysisReport) -> Tuple[str, str]:
+        """Transforms source code, producing (transformed_code, unified_diff)."""
+        if report.is_clean:
+            return source, ""
+
+        tree = ast.parse(source, filename=str(report.filepath))
+        transformer = NecroTransformer(report.items)
+        new_tree = transformer.visit(tree)
+        ast.fix_missing_locations(new_tree)
+
+        new_code = ast.unparse(new_tree) + "\n"
+
+        # Verify that transformed code compiles with zero syntax errors
+        try:
+            compile(new_code, filename=str(report.filepath), mode="exec")
+        except Exception as e:
+            raise RuntimeError(f"AST transformation safety check failed: {e}") from e
+
+        diff = "\n".join(difflib.unified_diff(
+            source.splitlines(),
+            new_code.splitlines(),
+            fromfile=f"a/{report.filepath.name}",
+            tofile=f"b/{report.filepath.name} [incinerated]",
+            lineterm="",
+        ))
+        return new_code, diff
+
+
+# =====================================================================
+# CLI Subcommands & Diagnostics
+# =====================================================================
+def cmd_scan(args: argparse.Namespace) -> int:
+    target = Path(args.path).resolve()
+    files: List[Path] = []
+
+    if target.is_file():
+        files = [target]
+    elif target.is_dir():
+        files = sorted(list(target.rglob("*.py")))
+    else:
+        print(f"{Color.RED}Error: Path {target} not found.{Color.RESET}")
+        return 1
+
+    print(f"{Color.BOLD}{Color.CYAN}🔥 Necro-Prune: AST Dead Code Scan{Color.RESET}")
+    print(f"{Color.DIM}Target: {target} ({len(files)} python files){Color.RESET}\n")
+
+    total_dead = 0
+    files_with_dead = 0
+
+    for f in files:
+        try:
+            source = f.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"{Color.YELLOW}Skipping {f.name}: {e}{Color.RESET}")
+            continue
+
+        report = DeadCodeAnalyzer(source, filepath=f).analyze()
+        if report.error:
+            print(f"{Color.RED}✖ {f.relative_to(target.parent if target.is_file() else target)}: {report.error}{Color.RESET}")
+            continue
+
+        if not report.is_clean:
+            files_with_dead += 1
+            total_dead += report.dead_count
+            rel_path = f.relative_to(target.parent if target.is_file() else target)
+            print(f"{Color.YELLOW}⚠ {rel_path}{Color.RESET} ({report.dead_count} dead elements, {report.total_lines} lines):")
+            for item in report.items:
+                badge = {
+                    DeadCodeKind.UNREACHABLE_FUNCTION: f"{Color.RED}[UNREACHABLE FUNC]{Color.RESET}",
+                    DeadCodeKind.UNREACHABLE_CLASS: f"{Color.MAGENTA}[UNREACHABLE CLS]{Color.RESET}",
+                    DeadCodeKind.UNUSED_IMPORT: f"{Color.CYAN}[UNUSED IMPORT]{Color.RESET}",
+                    DeadCodeKind.DEAD_BRANCH: f"{Color.YELLOW}[DEAD BRANCH]{Color.RESET}",
+                    DeadCodeKind.DEAD_POST_TERMINATOR: f"{Color.RED}[POST-TERMINATOR]{Color.RESET}",
+                }.get(item.kind, "[DEAD]")
+                span = f"L{item.lineno}-{item.end_lineno}" if item.end_lineno else f"L{item.lineno}"
+                print(f"  • {badge:<28} {span:<12} {item.details}")
+            print()
+
+    print(f"{Color.BOLD}Scan Complete:{Color.RESET} {files_with_dead}/{len(files)} files contain {total_dead} dead code elements.")
+    return 1 if total_dead > 0 else 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    filepath = Path(args.file).resolve()
+    if not filepath.is_file():
+        print(f"{Color.RED}Error: File {filepath} not found.{Color.RESET}")
+        return 1
+
+    source = filepath.read_text(encoding="utf-8")
+    report = DeadCodeAnalyzer(source, filepath=filepath).analyze()
+
+    if report.error:
+        print(f"{Color.RED}Error analyzing {filepath}: {report.error}{Color.RESET}")
+        return 1
+
+    if report.is_clean:
+        print(f"{Color.GREEN}✨ {filepath.name} is completely clean. Zero dead code identified.{Color.RESET}")
+        return 0
+
+    _, diff = IncineratorEngine.transform(source, report)
+    print(f"{Color.BOLD}{Color.CYAN}--- Dead Code Incineration Diff for {filepath.name} ---{Color.RESET}")
+    for line in diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            print(f"{Color.GREEN}{line}{Color.RESET}")
+        elif line.startswith("-") and not line.startswith("----"):
+            print(f"{Color.RED}{line}{Color.RESET}")
+        elif line.startswith("@@"):
+            print(f"{Color.MAGENTA}{line}{Color.RESET}")
+        else:
+            print(line)
+    return 0
+
+
+def cmd_incinerate(args: argparse.Namespace) -> int:
+    target = Path(args.path).resolve()
+    files: List[Path] = [target] if target.is_file() else sorted(list(target.rglob("*.py")))
+
+    incinerated_files = 0
+    incinerated_items = 0
+
+    print(f"{Color.BOLD}{Color.RED}🔥 Starting AST Dead Code Incineration...{Color.RESET}")
+
+    for f in files:
+        try:
+            source = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        report = DeadCodeAnalyzer(source, filepath=f).analyze()
+        if report.is_clean or report.error:
+            continue
+
+        new_code, _ = IncineratorEngine.transform(source, report)
+        count = report.dead_count
+
+        if args.in_place:
+            if args.backup:
+                f.with_suffix(".py.bak").write_text(source, encoding="utf-8")
+            f.write_text(new_code, encoding="utf-8")
+            print(f"{Color.GREEN}✓ Incinerated {count} dead items in {f.name}{Color.RESET}")
+        else:
+            print(f"{Color.YELLOW}• [Dry Run] Would incinerate {count} dead items in {f.name}{Color.RESET}")
+
+        incinerated_files += 1
+        incinerated_items += count
+
+    mode = "In-Place Incinerated" if args.in_place else "Dry-Run Inspected"
+    print(f"\n{Color.BOLD}{mode} {incinerated_items} dead items across {incinerated_files} files.{Color.RESET}")
+    return 0
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    filepath = Path(args.file).resolve()
+    if not filepath.is_file():
+        print(f"{Color.RED}Error: File {filepath} not found.{Color.RESET}")
+        return 1
+
+    source = filepath.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(filepath))
+    builder = CallGraphBuilder()
+    builder.visit(tree)
+
+    # Top-level statements as roots
+    v = SymbolUsageVisitor()
+    for stmt in tree.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            v.visit(stmt)
+    for ref in v.referenced_names:
+        builder.graph.mark_entrypoint(ref)
+
+    reachable = builder.graph.compute_reachability()
+
+    print(f"{Color.BOLD}{Color.CYAN}🕸 Inter-Procedural Call Graph & Reachability Tree: {filepath.name}{Color.RESET}")
+    print(f"{Color.DIM}Entrypoints: {', '.join(sorted(builder.graph.entrypoints)) or 'None'}{Color.RESET}\n")
+
+    for name in sorted(builder.graph.nodes.keys()):
+        is_live = name in reachable
+        status = f"{Color.GREEN}[LIVE]{Color.RESET}" if is_live else f"{Color.RED}[DEAD]{Color.RESET}"
+        callees = sorted(list(builder.graph.adjacency.get(name, set())))
+        callee_str = f" -> ({', '.join(callees)})" if callees else " -> (leaf)"
+        print(f"  {status} {Color.BOLD}{name:<25}{Color.RESET}{Color.DIM}{callee_str}{Color.RESET}")
+    print()
+    return 0
+
+
+def run_verification_suite() -> bool:
+    """Comprehensive 6-stage self-test suite validating dead code detection and AST rewrites."""
+    print(f"{Color.BOLD}{Color.CYAN}🔍 Running Necro-Prune Verification Suite...{Color.RESET}")
+
+    # Stage 1: Dead Function Elimination
+    sample1 = """
+def live_root():
+    return helper_calc()
+
+def helper_calc():
+    return 42
+
+def dead_zombie_func():
+    return 'never reached'
+
+if __name__ == '__main__':
+    print(live_root())
+"""
+    rep1 = DeadCodeAnalyzer(sample1).analyze()
+    dead_names1 = {item.name for item in rep1.items}
+    assert "dead_zombie_func" in dead_names1, f"Failed stage 1: {dead_names1}"
+    assert "live_root" not in dead_names1 and "helper_calc" not in dead_names1
+    print(f"  • [1/6] Dead Function Elimination: {Color.GREEN}PASSED{Color.RESET}")
+
+    # Stage 2: Unused Import Detection
+    sample2 = """
+import math
+import sys
+from os import path, environ
+
+def compute():
+    return math.sqrt(16) + len(environ)
+
+if __name__ == '__main__':
+    compute()
+"""
+    rep2 = DeadCodeAnalyzer(sample2).analyze()
+    dead_names2 = {item.name for item in rep2.items if item.kind == DeadCodeKind.UNUSED_IMPORT}
+    assert "sys" in dead_names2 and "path" in dead_names2, f"Failed stage 2: {dead_names2}"
+    assert "math" not in dead_names2 and "environ" not in dead_names2
+    print(f"  • [2/6] Unused Import Detection: {Color.GREEN}PASSED{Color.RESET}")
+
+    # Stage 3: Dead Control Flow Post-Terminator
+    sample3 = """
+def calculate(x):
+    if x > 0:
+        return x * 2
+        dead_assignment = 999
+        print('unreachable')
+    return 0
+
+if __name__ == '__main__':
+    calculate(5)
+"""
+    rep3 = DeadCodeAnalyzer(sample3).analyze()
+    dead_kinds3 = [item.kind for item in rep3.items]
+    assert DeadCodeKind.DEAD_POST_TERMINATOR in dead_kinds3, f"Failed stage 3: {dead_kinds3}"
+    print(f"  • [3/6] Post-Terminator Dead Code Detection: {Color.GREEN}PASSED{Color.RESET}")
+
+    # Stage 4: Constant False Branch Detection
+    sample4 = """
+def feature():
+    if False:
+        legacy_routine()
+    return True
+
+if __name__ == '__main__':
+    feature()
+"""
+    rep4 = DeadCodeAnalyzer(sample4).analyze()
+    dead_kinds4 = [item.kind for item in rep4.items]
+    assert DeadCodeKind.DEAD_BRANCH in dead_kinds4, f"Failed stage 4: {dead_kinds4}"
+    print(f"  • [4/6] Constant False Branch Detection: {Color.GREEN}PASSED{Color.RESET}")
+
+    # Stage 5: Surgical AST Transformation & Compilation Safety
+    new_code1, diff1 = IncineratorEngine.transform(sample1, rep1)
+    assert "dead_zombie_func" not in new_code1, "Transformation failed to excise dead function"
+    assert "live_root" in new_code1 and "helper_calc" in new_code1
+    # Check compilation
+    compiled = compile(new_code1, "<test>", "exec")
+    assert compiled is not None
+    print(f"  • [5/6] Surgical AST Incineration & Bytecode Safety: {Color.GREEN}PASSED{Color.RESET}")
+
+    # Stage 6: Class Method Reachability & Dunder Preservation
+    sample6 = """
+class Engine:
+    def __init__(self, val):
+        self.val = val
+    def active_worker(self):
+        return self.val * 2
+    def forgotten_method(self):
+        return 'dead'
+
+def run():
+    e = Engine(10)
+    return e.active_worker()
+
+if __name__ == '__main__':
+    run()
+"""
+    rep6 = DeadCodeAnalyzer(sample6).analyze()
+    dead_names6 = {item.name for item in rep6.items}
+    assert "Engine.forgotten_method" in dead_names6, f"Failed stage 6: {dead_names6}"
+    assert "Engine.__init__" not in dead_names6
+    print(f"  • [6/6] Class Hierarchy & Dunder Preservation: {Color.GREEN}PASSED{Color.RESET}")
+
+    print(f"\n{Color.BOLD}{Color.GREEN}✨ All 6 Necro-Prune verification suites passed with zero errors!{Color.RESET}")
+    return True
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    print(f"{Color.BOLD}{Color.CYAN}⚡ Running Necro-Prune AST Throughput Benchmark...{Color.RESET}")
+    synthetic_lines = [
+        "import sys, os, math, json\n",
+        "def live_func_root(n):\n    return math.sqrt(n) + helper_cal(n)\n",
+        "def helper_cal(x):\n    return x * 2\n",
+    ]
+    # Add 100 dead functions
+    for i in range(100):
+        synthetic_lines.append(f"def dead_subroutine_{i}(a):\n    return a + {i}\n")
+    synthetic_lines.append("if __name__ == '__main__':\n    live_func_root(100)\n")
+    sample_src = "".join(synthetic_lines)
+
+    t0 = time.perf_counter()
+    iterations = 50
+    total_nodes = 0
+    for _ in range(iterations):
+        rep = DeadCodeAnalyzer(sample_src).analyze()
+        total_nodes += rep.ast_nodes
+        new_code, _ = IncineratorEngine.transform(sample_src, rep)
+    t1 = time.perf_counter()
+
+    elapsed = t1 - t0
+    throughput = (total_nodes / elapsed)
+    print(f"  • Analyzed & Transformed: {iterations} full compilation runs")
+    print(f"  • Total AST Nodes: {total_nodes}")
+    print(f"  • Elapsed Time: {elapsed * 1000:.2f} ms ({throughput:.1f} AST nodes/sec)")
+    print(f"{Color.GREEN}✓ Benchmark completed successfully.{Color.RESET}")
+    return 0
+
+
+# =====================================================================
+# Main Entrypoint
+# =====================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        prog="necro-prune",
+        description="Necro-Prune: AST Dead Code Incinerator & Call Graph Reachability Engine",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # scan
+    p_scan = subparsers.add_parser("scan", help="Scan file or directory for dead code")
+    p_scan.add_argument("path", nargs="?", default=".", help="File or directory to scan")
+
+    # diff
+    p_diff = subparsers.add_parser("diff", help="Show unified diff of dead code incineration")
+    p_diff.add_argument("file", help="Python file to inspect")
+
+    # incinerate
+    p_inc = subparsers.add_parser("incinerate", help="Incinerate dead code in files")
+    p_inc.add_argument("path", help="File or directory to incinerate")
+    p_inc.add_argument("--in-place", "-i", action="store_true", help="Modify files in place")
+    p_inc.add_argument("--backup", action="store_true", help="Create .bak backups before editing")
+
+    # graph
+    p_graph = subparsers.add_parser("graph", help="Display ASCII call graph & reachability tree")
+    p_graph.add_argument("file", help="Python file to analyze")
+
+    # verify
+    subparsers.add_parser("verify", help="Run comprehensive 6-stage self-test verification suite")
+
+    # benchmark
+    subparsers.add_parser("benchmark", help="Run AST parsing and transformation throughput benchmark")
+
+    args = parser.parse_args()
+
+    if args.command == "scan":
+        sys.exit(cmd_scan(args))
+    elif args.command == "diff":
+        sys.exit(cmd_diff(args))
+    elif args.command == "incinerate":
+        sys.exit(cmd_incinerate(args))
+    elif args.command == "graph":
+        sys.exit(cmd_graph(args))
+    elif args.command == "verify":
+        success = run_verification_suite()
+        sys.exit(0 if success else 1)
+    elif args.command == "benchmark":
+        sys.exit(cmd_benchmark(args))
+    else:
+        parser.print_help()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
