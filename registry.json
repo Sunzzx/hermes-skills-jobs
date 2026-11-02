@@ -893,7 +893,7 @@
     "type": "skill+tool",
     "description": "High-Performance Register Bytecode Virtual Machine and Tracing JIT Engine: 3-address register ISA, CFG basic block partitioning, dominator tree analysis, loop detection, algebraic peephole optimizer, constant folding, and runtime tracing JIT compiler.",
     "cli": "tachyon-jit",
-    "path": "skills/systems/tachyon-register-bytecode-jit-engine/SKILL.md",
+    "evolved_at": "2026-11-03T00:34:43.480060",
     "tags": [
       "BytecodeVM",
       "RegisterVM",
