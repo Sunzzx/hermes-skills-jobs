@@ -502,3 +502,9 @@
 - **Title**: 3D Gaussian Splatting & Real-Time Radiance Field Rasterization Engine
 - **Category**: creative
 - **Description**: Production-grade 3D Gaussian Splatting (3DGS) rasterizer and radiance field engine: SO(3) quaternion covariance representation, closed-form affine Jacobian projective camera projection, Zwicker screen-space 2D covariance, degree 0/1 Spherical Harmonics, front-to-back volumetric alpha compositing, differentiable photometric gradient optimization, and dual-pixel Truecolor ANSI visualization.
+
+### [2026-11-02 20:34:44] - Evolved `blink-tree`
+- **Title**: Lehman-Yao B-Link Tree & High-Concurrency Latch-Free Storage Engine
+- **Category**: systems
+- **Description**: Production-grade Lehman-Yao B-Link tree storage engine with high-key invariants, horizontal right-link pointers, latch-free search traversal, atomic two-phase split protocol, WAL durability with CRC32 framing, and linear range scans.
+- **CLI**: `blink-tree`

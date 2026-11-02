@@ -851,5 +851,22 @@
       "VolumetricRendering",
       "DifferentiableRasterization"
     ]
+  },
+  {
+    "id": "blink-tree",
+    "title": "Lehman-Yao B-Link Tree & High-Concurrency Latch-Free Storage Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Production-grade Lehman-Yao B-Link tree storage engine with high-key invariants, horizontal right-link pointers, latch-free search traversal, atomic two-phase split protocol, WAL durability with CRC32 framing, and linear range scans.",
+    "cli": "blink-tree",
+    "evolved_at": "2026-11-02T20:34:44.773560",
+    "tags": [
+      "BLinkTree",
+      "StorageEngine",
+      "ConcurrentBTree",
+      "LehmanYao",
+      "LatchFree",
+      "WAL"
+    ]
   }
 ]

@@ -1,0 +1,1107 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Lehman-Yao B-Link Tree & High-Concurrency Latch-Free Storage Engine.
+
+A mathematically rigorous, production-grade implementation of the Lehman-Yao
+B-Link Tree algorithm (Lehman & Yao, ACM TODS 1981: 'Efficient Locking for
+Concurrent Operations on B-Trees').
+
+Key Architectural Innovations:
+- High-Key Invariant: Every internal and leaf node contains a designated high key.
+  All keys in the node's subtree are strictly bounded by high_key (or +infinity).
+- Right-Link Pointers: Every node at every level contains a horizontal link pointer
+  to its immediate right sibling at the same level.
+- Latch-Free Search Traversal: Readers search without acquiring read latches or
+  relying on lock coupling (crabbing). When a concurrent node split occurs,
+  the reader detects that search_key > high_key and moves right along the link pointer
+  at the same level without backtracking or restarting from root.
+- Atomic Two-Phase Split Protocol: Overflowed nodes allocate a right sibling, copy
+  the upper half of keys, update link pointers, and atomically expose the split
+  at the current level before updating the parent node.
+- Write-Ahead Logging (WAL): Durability with binary record framing, 32-bit CRC polynomials,
+  monotonic Log Sequence Numbers (LSN), and deterministic crash recovery replay.
+- Linear-Time Range Scans: Direct leaf-level linked traversal without parent lookups.
+- Visual ASCII Tree Inspector & Multi-Threaded Concurrency Benchmark.
+"""
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import dataclasses
+import json
+import math
+import os
+from pathlib import Path
+import random
+import struct
+import sys
+import threading
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+import zlib
+
+# =====================================================================
+# ANSI Terminal Formatting Helpers
+# =====================================================================
+USE_COLOR = sys.stdout.isatty() or os.environ.get("TERM") is not None
+
+def c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+
+def bold(text: str) -> str: return c("1", text)
+def cyan(text: str) -> str: return c("36", text)
+def green(text: str) -> str: return c("32", text)
+def yellow(text: str) -> str: return c("33", text)
+def magenta(text: str) -> str: return c("35", text)
+def red(text: str) -> str: return c("31", text)
+def gray(text: str) -> str: return c("90", text)
+def bright_blue(text: str) -> str: return c("94", text)
+
+# =====================================================================
+# 1. Positive Infinity Sentinel & Comparable Key Logic
+# =====================================================================
+
+class _PositiveInfinity:
+    """Sentinel representing +infinity strictly greater than any user key."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "+∞"
+
+    def __str__(self) -> str:
+        return "+∞"
+
+    def __gt__(self, other: Any) -> bool:
+        return True
+
+    def __ge__(self, other: Any) -> bool:
+        return True
+
+    def __lt__(self, other: Any) -> bool:
+        return False
+
+    def __le__(self, other: Any) -> bool:
+        return isinstance(other, _PositiveInfinity)
+
+    def __eq__(self, other: Any) -> bool:
+        return isinstance(other, _PositiveInfinity)
+
+    def __ne__(self, other: Any) -> bool:
+        return not isinstance(other, _PositiveInfinity)
+
+    def __hash__(self) -> int:
+        return hash("__POSITIVE_INFINITY__")
+
+
+POS_INF = _PositiveInfinity()
+
+
+def key_gt(a: Any, b: Any) -> bool:
+    if a is POS_INF:
+        return b is not POS_INF
+    if b is POS_INF:
+        return False
+    return a > b
+
+
+def key_ge(a: Any, b: Any) -> bool:
+    if b is POS_INF:
+        return a is POS_INF
+    if a is POS_INF:
+        return True
+    return a >= b
+
+
+def key_le(a: Any, b: Any) -> bool:
+    if b is POS_INF:
+        return True
+    if a is POS_INF:
+        return False
+    return a <= b
+
+
+def key_lt(a: Any, b: Any) -> bool:
+    if a is POS_INF:
+        return False
+    if b is POS_INF:
+        return True
+    return a < b
+
+
+def key_eq(a: Any, b: Any) -> bool:
+    if a is POS_INF:
+        return b is POS_INF
+    if b is POS_INF:
+        return False
+    return a == b
+
+
+# =====================================================================
+# 2. B-Link Node Architecture
+# =====================================================================
+
+class BLinkNode:
+    __slots__ = (
+        'node_id', 'level', 'high_key', 'link_ptr',
+        'keys', 'values', 'children', 'lock'
+    )
+
+    def __init__(
+        self,
+        node_id: int,
+        level: int,
+        high_key: Any = POS_INF,
+        link_ptr: Optional[int] = None,
+        keys: Optional[List[Any]] = None,
+        values: Optional[List[Any]] = None,
+        children: Optional[List[int]] = None,
+    ):
+        self.node_id: int = node_id
+        self.level: int = level
+        self.high_key: Any = high_key
+        self.link_ptr: Optional[int] = link_ptr
+        self.keys: List[Any] = list(keys) if keys is not None else []
+        self.values: List[Any] = list(values) if values is not None else []
+        self.children: List[int] = list(children) if children is not None else []
+        self.lock = threading.RLock()
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.level == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        with self.lock:
+            hk = "+inf" if self.high_key is POS_INF else self.high_key
+            return {
+                "node_id": self.node_id,
+                "level": self.level,
+                "high_key": hk,
+                "link_ptr": self.link_ptr,
+                "keys": self.keys,
+                "values": self.values if self.is_leaf else [],
+                "children": self.children if not self.is_leaf else [],
+            }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'BLinkNode':
+        hk = POS_INF if data.get("high_key") == "+inf" else data.get("high_key")
+        return cls(
+            node_id=data["node_id"],
+            level=data["level"],
+            high_key=hk,
+            link_ptr=data.get("link_ptr"),
+            keys=data.get("keys", []),
+            values=data.get("values", []),
+            children=data.get("children", []),
+        )
+
+
+# =====================================================================
+# 3. Write-Ahead Log (WAL) Durability Engine
+# =====================================================================
+
+WAL_MAGIC = b"BLINK_WAL_V1\x00\x00\x00\x00"
+OP_PUT = 1
+OP_DELETE = 2
+OP_CHECKPOINT = 3
+
+@dataclasses.dataclass
+class WALRecord:
+    lsn: int
+    timestamp: float
+    op_type: int
+    key: Any
+    value: Any
+
+
+class WriteAheadLog:
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path)
+        self.lock = threading.RLock()
+        self._file = None
+        self._current_lsn = 0
+        self._init_wal()
+
+    def _init_wal(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            with open(self.path, "wb") as f:
+                f.write(WAL_MAGIC)
+                f.flush()
+                os.fsync(f.fileno())
+
+    def _open_file(self):
+        if self._file is None or self._file.closed:
+            self._file = open(self.path, "a+b")
+        return self._file
+
+    def close(self) -> None:
+        with self.lock:
+            if self._file and not self._file.closed:
+                self._file.flush()
+                os.fsync(self._file.fileno())
+                self._file.close()
+                self._file = None
+
+    def append(self, op_type: int, key: Any, value: Any = None) -> int:
+        with self.lock:
+            self._current_lsn += 1
+            lsn = self._current_lsn
+            ts = time.time()
+
+            key_bytes = json.dumps(key).encode("utf-8")
+            val_bytes = json.dumps(value).encode("utf-8") if value is not None else b""
+
+            header_data = struct.pack(
+                ">QdBHI",
+                lsn,
+                ts,
+                op_type,
+                len(key_bytes),
+                len(val_bytes),
+            )
+            payload = header_data + key_bytes + val_bytes
+            crc = zlib.crc32(payload) & 0xFFFFFFFF
+            frame = struct.pack(">I", crc) + payload
+
+            f = self._open_file()
+            f.write(frame)
+            f.flush()
+            os.fsync(f.fileno())
+            return lsn
+
+    def replay(self) -> List[WALRecord]:
+        records = []
+        if not self.path.exists():
+            return records
+
+        with open(self.path, "rb") as f:
+            magic = f.read(len(WAL_MAGIC))
+            if magic != WAL_MAGIC:
+                raise ValueError(f"Invalid WAL magic header in {self.path}")
+
+            while True:
+                crc_bytes = f.read(4)
+                if not crc_bytes or len(crc_bytes) < 4:
+                    break
+                expected_crc = struct.unpack(">I", crc_bytes)[0]
+
+                header_bytes = f.read(23)
+                if not header_bytes or len(header_bytes) < 23:
+                    break
+                lsn, ts, op_type, key_len, val_len = struct.unpack(">QdBHI", header_bytes)
+
+                key_bytes = f.read(key_len)
+                val_bytes = f.read(val_len)
+                if len(key_bytes) < key_len or len(val_bytes) < val_len:
+                    break
+
+                payload = header_bytes + key_bytes + val_bytes
+                actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
+                if actual_crc != expected_crc:
+                    print(f"⚠️ WAL CRC32 mismatch at LSN {lsn}: expected {expected_crc}, got {actual_crc}. Truncating.", file=sys.stderr)
+                    break
+
+                key = json.loads(key_bytes.decode("utf-8"))
+                val = json.loads(val_bytes.decode("utf-8")) if val_bytes else None
+
+                records.append(WALRecord(lsn=lsn, timestamp=ts, op_type=op_type, key=key, value=val))
+                self._current_lsn = max(self._current_lsn, lsn)
+
+        return records
+
+    def truncate(self) -> None:
+        with self.lock:
+            self.close()
+            with open(self.path, "wb") as f:
+                f.write(WAL_MAGIC)
+                f.flush()
+                os.fsync(f.fileno())
+
+
+# =====================================================================
+# 4. Lehman-Yao B-Link Tree Core Engine
+# =====================================================================
+
+class BLinkTree:
+    def __init__(self, fanout: int = 4, wal: Optional[WriteAheadLog] = None):
+        if fanout < 2:
+            raise ValueError("B-Link tree fanout (degree B) must be >= 2")
+        self.fanout: int = fanout
+        self.max_keys: int = 2 * fanout
+        self.wal: Optional[WriteAheadLog] = wal
+
+        self.tree_lock = threading.RLock()
+        self.nodes: Dict[int, BLinkNode] = {}
+        self._next_node_id: int = 1
+
+        root_leaf = self._allocate_node(level=0, high_key=POS_INF, link_ptr=None)
+        self.root_id: int = root_leaf.node_id
+
+        self.split_count: int = 0
+        self.move_right_count: int = 0
+        self.total_inserts: int = 0
+        self.total_reads: int = 0
+
+    def _allocate_node(
+        self,
+        level: int,
+        high_key: Any = POS_INF,
+        link_ptr: Optional[int] = None,
+        keys: Optional[List[Any]] = None,
+        values: Optional[List[Any]] = None,
+        children: Optional[List[int]] = None,
+    ) -> BLinkNode:
+        with self.tree_lock:
+            nid = self._next_node_id
+            self._next_node_id += 1
+            node = BLinkNode(
+                node_id=nid,
+                level=level,
+                high_key=high_key,
+                link_ptr=link_ptr,
+                keys=keys,
+                values=values,
+                children=children,
+            )
+            self.nodes[nid] = node
+            return node
+
+    def get_node(self, node_id: int) -> BLinkNode:
+        with self.tree_lock:
+            return self.nodes[node_id]
+
+    def _move_right(self, curr_node: BLinkNode, key: Any) -> BLinkNode:
+        while curr_node.high_key is not POS_INF and key_gt(key, curr_node.high_key):
+            self.move_right_count += 1
+            if curr_node.link_ptr is None:
+                break
+            curr_node = self.get_node(curr_node.link_ptr)
+        return curr_node
+
+    def _find_leaf(self, key: Any) -> BLinkNode:
+        with self.tree_lock:
+            curr = self.get_node(self.root_id)
+
+        while not curr.is_leaf:
+            curr = self._move_right(curr, key)
+            if curr.is_leaf:
+                break
+
+            keys = curr.keys
+            children = curr.children
+
+            idx = 0
+            found = False
+            for i, k in enumerate(keys):
+                if key_le(key, k):
+                    idx = i
+                    found = True
+                    break
+            if not found:
+                idx = len(keys)
+
+            next_id = children[idx]
+            curr = self.get_node(next_id)
+
+        curr = self._move_right(curr, key)
+        return curr
+
+    def get(self, key: Any) -> Optional[Any]:
+        self.total_reads += 1
+        leaf = self._find_leaf(key)
+        leaf = self._move_right(leaf, key)
+
+        keys = leaf.keys
+        for i, k in enumerate(keys):
+            if key_eq(k, key):
+                return leaf.values[i]
+            if key_lt(key, k):
+                break
+        return None
+
+    def __contains__(self, key: Any) -> bool:
+        return self.get(key) is not None
+
+    def put(self, key: Any, value: Any) -> None:
+        if self.wal:
+            self.wal.append(OP_PUT, key, value)
+
+        self.total_inserts += 1
+        stack: List[Tuple[int, int]] = []
+
+        with self.tree_lock:
+            curr = self.get_node(self.root_id)
+
+        while not curr.is_leaf:
+            curr = self._move_right(curr, key)
+            if curr.is_leaf:
+                break
+
+            keys = curr.keys
+            children = curr.children
+
+            idx = 0
+            found = False
+            for i, k in enumerate(keys):
+                if key_le(key, k):
+                    idx = i
+                    found = True
+                    break
+            if not found:
+                idx = len(keys)
+
+            parent_id = curr.node_id
+            child_id = children[idx]
+            stack.append((parent_id, child_id))
+            curr = self.get_node(child_id)
+
+        leaf = self._move_right(curr, key)
+
+        with leaf.lock:
+            leaf = self._move_right(leaf, key)
+
+            for i, k in enumerate(leaf.keys):
+                if key_eq(k, key):
+                    leaf.values[i] = value
+                    return
+
+            insert_idx = 0
+            while insert_idx < len(leaf.keys) and key_lt(leaf.keys[insert_idx], key):
+                insert_idx += 1
+
+            leaf.keys.insert(insert_idx, key)
+            leaf.values.insert(insert_idx, value)
+
+            if len(leaf.keys) < self.max_keys:
+                return
+
+            self.split_count += 1
+            mid = len(leaf.keys) // 2
+
+            left_keys = leaf.keys[:mid]
+            left_values = leaf.values[:mid]
+            right_keys = leaf.keys[mid:]
+            right_values = leaf.values[mid:]
+
+            split_key = left_keys[-1]
+
+            right_node = self._allocate_node(
+                level=0,
+                high_key=leaf.high_key,
+                link_ptr=leaf.link_ptr,
+                keys=right_keys,
+                values=right_values,
+            )
+
+            leaf.keys = left_keys
+            leaf.values = left_values
+            leaf.link_ptr = right_node.node_id
+            leaf.high_key = split_key
+
+        self._insert_into_parent(leaf.node_id, split_key, right_node.node_id, stack)
+
+    def _insert_into_parent(
+        self,
+        left_id: int,
+        split_key: Any,
+        right_id: int,
+        stack: List[Tuple[int, int]],
+    ) -> None:
+        if not stack:
+            with self.tree_lock:
+                left_node = self.get_node(left_id)
+                new_root = self._allocate_node(
+                    level=left_node.level + 1,
+                    high_key=POS_INF,
+                    link_ptr=None,
+                    keys=[split_key],
+                    children=[left_id, right_id],
+                )
+                self.root_id = new_root.node_id
+            return
+
+        parent_id, _ = stack.pop()
+        parent = self.get_node(parent_id)
+
+        with parent.lock:
+            while left_id not in parent.children:
+                if parent.link_ptr is None:
+                    break
+                parent = self.get_node(parent.link_ptr)
+
+            if left_id not in parent.children:
+                with self.tree_lock:
+                    new_root = self._allocate_node(
+                        level=parent.level + 1,
+                        high_key=POS_INF,
+                        link_ptr=None,
+                        keys=[split_key],
+                        children=[left_id, right_id],
+                    )
+                    self.root_id = new_root.node_id
+                return
+
+            idx = parent.children.index(left_id)
+            parent.keys.insert(idx, split_key)
+            parent.children.insert(idx + 1, right_id)
+
+            if len(parent.keys) < self.max_keys:
+                return
+
+            self.split_count += 1
+            mid = len(parent.keys) // 2
+            parent_split_key = parent.keys[mid]
+
+            left_keys = parent.keys[:mid]
+            left_children = parent.children[:mid + 1]
+
+            right_keys = parent.keys[mid + 1:]
+            right_children = parent.children[mid + 1:]
+
+            right_parent = self._allocate_node(
+                level=parent.level,
+                high_key=parent.high_key,
+                link_ptr=parent.link_ptr,
+                keys=right_keys,
+                children=right_children,
+            )
+
+            parent.keys = left_keys
+            parent.children = left_children
+            parent.link_ptr = right_parent.node_id
+            parent.high_key = parent_split_key
+
+        self._insert_into_parent(parent.node_id, parent_split_key, right_parent.node_id, stack)
+
+    def delete(self, key: Any) -> bool:
+        if self.wal:
+            self.wal.append(OP_DELETE, key, None)
+
+        leaf = self._find_leaf(key)
+        with leaf.lock:
+            leaf = self._move_right(leaf, key)
+            for i, k in enumerate(leaf.keys):
+                if key_eq(k, key):
+                    leaf.keys.pop(i)
+                    leaf.values.pop(i)
+                    return True
+        return False
+
+    def scan(
+        self,
+        start_key: Optional[Any] = None,
+        end_key: Optional[Any] = None,
+        limit: Optional[int] = None,
+    ) -> List[Tuple[Any, Any]]:
+        results: List[Tuple[Any, Any]] = []
+
+        if start_key is not None:
+            curr = self._find_leaf(start_key)
+            curr = self._move_right(curr, start_key)
+        else:
+            with self.tree_lock:
+                curr = self.get_node(self.root_id)
+            while not curr.is_leaf:
+                curr = self.get_node(curr.children[0])
+
+        visited_nodes: Set[int] = set()
+
+        while curr is not None and curr.node_id not in visited_nodes:
+            visited_nodes.add(curr.node_id)
+            keys = curr.keys
+            values = curr.values
+
+            for k, v in zip(keys, values):
+                if start_key is not None and key_lt(k, start_key):
+                    continue
+                if end_key is not None and key_gt(k, end_key):
+                    return results
+                results.append((k, v))
+                if limit is not None and len(results) >= limit:
+                    return results
+
+            if curr.link_ptr is None:
+                break
+            curr = self.get_node(curr.link_ptr)
+
+        return results
+
+    def verify_invariants(self) -> Dict[str, Any]:
+        errors = []
+        with self.tree_lock:
+            root = self.get_node(self.root_id)
+
+        levels: Dict[int, List[BLinkNode]] = {}
+        for node in self.nodes.values():
+            levels.setdefault(node.level, []).append(node)
+
+        for nid, node in self.nodes.items():
+            for i in range(len(node.keys) - 1):
+                if not key_lt(node.keys[i], node.keys[i + 1]):
+                    errors.append(f"Node {nid} keys not strictly sorted: {node.keys}")
+
+            if node.keys and node.high_key is not POS_INF:
+                if key_gt(node.keys[-1], node.high_key):
+                    errors.append(f"Node {nid} max key {node.keys[-1]} exceeds high_key {node.high_key}")
+
+            if not node.is_leaf:
+                if len(node.children) != len(node.keys) + 1:
+                    errors.append(
+                        f"Internal node {nid} has {len(node.children)} children but {len(node.keys)} keys"
+                    )
+
+        for lvl, nlist in levels.items():
+            incoming = {n.link_ptr for n in nlist if n.link_ptr is not None}
+            leftmost = [n for n in nlist if n.node_id not in incoming]
+            if not leftmost:
+                errors.append(f"Level {lvl} has a cyclic right-link structure!")
+                continue
+
+            curr = leftmost[0]
+            visited = set()
+            while curr is not None:
+                if curr.node_id in visited:
+                    errors.append(f"Level {lvl} contains right-link cycle at node {curr.node_id}")
+                    break
+                visited.add(curr.node_id)
+                if curr.link_ptr is not None:
+                    curr = self.get_node(curr.link_ptr)
+                else:
+                    curr = None
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "total_nodes": len(self.nodes),
+            "depth": max(levels.keys()) + 1 if levels else 0,
+            "levels": {lvl: len(nlist) for lvl, nlist in levels.items()},
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        all_keys = self.scan()
+        leaf_nodes = [n for n in self.nodes.values() if n.is_leaf]
+        internal_nodes = [n for n in self.nodes.values() if not n.is_leaf]
+        levels = [n.level for n in self.nodes.values()]
+
+        leaf_key_counts = [len(n.keys) for n in leaf_nodes]
+        avg_leaf_fill = (sum(leaf_key_counts) / len(leaf_key_counts)) if leaf_key_counts else 0.0
+
+        return {
+            "depth": max(levels) + 1 if levels else 0,
+            "total_nodes": len(self.nodes),
+            "internal_nodes": len(internal_nodes),
+            "leaf_nodes": len(leaf_nodes),
+            "total_keys": len(all_keys),
+            "fanout_B": self.fanout,
+            "max_keys_per_node": self.max_keys,
+            "avg_leaf_fill": round(avg_leaf_fill, 2),
+            "splits_occurred": self.split_count,
+            "move_rights_performed": self.move_right_count,
+            "total_reads": self.total_reads,
+            "total_inserts": self.total_inserts,
+        }
+
+    def render_ascii_tree(self) -> str:
+        lines = []
+        with self.tree_lock:
+            root = self.get_node(self.root_id)
+
+        levels: Dict[int, List[BLinkNode]] = {}
+        for n in self.nodes.values():
+            levels.setdefault(n.level, []).append(n)
+
+        lines.append(bold(cyan("=== Lehman-Yao B-Link Tree ASCII Topology ===")))
+        lines.append(f"Fanout B={self.fanout} | Max Node Keys={self.max_keys} | Root ID={self.root_id}\n")
+
+        for lvl in sorted(levels.keys(), reverse=True):
+            lvl_name = f"Level {lvl} (Root)" if lvl == root.level else (f"Level {lvl} (Leaf)" if lvl == 0 else f"Level {lvl} (Internal)")
+            lines.append(bold(yellow(f"▼ {lvl_name}:")))
+
+            incoming = {n.link_ptr for n in levels[lvl] if n.link_ptr is not None}
+            leftmost = [n for n in levels[lvl] if n.node_id not in incoming]
+            start_node = leftmost[0] if leftmost else levels[lvl][0]
+
+            chain = []
+            curr = start_node
+            visited = set()
+            while curr and curr.node_id not in visited:
+                visited.add(curr.node_id)
+                hk_str = "+∞" if curr.high_key is POS_INF else str(curr.high_key)
+                keys_str = ", ".join(str(k) for k in curr.keys[:8])
+                if len(curr.keys) > 8:
+                    keys_str += f" ...(+{len(curr.keys)-8})"
+
+                node_box = (
+                    f"[{cyan(f'ID:{curr.node_id}')} | HK:{magenta(hk_str)} | "
+                    f"Keys:({green(keys_str)})]"
+                )
+                chain.append(node_box)
+                curr = self.get_node(curr.link_ptr) if curr.link_ptr else None
+
+            lines.append("  " + " ──link──> ".join(chain))
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def save_snapshot(self, path: Union[str, Path]) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "fanout": self.fanout,
+            "root_id": self.root_id,
+            "next_node_id": self._next_node_id,
+            "nodes": {str(nid): node.to_dict() for nid, node in self.nodes.items()},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    @classmethod
+    def load_snapshot(cls, path: Union[str, Path], wal: Optional[WriteAheadLog] = None) -> 'BLinkTree':
+        path = Path(path)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        tree = cls(fanout=data.get("fanout", 4), wal=wal)
+        tree.root_id = data["root_id"]
+        tree._next_node_id = data["next_node_id"]
+        tree.nodes = {int(nid): BLinkNode.from_dict(ndata) for nid, ndata in data["nodes"].items()}
+        return tree
+
+
+# =====================================================================
+# 5. Persistent Storage Engine with Automatic Crash Recovery
+# =====================================================================
+
+class BLinkEngine:
+    def __init__(self, data_dir: Union[str, Path], fanout: int = 4):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.wal_path = self.data_dir / "blink.wal"
+        self.snapshot_path = self.data_dir / "blink.snapshot"
+
+        self.wal = WriteAheadLog(self.wal_path)
+
+        if self.snapshot_path.exists():
+            self.tree = BLinkTree.load_snapshot(self.snapshot_path, wal=self.wal)
+        else:
+            self.tree = BLinkTree(fanout=fanout, wal=self.wal)
+
+        self._recover()
+
+    def _recover(self) -> None:
+        records = self.wal.replay()
+        if records:
+            for rec in records:
+                if rec.op_type == OP_PUT:
+                    prev_wal = self.tree.wal
+                    self.tree.wal = None
+                    try:
+                        self.tree.put(rec.key, rec.value)
+                    finally:
+                        self.tree.wal = prev_wal
+                elif rec.op_type == OP_DELETE:
+                    prev_wal = self.tree.wal
+                    self.tree.wal = None
+                    try:
+                        self.tree.delete(rec.key)
+                    finally:
+                        self.tree.wal = prev_wal
+
+    def put(self, key: Any, value: Any) -> None:
+        self.tree.put(key, value)
+
+    def get(self, key: Any) -> Optional[Any]:
+        return self.tree.get(key)
+
+    def delete(self, key: Any) -> bool:
+        return self.tree.delete(key)
+
+    def scan(self, start_key: Any = None, end_key: Any = None, limit: int = None):
+        return self.tree.scan(start_key, end_key, limit)
+
+    def checkpoint(self) -> None:
+        self.tree.save_snapshot(self.snapshot_path)
+        self.wal.truncate()
+
+    def close(self) -> None:
+        self.wal.close()
+
+
+# =====================================================================
+# 6. Multi-Threaded Concurrency Benchmark
+# =====================================================================
+
+def run_concurrency_benchmark(
+    num_threads: int = 8,
+    num_operations: int = 5000,
+    read_ratio: float = 0.8,
+    fanout: int = 4,
+) -> Dict[str, Any]:
+    tree = BLinkTree(fanout=fanout)
+    prefill_keys = 500
+    for i in range(prefill_keys):
+        tree.put(f"key_{i:06d}", f"val_{i}")
+
+    ops_per_thread = num_operations // num_threads
+    latencies: List[float] = []
+    lat_lock = threading.Lock()
+
+    def worker(tid: int):
+        rng = random.Random(42 + tid)
+        local_lats = []
+        for _ in range(ops_per_thread):
+            op = rng.random()
+            k_num = rng.randint(0, prefill_keys * 2)
+            k_str = f"key_{k_num:06d}"
+
+            t0 = time.perf_counter()
+            if op < read_ratio:
+                _ = tree.get(k_str)
+            else:
+                tree.put(k_str, f"worker_{tid}_val")
+            t1 = time.perf_counter()
+            local_lats.append((t1 - t0) * 1e6)
+
+        with lat_lock:
+            latencies.extend(local_lats)
+
+    t_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(worker, tid) for tid in range(num_threads)]
+        for f in as_completed(futures):
+            f.result()
+    t_end = time.perf_counter()
+
+    elapsed = t_end - t_start
+    total_ops = len(latencies)
+    throughput = total_ops / elapsed if elapsed > 0 else 0
+
+    latencies.sort()
+    p50 = latencies[int(total_ops * 0.50)] if latencies else 0.0
+    p95 = latencies[int(total_ops * 0.95)] if latencies else 0.0
+    p99 = latencies[int(total_ops * 0.99)] if latencies else 0.0
+
+    stats = tree.get_stats()
+    invariants = tree.verify_invariants()
+
+    return {
+        "num_threads": num_threads,
+        "total_operations": total_ops,
+        "read_ratio": read_ratio,
+        "elapsed_sec": round(elapsed, 4),
+        "throughput_ops_sec": round(throughput, 1),
+        "latency_p50_us": round(p50, 2),
+        "latency_p95_us": round(p95, 2),
+        "latency_p99_us": round(p99, 2),
+        "tree_splits": stats["splits_occurred"],
+        "move_rights": stats["move_rights_performed"],
+        "invariants_valid": invariants["valid"],
+        "tree_depth": stats["depth"],
+    }
+
+
+# =====================================================================
+# 7. Comprehensive Self-Verification Suite
+# =====================================================================
+
+def run_verification_suite() -> bool:
+    print(bold(cyan("🔍 Running Lehman-Yao B-Link Tree Verification Suite...")))
+
+    # 1. Basic CRUD & Invariants
+    print("  • [1/6] Testing Basic CRUD & Invariants with minimal fanout B=2...")
+    tree = BLinkTree(fanout=2)
+    for i in range(100):
+        tree.put(i, f"val_{i}")
+
+    for i in range(100):
+        val = tree.get(i)
+        assert val == f"val_{i}", f"Key {i} lookup failed: got {val}"
+
+    assert tree.get(999) is None, "Non-existent key lookup returned non-None"
+    inv = tree.verify_invariants()
+    assert inv["valid"], f"Invariants violated: {inv['errors']}"
+    print(green("    ✓ Basic CRUD and B=2 structural invariants validated."))
+
+    # 2. Deletions & Updates
+    print("  • [2/6] Testing In-Place Updates & Deletions...")
+    tree.put(50, "updated_50")
+    assert tree.get(50) == "updated_50", "Update failed"
+    del_res = tree.delete(50)
+    assert del_res is True, "Delete returned False for existing key"
+    assert tree.get(50) is None, "Key still exists after deletion"
+    assert tree.delete(999) is False, "Delete returned True for non-existent key"
+    print(green("    ✓ Updates and deletions verified."))
+
+    # 3. Direct Leaf Range Scan Accuracy
+    print("  • [3/6] Testing Direct Horizontal Leaf Range Scans...")
+    all_pairs = tree.scan()
+    assert len(all_pairs) == 99, f"Expected 99 keys, got {len(all_pairs)}"
+    sub_pairs = tree.scan(start_key=20, end_key=40)
+    expected_keys = [k for k in range(20, 41) if k != 50]
+    assert [k for k, _ in sub_pairs] == expected_keys, "Range scan keys mismatch"
+    print(green("    ✓ Range scans verified across right-link pointers."))
+
+    # 4. Write-Ahead Log Durability & Crash Recovery
+    print("  • [4/6] Testing Write-Ahead Log & Crash Recovery...")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = BLinkEngine(data_dir=tmpdir, fanout=3)
+        for i in range(50):
+            engine.put(f"user_{i}", f"data_{i}")
+        engine.delete("user_10")
+        engine.close()
+
+        recovered_engine = BLinkEngine(data_dir=tmpdir, fanout=3)
+        assert recovered_engine.get("user_0") == "data_0"
+        assert recovered_engine.get("user_49") == "data_49"
+        assert recovered_engine.get("user_10") is None
+        recovered_engine.close()
+    print(green("    ✓ WAL CRC32 framing and crash recovery verified."))
+
+    # 5. Concurrent Reader/Writer Stress Test
+    print("  • [5/6] Testing Multi-Threaded Concurrency (8 threads, B=3 splits)...")
+    bench = run_concurrency_benchmark(num_threads=8, num_operations=3000, read_ratio=0.7, fanout=3)
+    assert bench["invariants_valid"], "Concurrency stress broke B-Link invariants!"
+    print(green(f"    ✓ Concurrency stress passed: {bench['throughput_ops_sec']} ops/sec, {bench['tree_splits']} splits."))
+
+    # 6. String and Lexicographic Keys
+    print("  • [6/6] Testing Lexicographic String Keys...")
+    s_tree = BLinkTree(fanout=3)
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"]
+    for w in words:
+        s_tree.put(w, len(w))
+    for w in words:
+        assert s_tree.get(w) == len(w)
+    s_inv = s_tree.verify_invariants()
+    assert s_inv["valid"], f"String tree invariants violated: {s_inv['errors']}"
+    print(green("    ✓ Lexicographic string keys verified."))
+
+    print(bold(green("\n✨ All 6 Lehman-Yao B-Link Tree verification suites passed perfectly!\n")))
+    return True
+
+
+# =====================================================================
+# 8. Interactive CLI & Subcommand Dispatcher
+# =====================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Lehman-Yao B-Link Tree & High-Concurrency Latch-Free Storage Engine"
+    )
+    parser.add_argument("--db", type=str, default="./.blink_data", help="Directory for WAL & DB state")
+    parser.add_argument("--fanout", type=int, default=4, help="B-Link tree degree B (default 4)")
+
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommands")
+
+    p_put = subparsers.add_parser("put", help="Insert or update a key-value pair")
+    p_put.add_argument("key", type=str, help="Key to insert")
+    p_put.add_argument("value", type=str, help="Value to associate with key")
+
+    p_get = subparsers.add_parser("get", help="Retrieve value for key latch-free")
+    p_get.add_argument("key", type=str, help="Key to search")
+
+    p_del = subparsers.add_parser("delete", help="Delete key from tree")
+    p_del.add_argument("key", type=str, help="Key to delete")
+
+    p_scan = subparsers.add_parser("scan", help="Ordered range scan via right-link pointers")
+    p_scan.add_argument("--start", type=str, default=None, help="Start key (inclusive)")
+    p_scan.add_argument("--end", type=str, default=None, help="End key (inclusive)")
+    p_scan.add_argument("--limit", type=int, default=50, help="Max results")
+
+    subparsers.add_parser("tree", help="Render ASCII topology of tree levels & links")
+
+    p_bench = subparsers.add_parser("benchmark", help="Run multi-threaded concurrency benchmark")
+    p_bench.add_argument("--threads", type=int, default=8, help="Concurrent worker threads")
+    p_bench.add_argument("--ops", type=int, default=5000, help="Total operations")
+    p_bench.add_argument("--read-ratio", type=float, default=0.8, help="Ratio of reads (0.0 to 1.0)")
+
+    subparsers.add_parser("verify", help="Run self-testing invariant & durability verification")
+    subparsers.add_parser("stats", help="Display tree operational metrics")
+    subparsers.add_parser("checkpoint", help="Create snapshot and truncate WAL")
+    subparsers.add_parser("demo", help="Run interactive split & traversal demonstration")
+
+    args = parser.parse_args()
+
+    if not args.subcommand or args.subcommand == "demo":
+        print(bold(cyan("🚀 Lehman-Yao B-Link Tree Interactive Demonstration")))
+        tree = BLinkTree(fanout=2)
+        print("\nInserting 12 ordered keys with minimal fanout B=2 (forces frequent splits)...\n")
+        for i in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]:
+            tree.put(i, f"record_{i}")
+
+        print(tree.render_ascii_tree())
+        print(bold(green("Scanning range [25, 85] via horizontal leaf pointers:")))
+        for k, v in tree.scan(25, 85):
+            print(f"  • {k} -> {v}")
+
+        stats = tree.get_stats()
+        print(f"\nTree Stats: Depth={stats['depth']} | Total Nodes={stats['total_nodes']} | Splits={stats['splits_occurred']}")
+        return
+
+    if args.subcommand == "verify":
+        success = run_verification_suite()
+        sys.exit(0 if success else 1)
+
+    if args.subcommand == "benchmark":
+        print(bold(cyan(f"⚡ Benchmarking Lehman-Yao B-Link Tree ({args.threads} threads, {args.ops} ops)...\n")))
+        res = run_concurrency_benchmark(
+            num_threads=args.threads,
+            num_operations=args.ops,
+            read_ratio=args.read_ratio,
+            fanout=args.fanout,
+        )
+        print(f"  • Elapsed Time:         {res['elapsed_sec']} s")
+        print(f"  • Concurrent Ops/sec:   {bold(green(str(res['throughput_ops_sec'])))} ops/s")
+        print(f"  • Latency p50:          {res['latency_p50_us']} µs")
+        print(f"  • Latency p95:          {res['latency_p95_us']} µs")
+        print(f"  • Latency p99:          {res['latency_p99_us']} µs")
+        print(f"  • Node Splits:          {res['tree_splits']}")
+        print(f"  • Move-Rights:          {res['move_rights']}")
+        print(f"  • Tree Depth:           {res['tree_depth']}")
+        print(f"  • Invariants Intact:    {green('YES') if res['invariants_valid'] else red('NO')}")
+        return
+
+    engine = BLinkEngine(data_dir=args.db, fanout=args.fanout)
+    try:
+        if args.subcommand == "put":
+            engine.put(args.key, args.value)
+            print(green(f"✓ PUT {args.key} = {args.value}"))
+
+        elif args.subcommand == "get":
+            val = engine.get(args.key)
+            if val is not None:
+                print(f"{args.key} -> {green(str(val))}")
+            else:
+                print(red(f"Key '{args.key}' not found"), file=sys.stderr)
+                sys.exit(1)
+
+        elif args.subcommand == "delete":
+            res = engine.delete(args.key)
+            if res:
+                print(green(f"✓ DELETED {args.key}"))
+            else:
+                print(yellow(f"Key '{args.key}' did not exist"))
+
+        elif args.subcommand == "scan":
+            results = engine.scan(start_key=args.start, end_key=args.end, limit=args.limit)
+            print(cyan(f"Range scan returned {len(results)} items:"))
+            for k, v in results:
+                print(f"  {k} -> {v}")
+
+        elif args.subcommand == "tree":
+            print(engine.tree.render_ascii_tree())
+
+        elif args.subcommand == "stats":
+            stats = engine.tree.get_stats()
+            print(json.dumps(stats, indent=2))
+
+        elif args.subcommand == "checkpoint":
+            engine.checkpoint()
+            print(green("✓ Checkpoint completed and WAL truncated."))
+
+    finally:
+        engine.close()
+
+
+if __name__ == "__main__":
+    main()
