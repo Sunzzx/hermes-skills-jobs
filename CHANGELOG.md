@@ -591,3 +591,8 @@
 - **Title**: Titans Test-Time Neural Long-Term Memory (LTM) Engine
 - **Category**: research
 - **Description**: Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion.
+
+### [2026-11-04 02:36:09] - Evolved `multi-token-prediction`
+- **Title**: Multi-Token Prediction (MTP) & Speculative Drafting Engine
+- **Category**: systems
+- **Description**: DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting.

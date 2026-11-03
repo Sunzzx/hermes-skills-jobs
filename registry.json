@@ -1092,5 +1092,22 @@
       "DecoupledBackward"
     ],
     "evolved_at": "2026-11-04T01:09:06.041012"
+  },
+  {
+    "id": "multi-token-prediction",
+    "title": "Multi-Token Prediction (MTP) & Speculative Drafting Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting.",
+    "cli": "mtp-engine",
+    "evolved_at": "2026-11-04T02:36:09.475588",
+    "tags": [
+      "deepseek-v3",
+      "multi-token-prediction",
+      "mtp",
+      "speculative-decoding",
+      "transformer-inference",
+      "acceleration"
+    ]
   }
 ]
