@@ -538,3 +538,8 @@
 - **Title**: ZeRO: Zero Redundancy Optimizer (Stage 1, 2, 3 & Offload)
 - **Category**: systems
 - **Description**: Production-grade ZeRO memory optimization: Stage 1 (P_os), Stage 2 (P_os+g), Stage 3 (P_os+g+p), and CPU Offloading with exact mathematical AdamW equivalence.
+
+### [2026-11-03 08:17:39] - Evolved `pipeline-parallel`
+- **Title**: Megatron-LM 1F1B Pipeline Parallelism Engine
+- **Category**: systems
+- **Description**: Megatron-LM 1F1B and GPipe pipeline parallelism: activation stashing, bubble minimization, and machine-epsilon gradient equivalence.

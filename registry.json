@@ -954,5 +954,23 @@
       "spmd",
       "data-parallelism"
     ]
+  },
+  {
+    "id": "pipeline-parallel",
+    "title": "Megatron-LM 1F1B Pipeline Parallelism Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Megatron-LM 1F1B and GPipe pipeline parallelism: activation stashing, bubble minimization, and machine-epsilon gradient equivalence.",
+    "cli": "pipeline-parallel",
+    "evolved_at": "2026-11-03T08:17:39.458365",
+    "tags": [
+      "pipeline-parallelism",
+      "1f1b",
+      "gpipe",
+      "megatron-lm",
+      "distributed-training",
+      "activation-stashing",
+      "p2p-communication"
+    ]
   }
 ]
