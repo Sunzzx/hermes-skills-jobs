@@ -570,3 +570,8 @@
 - **Title**: DeepSpeed Ulysses & Sequence Parallelism Engine
 - **Category**: systems
 - **Description**: Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism.
+
+### [2026-11-03 18:54:31] - Evolved `sequence-parallel`
+- **Title**: DeepSpeed Ulysses & Sequence Parallelism Engine
+- **Category**: systems
+- **Description**: Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism.
