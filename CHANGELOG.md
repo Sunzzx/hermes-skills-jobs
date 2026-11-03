@@ -553,3 +553,10 @@
 - **Title**: RingAttention & Blockwise Parallel Context Engine
 - **Category**: systems
 - **Description**: Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.
+
+
+### [2026-11-03 12:11:02] - Evolved `multi-head-latent-attention`
+- **Title**: Multi-Head Latent Attention (MLA) & KV-Cache Compression Engine
+- **Category**: systems
+- **Description**: Multi-Head Latent Attention (DeepSeek-V2/V3) with low-rank joint KV compression, decoupled RoPE, and matrix absorption weight folding during autoregressive decoding.
+- **CLI**: `mla-engine` (`verify`, `benchmark`, `simulate`, `inspect`)

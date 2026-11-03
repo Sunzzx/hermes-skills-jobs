@@ -990,5 +990,24 @@
       "distributed-training",
       "p2p-communication"
     ]
+  },
+  {
+    "id": "multi-head-latent-attention",
+    "title": "Multi-Head Latent Attention (MLA) & KV-Cache Compression Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Multi-Head Latent Attention (DeepSeek-V2/V3) with low-rank joint KV compression, decoupled RoPE, and matrix absorption weight folding during autoregressive decoding.",
+    "cli": "mla-engine",
+    "evolved_at": "2026-11-03T12:11:02.908645",
+    "tags": [
+      "multi-head-latent-attention",
+      "mla",
+      "deepseek-v2",
+      "deepseek-v3",
+      "kv-cache-compression",
+      "decoupled-rope",
+      "matrix-absorption",
+      "transformer-inference"
+    ]
   }
 ]
