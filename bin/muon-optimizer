@@ -235,7 +235,7 @@ class TwoLayerMLP:
 def run_verification() -> bool:
     print(bold(cyan('=== Running Muon Mathematical Verification Suite ===')))
     all_passed = True
-    rng = np.random.default_rng(123)
+    rng = np.random.default_rng(42)
     G_sq = rng.normal(0.0, 1.0, size=(64, 64))
     O_sq = newton_schulz5(G_sq, steps=5)
     metrics_sq = compute_spectral_metrics(O_sq)
