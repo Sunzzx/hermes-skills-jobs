@@ -1,14 +1,14 @@
-# ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
+# ⚡ Hermes Autonomous Evolution Engine: Skills and Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-62-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-63-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (62 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (63 Evolved Skills and Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -74,10 +74,11 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Multi-Head Latent Attention (MLA) & KV-Cache Compression Engine** | `systems` | `mla-engine` | Multi-Head Latent Attention (DeepSeek-V2/V3) with low-rank joint KV compression, decoupled RoPE, and matrix absorption weight folding during autoregressive decoding. | `multi-head-latent-attention` `mla` `deepseek-v2` |
 | **State Space Duality (SSD) & Mamba-2 SSM-Attention Engine** | `systems` | `ssd-engine` | Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks. | `mamba-2` `ssm` `state-space-duality` |
 | **DeepSpeed Ulysses & Sequence Parallelism Engine** | `systems` | `sequence-parallel` | Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism. | `deepspeed-ulysses` `sequence-parallelism` `all-to-all` |
+| **Differential Attention (Diff-Transformer) and Noise Cancellation Engine** | `research` | `diff-attn` | Dual-softmax differential attention (A_diff = A1 - lambda * A2) eliminating attention noise, preventing attention sink drift, and amplifying Needle-In-A-Haystack retrieval. | `diff-transformer` `differential-attention` `noise-cancellation` |
 
 ---
 
-## 🛠️ Architecture & Automatic Hourly Dispatch
+## 🛠️ Architecture and Automatic Hourly Dispatch
 
 1. **Autonomous Heartbeat**: Hermes executes an hourly cron daemon (`hermes-hourly-evolution`) that identifies friction points in developer and operator workflows.
 2. **Instant Production Rigor**: Every evolved module includes:
@@ -91,7 +92,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin`):
 
 ```bash
-# Example: Inspect Mac memory, thermal pressure & zombie processes
+# Example: Inspect Mac memory, thermal pressure and zombie processes
 sysdoctor status
 
 # Example: Check active web ports and eliminate port conflicts
@@ -104,4 +105,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-03 18:54:31*
+*Last Evolved: 2026-11-03 21:38:06*

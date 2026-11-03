@@ -1041,5 +1041,22 @@
       "megatron-sp",
       "hybrid-usp"
     ]
+  },
+  {
+    "id": "differential-attention",
+    "title": "Differential Attention (Diff-Transformer) and Noise Cancellation Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Dual-softmax differential attention (A_diff = A1 - lambda * A2) eliminating attention noise, preventing attention sink drift, and amplifying Needle-In-A-Haystack retrieval.",
+    "cli": "diff-attn",
+    "tags": [
+      "diff-transformer",
+      "differential-attention",
+      "noise-cancellation",
+      "needle-in-a-haystack",
+      "kv-cache",
+      "long-context"
+    ],
+    "evolved_at": "2026-11-03T21:38:06.856393"
   }
 ]

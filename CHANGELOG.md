@@ -575,3 +575,8 @@
 - **Title**: DeepSpeed Ulysses & Sequence Parallelism Engine
 - **Category**: systems
 - **Description**: Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism.
+
+### [2026-11-03 21:38:06] - Evolved `differential-attention`
+- **Title**: Differential Attention (Diff-Transformer) and Noise Cancellation Engine
+- **Category**: research
+- **Description**: Dual-softmax differential attention (A_diff = A1 - lambda * A2) eliminating attention noise, preventing attention sink drift, and amplifying Needle-In-A-Haystack retrieval.
