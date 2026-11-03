@@ -1075,5 +1075,22 @@
       "SurpriseGating"
     ],
     "evolved_at": "2026-11-03T23:47:08.778384"
+  },
+  {
+    "id": "dualpipe",
+    "title": "DualPipe Bidirectional Pipeline Parallelism & Overlapping Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "DeepSeek-V3 DualPipe bidirectional pipeline parallelism with V-shaped pipeline folding, decoupled backward passes (B_X and B_W), and zero-bubble communication-computation overlapping.",
+    "cli": "dualpipe",
+    "tags": [
+      "DualPipe",
+      "DeepSeekV3",
+      "PipelineParallelism",
+      "BidirectionalPipeline",
+      "OverlappingCommCompute",
+      "DecoupledBackward"
+    ],
+    "evolved_at": "2026-11-04T01:09:06.041012"
   }
 ]

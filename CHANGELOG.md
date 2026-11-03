@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-04 01:09:06 +05:30] - Evolved `dualpipe`
+- **Title**: DualPipe Bidirectional Pipeline Parallelism & Overlapping Engine
+- **Category**: systems
+- **Description**: DeepSeek-V3 DualPipe bidirectional pipeline parallelism with symmetric V-shaped pipeline folding, decoupled backward pass (B_X input gradient dispatched asynchronously, B_W weight gradient overlapping with interconnect communication), near-zero bubble fraction (P-1)/(2M), and machine-epsilon numerical equivalence (< 1e-12) to monolithic execution.
+- **CLI**: `dualpipe` (`status`, `schedule`, `bench`, `verify`)
+
 ### [2026-10-31 01:45:00 +05:30] - Evolved `navier-stokes-2d`
 - **Title**: 2D Incompressible Navier-Stokes Fluid Dynamics Engine
 - **Category**: computational-science
