@@ -1,4 +1,4 @@
-"""Comprehensive Unit and Integration Test Suite for Muon Optimizer Engine.""
+"""Comprehensive Unit and Integration Test Suite for Muon Optimizer Engine."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ TwoLayerMLP = muon_optimizer.TwoLayerMLP
 
 
 class TestNewtonSchulz5(unittest.TestCase):
-    """Tests for the 5th-order Newton-Schulz polynomial iteration.""
+    """Unit tests for Newton-Schulz polynomial iteration."""
 
     def setUp(self):
         self.rng = np.random.default_rng(42)
@@ -42,7 +42,7 @@ class TestNewtonSchulz5(unittest.TestCase):
         O = newton_schulz5(G, steps=5)
         self.assertEqual(O.shape, (64, 64))
         metrics = compute_spectral_metrics(O)
-        # Singular values should be tightly clustered in [0.65, 1.15]
+        # Singular values should be tightly clustered in [0.60, 1.20]
         self.assertGreater(metrics["min_singular_value"], 0.60)
         self.assertLess(metrics["max_singular_value"], 1.20)
         self.assertLess(metrics["condition_number"], 2.0)
@@ -60,7 +60,6 @@ class TestNewtonSchulz5(unittest.TestCase):
         self.assertEqual(O.shape, (96, 32))
         metrics = compute_spectral_metrics(O)
         self.assertLess(metrics["condition_number"], 2.2)
-        # Aspect ratio scaling factor for 96x32 is sqrt(3) ~ 1.732
         expected_scale = math.sqrt(96 / 32)
         self.assertAlmostEqual(metrics["mean_singular_value"], expected_scale * 0.85, delta=0.4)
 
@@ -89,12 +88,11 @@ class TestNewtonSchulz5(unittest.TestCase):
         O = newton_schulz5(G, steps=5)
         Q_svd, S = exact_polar_decomposition(G)
         rel_diff = np.linalg.norm(O - Q_svd) / np.linalg.norm(Q_svd)
-        # NS5 approximates polar factor within ~20% relative error in 5 steps
         self.assertLess(rel_diff, 0.30)
 
 
 class TestMuonOptimizer(unittest.TestCase):
-    """Unit and integration tests for hybrid Muon + AdamW optimizer.""
+    """Unit and integration tests for hybrid Muon + AdamW optimizer."""
 
     def setUp(self):
         self.rng = np.random.default_rng(42)
@@ -121,11 +119,9 @@ class TestMuonOptimizer(unittest.TestCase):
         np.testing.assert_array_equal(self.b.grad, 0.0)
 
     def test_decoupled_weight_decay(self):
-        # When gradient is zero, weight decays by (1 - lr * wd)
         self.W.grad = np.zeros_like(self.W.data)
         self.b.grad = np.zeros_like(self.b.data)
         initial_W = self.W.data.copy()
-        initial_b = self.b.data.copy()
 
         lr = 0.02
         wd = 0.05
@@ -146,7 +142,6 @@ class TestMuonOptimizer(unittest.TestCase):
         state = opt.muon_states["W_test"]
         self.assertEqual(state.step, 1)
         self.assertIsNotNone(state.momentum_buffer)
-        # Buffer should equal (1 - 0.9) * grad
         expected_buf = 0.1 * grad
         np.testing.assert_allclose(state.momentum_buffer, expected_buf, rtol=1e-5)
 
@@ -158,7 +153,6 @@ class TestMuonOptimizer(unittest.TestCase):
         initial_b = b.data.copy()
         opt.step()
 
-        # AdamW step must update parameter values
         self.assertFalse(np.array_equal(b.data, initial_b))
         self.assertEqual(opt.adamw_states["bias_test"].step, 1)
 
@@ -166,7 +160,6 @@ class TestMuonOptimizer(unittest.TestCase):
         mlp = TwoLayerMLP(din=16, dhidden=32, dout=16, seed=42)
         opt1 = MuonOptimizer(mlp.params, lr=0.02, adamw_lr=0.003)
 
-        # Run 2 steps to populate states
         X = self.rng.normal(0.0, 1.0, size=(4, 16))
         pred, cache = mlp.forward(X)
         mlp.backward(cache, pred)
@@ -187,7 +180,7 @@ class TestMuonOptimizer(unittest.TestCase):
 
 
 class TestNeuralConvergence(unittest.TestCase):
-    """Tests optimization dynamics on non-linear MLP models.""
+    """Tests optimization dynamics on non-linear MLP models."""
 
     def test_mlp_training_convergence(self):
         mlp = TwoLayerMLP(din=32, dhidden=64, dout=32, seed=99)
@@ -206,13 +199,11 @@ class TestNeuralConvergence(unittest.TestCase):
 
         pred_final, _ = mlp.forward(X)
         loss_final = float(np.mean((pred_final - Y) ** 2))
-
-        # Loss should reduce substantially
         self.assertLess(loss_final, loss0 * 0.70)
 
 
 class TestCLIExecution(unittest.TestCase):
-    """Functional tests executing the bin/muon-optimizer CLI binary.""
+    """Functional tests executing the bin/muon-optimizer CLI binary."""
 
     def test_cli_status(self):
         res = subprocess.run([str(BIN_PATH), "status"], capture_output=True, text=True)
