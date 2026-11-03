@@ -980,7 +980,7 @@
     "type": "skill+tool",
     "description": "Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.",
     "cli": "ring-attention",
-    "evolved_at": "2026-11-03T09:35:00.000000",
+    "evolved_at": "2026-11-03T10:38:43.704375",
     "tags": [
       "ring-attention",
       "sequence-parallelism",

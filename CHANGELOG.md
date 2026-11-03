@@ -548,3 +548,8 @@
 - **Title**: RingAttention & Blockwise Parallel Context Engine
 - **Category**: systems
 - **Description**: Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.
+
+### [2026-11-03 10:38:43] - Evolved `ring-attention`
+- **Title**: RingAttention & Blockwise Parallel Context Engine
+- **Category**: systems
+- **Description**: Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.
