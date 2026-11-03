@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-56-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-57-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (56 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (57 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -68,6 +68,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Tachyon: Register Bytecode Virtual Machine and Tracing JIT Engine** | `systems` | `tachyon-jit` | High-Performance Register Bytecode Virtual Machine and Tracing JIT Engine: 3-address register ISA, CFG basic block partitioning, dominator tree analysis, loop detection, algebraic peephole optimizer, constant folding, and runtime tracing JIT compiler. | `BytecodeVM` `RegisterVM` `TracingJIT` |
 | **PagedAttention & Block-Paged KV-Cache Virtual Memory Engine** | `research` | `paged-attention` | Production-grade PagedAttention and virtual memory KV-cache engine: non-contiguous physical block allocation, zero external fragmentation, dynamic Copy-on-Write branching, Radix prefix caching, and online softmax over block memory. | `PagedAttention` `KVCache` `VirtualMemory` |
 | **Megatron-LM 1D Tensor Parallelism Engine** | `systems` | `tensor-parallel` | Production-grade 1D Tensor Parallelism execution engine: ColumnParallelLinear, RowParallelLinear, parallel multi-head self-attention with split QKV, parallel MLP with GeLU, vocab-parallel cross entropy, and simulated ring all-reduce/all-gather communication primitives with exact mathematical equivalence. | `TensorParallelism` `MegatronLM` `DistributedTraining` |
+| **ZeRO: Zero Redundancy Optimizer (Stage 1, 2, 3 & Offload)** | `systems` | `bin/zero-optimizer` | Production-grade ZeRO memory optimization: Stage 1 (P_os), Stage 2 (P_os+g), Stage 3 (P_os+g+p), and CPU Offloading with exact mathematical AdamW equivalence. | `distributed-training` `zero-redundancy-optimizer` `deepspeed` |
 
 ---
 
@@ -98,4 +99,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-03 04:37:41*
+*Last Evolved: 2026-11-03 05:59:05*

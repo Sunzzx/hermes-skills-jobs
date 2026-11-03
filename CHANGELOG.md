@@ -533,3 +533,8 @@
 - **Title**: Megatron-LM 1D Tensor Parallelism Engine
 - **Category**: systems
 - **Description**: Production-grade 1D Tensor Parallelism execution engine: ColumnParallelLinear, RowParallelLinear, parallel multi-head self-attention with split QKV, parallel MLP with GeLU, vocab-parallel cross entropy, and simulated ring all-reduce/all-gather communication primitives with exact mathematical equivalence.
+
+### [2026-11-03 05:59:05] - Evolved `zero-optimizer`
+- **Title**: ZeRO: Zero Redundancy Optimizer (Stage 1, 2, 3 & Offload)
+- **Category**: systems
+- **Description**: Production-grade ZeRO memory optimization: Stage 1 (P_os), Stage 2 (P_os+g), Stage 3 (P_os+g+p), and CPU Offloading with exact mathematical AdamW equivalence.
