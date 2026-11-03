@@ -374,7 +374,7 @@ class DeepSpeedUlyssesAttention:
         # Step 2: All-to-All-1 Collective Transposition (Sequence -> Head)
         Q_trans = self.comm.all_to_all_seq_to_head(Q_ranks)
         K_trans = self.comm.all_to_all_seq_to_head(K_ranks)
-        V_trans = self.comm.all_to_all_seq_to_head(V_trans)
+        V_trans = self.comm.all_to_all_seq_to_head(V_ranks)
 
         # Step 3: Local Attention Computation over full sequence S for local heads H/P
         O_trans: List[np.ndarray] = []
@@ -731,9 +731,7 @@ def render_ascii_simulation(world_size: int = 4, seq_len: int = 32, num_heads: i
     s_local = seq_len // world_size
     h_local = num_heads // world_size
 
-    print(f"Local per rank: Seq Slice={s_local} tokens, Head Slice={h_local} heads
-"")
-
+    print(f"Local per rank: Seq Slice={s_local} tokens, Head Slice={h_local} heads\n")
     print(bold("1. Initial Token & Head Partitioning (Before All-to-All 1):"))
     print("   ------------------------------------------------------------")
     for r in range(world_size):
@@ -745,7 +743,7 @@ def render_ascii_simulation(world_size: int = 4, seq_len: int = 32, num_heads: i
     print(bold("2. All-to-All Collective 1 (Sequence -> Head Transposition):"))
     print("   ------------------------------------------------------------")
     print("   Matrix Transpose: Each Rank p sends Head Slice q to Rank q:")
-    header = "   From \ To | " + " | ".join([f"Rank {c}" for c in range(world_size)])
+    header = r"   From \ To | " + " | ".join([f"Rank {c}" for c in range(world_size)])
     print(bold(header))
     print("   " + "-" * (len(header) - 3))
     for r in range(world_size):
@@ -767,7 +765,7 @@ def render_ascii_simulation(world_size: int = 4, seq_len: int = 32, num_heads: i
     print(bold("4. All-to-All Collective 2 (Head -> Sequence Transposition):"))
     print("   ------------------------------------------------------------")
     print("   Matrix Transpose: Each Rank p sends Token Slice q to Rank q:")
-    header2 = "   From \ To | " + " | ".join([f"Rank {c}" for c in range(world_size)])
+    header2 = r"   From \ To | " + " | ".join([f"Rank {c}" for c in range(world_size)])
     print(bold(header2))
     print("   " + "-" * (len(header2) - 3))
     for r in range(world_size):
@@ -808,17 +806,14 @@ def run_benchmark() -> None:
         print(f"{sl_str:<10} | {mono_str:<13} | {tp_str:<12} | {ul_str:<25} | {comm_str:<15}")
 
     print(bold("-" * 85))
-    print(dim("Analysis: At 1M context, Ulysses delivers an 8x linear memory reduction for activations,
-"))
-    print(dim("enabling 1-million token inference on standard 80GB HBM GPUs with deterministic All-to-All.
-"))
+    print(dim("Analysis: At 1M context, Ulysses delivers an 8x linear memory reduction for activations,\n"))
+    print(dim("enabling 1-million token inference on standard 80GB HBM GPUs with deterministic All-to-All.\n"))
     print(bold("=" * 85))
 
 
 def render_comparison_table() -> None:
     print()
-    print(bold("=== Sequence Parallelism Architecture Comparison ===
-"))
+    print(bold("=== Sequence Parallelism Architecture Comparison ===\n"))
     headers = ["Metric / Feature", "Megatron-SP", "DeepSpeed Ulysses", "RingAttention", "Hybrid USP (2D)"]
     fmt = "{:<24} | {:<16} | {:<18} | {:<16} | {:<18}"
     print(bold(fmt.format(*headers)))

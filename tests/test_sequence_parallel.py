@@ -14,11 +14,13 @@ import numpy as np
 repo_dir = Path(__file__).resolve().parent.parent
 bin_path = repo_dir / 'bin' / 'sequence-parallel'
 
-spec = importlib.util.spec_from_file_location("sequence_parallel", str(bin_path))
-if spec is None or spec.loader is None:
-    raise ImportError(f"Cannot load module from {bin_path}")
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("sequence_parallel", str(bin_path))
+spec = importlib.util.spec_from_loader("sequence_parallel", loader)
+assert spec is not None
 sp_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(sp_module)
+sys.modules["sequence_parallel"] = sp_module
+loader.exec_module(sp_module)
 
 SequenceParallelConfig = sp_module.SequenceParallelConfig
 SequenceCommunicator = sp_module.SequenceCommunicator
