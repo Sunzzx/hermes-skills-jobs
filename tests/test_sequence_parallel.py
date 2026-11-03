@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 import subprocess
 import sys
 import unittest
@@ -9,9 +11,12 @@ import unittest
 import numpy as np
 
 # Direct import of engine components from bin
-sys.path.insert(0, 'bin')
-import importlib.util
-spec = importlib.util.spec_from_file_location("sequence_parallel", "bin/sequence-parallel")
+repo_dir = Path(__file__).resolve().parent.parent
+bin_path = repo_dir / 'bin' / 'sequence-parallel'
+
+spec = importlib.util.spec_from_file_location("sequence_parallel", str(bin_path))
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load module from {bin_path}")
 sp_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sp_module)
 
@@ -67,10 +72,10 @@ class TestSequenceParallelEngine(unittest.TestCase):
 
         weights = (mono.W_q, mono.W_k, mono.W_v, mono.W_o)
         ulysses = DeepSpeedUlyssesAttention(cfg_causal, self.comm, weights=weights)
-        y_ulysses_shards = ulysses.forward(self.x_shards)
-        y_ulysses = np.concatenate(y_ulysses_shards, axis=1)
+        y_ulysses_causal_shards = ulysses.forward(self.x_shards)
+        y_ulysses_causal = np.concatenate(y_ulysses_causal_shards, axis=1)
 
-        max_diff = float(np.max(np.abs(y_mono - y_ulysses)))
+        max_diff = float(np.max(np.abs(y_mono - y_ulysses_causal)))
         self.assertLess(max_diff, 1e-11, f"Causal Ulysses numerical error too high: {max_diff}")
 
     def test_megatron_sp_equivalence(self):
@@ -107,19 +112,19 @@ class TestSequenceParallelEngine(unittest.TestCase):
         self.assertLess(prof["ulysses_peak_act_gb"], prof["monolithic_peak_act_gb"])
 
     def test_cli_execution_commands(self):
-        res_verify = subprocess.run([sys.executable, 'bin/sequence-parallel', 'verify'], capture_output=True, text=True)
+        res_verify = subprocess.run([sys.executable, str(bin_path), 'verify'], capture_output=True, text=True)
         self.assertEqual(res_verify.returncode, 0)
         self.assertIn('All Sequence Parallelism verifications passed', res_verify.stdout)
 
-        res_bench = subprocess.run([sys.executable, 'bin/sequence-parallel', 'bench'], capture_output=True, text=True)
+        res_bench = subprocess.run([sys.executable, str(bin_path), 'bench'], capture_output=True, text=True)
         self.assertEqual(res_bench.returncode, 0)
         self.assertIn('DeepSpeed Ulysses Memory & Scaling Benchmark', res_bench.stdout)
 
-        res_comp = subprocess.run([sys.executable, 'bin/sequence-parallel', 'compare'], capture_output=True, text=True)
+        res_comp = subprocess.run([sys.executable, str(bin_path), 'compare'], capture_output=True, text=True)
         self.assertEqual(res_comp.returncode, 0)
         self.assertIn('Sequence Parallelism Architecture Comparison', res_comp.stdout)
 
-        res_sim = subprocess.run([sys.executable, 'bin/sequence-parallel', 'simulate'], capture_output=True, text=True)
+        res_sim = subprocess.run([sys.executable, str(bin_path), 'simulate'], capture_output=True, text=True)
         self.assertEqual(res_sim.returncode, 0)
         self.assertIn('All-to-All Communication Schedule', res_sim.stdout)
 

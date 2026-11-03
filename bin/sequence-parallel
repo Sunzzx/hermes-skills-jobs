@@ -732,7 +732,7 @@ def render_ascii_simulation(world_size: int = 4, seq_len: int = 32, num_heads: i
     h_local = num_heads // world_size
 
     print(f"Local per rank: Seq Slice={s_local} tokens, Head Slice={h_local} heads
-")
+"")
 
     print(bold("1. Initial Token & Head Partitioning (Before All-to-All 1):"))
     print("   ------------------------------------------------------------")
