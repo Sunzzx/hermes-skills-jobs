@@ -543,3 +543,8 @@
 - **Title**: Megatron-LM 1F1B Pipeline Parallelism Engine
 - **Category**: systems
 - **Description**: Megatron-LM 1F1B and GPipe pipeline parallelism: activation stashing, bubble minimization, and machine-epsilon gradient equivalence.
+
+### [2026-11-03 09:35:00] - Evolved `ring-attention`
+- **Title**: RingAttention & Blockwise Parallel Context Engine
+- **Category**: systems
+- **Description**: Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.

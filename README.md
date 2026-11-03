@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-58-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-59-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (58 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (59 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -70,6 +70,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Megatron-LM 1D Tensor Parallelism Engine** | `systems` | `tensor-parallel` | Production-grade 1D Tensor Parallelism execution engine: ColumnParallelLinear, RowParallelLinear, parallel multi-head self-attention with split QKV, parallel MLP with GeLU, vocab-parallel cross entropy, and simulated ring all-reduce/all-gather communication primitives with exact mathematical equivalence. | `TensorParallelism` `MegatronLM` `DistributedTraining` |
 | **ZeRO: Zero Redundancy Optimizer (Stage 1, 2, 3 & Offload)** | `systems` | `bin/zero-optimizer` | Production-grade ZeRO memory optimization: Stage 1 (P_os), Stage 2 (P_os+g), Stage 3 (P_os+g+p), and CPU Offloading with exact mathematical AdamW equivalence. | `distributed-training` `zero-redundancy-optimizer` `deepspeed` |
 | **Megatron-LM 1F1B Pipeline Parallelism Engine** | `systems` | `pipeline-parallel` | Megatron-LM 1F1B and GPipe pipeline parallelism: activation stashing, bubble minimization, and machine-epsilon gradient equivalence. | `pipeline-parallelism` `1f1b` `gpipe` |
+| **RingAttention & Blockwise Parallel Context Engine** | `systems` | `ring-attention` | Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence. | `ring-attention` `sequence-parallelism` `infinite-context` |
 
 ---
 

@@ -972,5 +972,23 @@
       "activation-stashing",
       "p2p-communication"
     ]
+  },
+  {
+    "id": "ring-attention",
+    "title": "RingAttention & Blockwise Parallel Context Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence.",
+    "cli": "ring-attention",
+    "evolved_at": "2026-11-03T09:35:00.000000",
+    "tags": [
+      "ring-attention",
+      "sequence-parallelism",
+      "infinite-context",
+      "blockwise-transformers",
+      "online-softmax",
+      "distributed-training",
+      "p2p-communication"
+    ]
   }
 ]
