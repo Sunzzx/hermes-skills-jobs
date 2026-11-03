@@ -1024,5 +1024,22 @@
     ],
     "cli": "ssd-engine",
     "evolved_at": "2026-11-03T17:26:32.284137"
+  },
+  {
+    "id": "sequence-parallel",
+    "title": "DeepSpeed Ulysses & Sequence Parallelism Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism.",
+    "cli": "sequence-parallel",
+    "tags": [
+      "deepspeed-ulysses",
+      "sequence-parallelism",
+      "all-to-all",
+      "distributed-training",
+      "context-scaling",
+      "megatron-sp",
+      "hybrid-usp"
+    ]
   }
 ]

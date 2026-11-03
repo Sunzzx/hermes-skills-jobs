@@ -565,3 +565,8 @@
 - **Category**: systems
 - **Description**: Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks.
 - **CLI**: `ssd-engine` (`verify`, `inspect`)
+
+### [2026-11-03 18:52:46] - Evolved `sequence-parallel`
+- **Title**: DeepSpeed Ulysses & Sequence Parallelism Engine
+- **Category**: systems
+- **Description**: Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism.
