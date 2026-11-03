@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import sys, argparse, math, numpy as np
+
+def verify():
+    rng = np.random.RandomState(42)
+    B, T, H, D, P = 2, 32, 4, 16, 16
+    X = rng.randn(B, T, H, D)
+    Bin = rng.randn(B, T, H, P)
+    Cin = rng.randn(B, T, H, P)
+    dt = rng.uniform(0.01, 0.05, size=(B, T, H))
+    A = -np.exp(rng.uniform(math.log(0.1), math.log(5.0), size=(H,)))
+    
+    h = np.zeros((B, H, P, D))
+    Y_rec = np.zeros((B, T, H, D))
+    for t in range(T):
+        alpha = np.exp(dt[:, t, :] * A[None, :])
+        h = h * alpha[:, :, None, None] + Bin[:, t, :, :, None] * X[:, t, :, None, :]
+        Y_rec[:, t, :, :] = np.sum(Cin[:, t, :, :, None] * h, axis=2)
+        
+    Lambda = np.cumsum(dt * A[None, None, :], axis=1)
+    Y_attn = np.zeros((B, T, H, D))
+    mask = np.tril(np.ones((T, T), dtype=bool))
+    for b in range(B):
+        for h_idx in range(H):
+            lam = Lambda[b, :, h_idx]
+            diff = lam[:, None] - lam[None, :]
+            M = np.where(mask, np.exp(diff), 0.0)
+            S = M * (Cin[b, :, h_idx, :] @ Bin[b, :, h_idx, :].T)
+            Y_attn[b, :, h_idx, :] = S @ X[b, :, h_idx, :]
+            
+    diff = float(np.max(np.abs(Y_rec - Y_attn)))
+    print(f'Max diff recurrent vs dual attention: {diff:.3e}')
+    assert diff < 1e-11, f'Mismatch: {diff}'
+    print('State Space Duality verification passed!')
+
+def main():
+    p0 = sys.argv[1] if len(sys.argv) > 1 else 'verify'
+    if p0 == 'verify':
+        verify()
+    elif p0 == 'inspect':
+        print('State Space Duality (SSD) & Mamba-2 SSM-Attention Engine')
+
+if __name__ == '__main__':
+    main()

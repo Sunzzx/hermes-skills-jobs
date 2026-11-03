@@ -1009,5 +1009,20 @@
       "matrix-absorption",
       "transformer-inference"
     ]
+  },
+  {
+    "id": "state-space-duality",
+    "title": "State Space Duality (SSD) & Mamba-2 SSM-Attention Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks.",
+    "tags": [
+      "mamba-2",
+      "ssm",
+      "state-space-duality",
+      "linear-attention"
+    ],
+    "cli": "ssd-engine",
+    "evolved_at": "2026-11-03T17:26:32.284137"
   }
 ]

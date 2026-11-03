@@ -72,6 +72,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Megatron-LM 1F1B Pipeline Parallelism Engine** | `systems` | `pipeline-parallel` | Megatron-LM 1F1B and GPipe pipeline parallelism: activation stashing, bubble minimization, and machine-epsilon gradient equivalence. | `pipeline-parallelism` `1f1b` `gpipe` |
 | **RingAttention & Blockwise Parallel Context Engine** | `systems` | `ring-attention` | Infinite-context transformer scaling with overlapping P2P ring communication, blockwise online softmax, causal triangular schedule, and machine-epsilon gradient equivalence. | `ring-attention` `sequence-parallelism` `infinite-context` |
 | **Multi-Head Latent Attention (MLA) & KV-Cache Compression Engine** | `systems` | `mla-engine` | Multi-Head Latent Attention (DeepSeek-V2/V3) with low-rank joint KV compression, decoupled RoPE, and matrix absorption weight folding during autoregressive decoding. | `multi-head-latent-attention` `mla` `deepseek` `kv-compression` |
+| **State Space Duality (SSD) & Mamba-2 SSM-Attention Engine** | `systems` | `ssd-engine` | Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks | `mamba-2` `ssm` `state-space-duality` `linear-attention` |
 
 ---
 
@@ -102,4 +103,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-03 12:11:02*
+*Last Evolved: 2026-11-03 17:MM:32*

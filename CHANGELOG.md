@@ -560,3 +560,8 @@
 - **Category**: systems
 - **Description**: Multi-Head Latent Attention (DeepSeek-V2/V3) with low-rank joint KV compression, decoupled RoPE, and matrix absorption weight folding during autoregressive decoding.
 - **CLI**: `mla-engine` (`verify`, `benchmark`, `simulate`, `inspect`)
+## [2026-11-03 16:30] - State Space Duality (SSD) & Mamba-2 SSM-Attention Engine (`state-space-duality`)
+- **Title**: State Space Duality (SSD) & Mamba-2 SSM-Attention Engine
+- **Category**: systems
+- **Description**: Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks.
+- **CLI**: `ssd-engine` (`verify`, `inspect`)
