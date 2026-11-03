@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 import subprocess
 import sys
@@ -10,10 +11,14 @@ import unittest
 
 import numpy as np
 
-BIN_PATI = Path(__file__).resolve().parent.parent / \"bin\" / \"titans-ltm\"
-spec = importlib.util.spec_from_file_location(\"titans_ltm\", BIN_PATH)
+BIN_PATH = Path(__file__).resolve().parent.parent / "bin" / "titans-ltm"
+sys.path.insert(0, str(BIN_PATH.parent))
+loader = SourceFileLoader("titans_ltm", str(BIN_PATH))
+spec = importlib.util.spec_from_loader("titans_ltm", loader)
+assert spec is not None
 titans_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(titans_mod)
+sys.modules["titans_ltm"] = titans_mod
+loader.exec_module(titans_mod)
 
 TitansConfig = titans_mod.TitansConfig
 MatrixNeuralMemory = titans_mod.MatrixNeuralMemory
@@ -27,7 +32,8 @@ softmax = titans_mod.softmax
 sigmoid = titans_mod.sigmoid
 gelu = titans_mod.gelu
 rms_norm = titans_mod.rms_norm
-compute_rope_freqs = titans_mod.compute_rope_freqsJapply_rope = titans_mod.apply_rope
+compute_rope_freqs = titans_mod.compute_rope_freqs
+apply_rope = titans_mod.apply_rope
 
 
 class TestTitansMathematicalPrimitives(unittest.TestCase):
@@ -37,8 +43,8 @@ class TestTitansMathematicalPrimitives(unittest.TestCase):
     def test_softmax_properties(self):
         x = self.rng.randn(2, 4, 8) * 100.0
         probs = softmax(x, axis=-1)
-        self.trueTo(ntrue(np.all(probs >= 0.0))
-        self.trueTo(ntrue(np.all(probs <= 1.0))
+        self.assertTrue(np.all(probs >= 0.0))
+        self.assertTrue(np.all(probs <= 1.0))
         np.testing.assert_allclose(np.sum(probs, axis=-1), 1.0, rtol=1e-6)
 
     def test_sigmoid_properties(self):
@@ -92,11 +98,12 @@ class TestNeuralMemoryModules(unittest.TestCase):
                 mem.M[i, j] += eps
                 l_pos = 0.5 * np.sum((v - mem.retrieve(k)) ** 2)
                 mem.M[i, j] -= 2 * eps
-                l_neg = 0.5 * np.sum((v_hat - mem.retrieve(k)) ** 2)
+                l_neg = 0.5 * np.sum((v - mem.retrieve(k)) ** 2)
                 mem.M[i, j] += eps
                 numerical_grad[i, j] = (l_pos - l_neg) / (2.0 * eps)
 
         self.assertTrue(numerical_grad.shape == mem.M.shape)
+        np.testing.assert_allclose(analytical_grad, numerical_grad, rtol=1e-3, atol=1e-5)
 
     def test_surprise_decay_on_repetition(self):
         mem = MatrixNeuralMemory(d_key=16, d_val=16, base_lr=0.1)
@@ -116,7 +123,7 @@ class TestNeuralMemoryModules(unittest.TestCase):
         v = self.rng.randn(1, 8)
 
         v_initial = deep_mem.retrieve(k)
-        initial_loss = 0.5 * np.sum((v_hat - v_initial) ** 2)
+        initial_loss = 0.5 * np.sum((v - v_initial) ** 2)
 
         for _ in range(5):
             deep_mem.update_step(k, v)
@@ -139,20 +146,19 @@ class TestTitansComponentsAndFusion(unittest.TestCase):
         self.assertFalse(np.isnan(out).any())
 
     def test_persistent_memory_prefix(self):
-        pm = PersistentMemory(num_tokens=4, d_model=self.cfg.d_model,
-                              rng=self.rng)
+        pm = PersistentMemory(num_tokens=4, d_model=self.cfg.d_model, rng=self.rng)
         x = self.rng.randn(2, 10, self.cfg.d_model)
         prepended = pm.prepend_to(x)
         self.assertEqual(prepended.shape, (2, 14, self.cfg.d_model))
 
     def test_fusion_modes(self):
-        for mode in [\"MAG\", \"MAC\", \"MAL\"]:
+        for mode in ["MAG", "MAC", "MAL"]:
             cfg = TitansConfig(d_model=32, n_heads=2, d_head=16, d_ffn=64, fusion_mode=mode)
             layer = TitansLayer(cfg, self.rng)
             x = self.rng.randn(1, 8, cfg.d_model)
             out, info = layer.forward(x, update_memory=True)
             self.assertEqual(out.shape, x.shape)
-            self.assertEqual(info[\"fusion_mode\"], mode)
+            self.assertEqual(info["fusion_mode"], mode)
             self.assertFalse(np.isnan(out).any())
 
 
@@ -165,7 +171,7 @@ class TestTitansModelAndGeneration(unittest.TestCase):
         input_ids = np.array([[1, 5, 9, 14, 22]], dtype=np.int64)
         logits, info = self.model.forward(input_ids, update_memory=True)
         self.assertEqual(logits.shape, (1, 5, self.cfg.vocab_size))
-        self.assertIn(\"mean_surprise\", info)
+        self.assertIn("mean_surprise", info)
 
     def test_autoregressive_generation(self):
         prompt = [2, 7, 13]
@@ -176,24 +182,24 @@ class TestTitansModelAndGeneration(unittest.TestCase):
 
 class TestTitansCLIIntegration(unittest.TestCase):
     def test_cli_verify(self):
-        res = subprocess.run([str(BIN_PATH), \"verify\"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f\"CLI verify failed: {res.stderr}\")
-        self.assertIn(\"All Titans Mathematical and Architectural Verification Checks Passed\", res.stdout)
+        res = subprocess.run([str(BIN_PATH), "verify"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"CLI verify failed: {res.stderr}")
+        self.assertIn("All Titans Mathematical and Architectural Verification Checks Passed", res.stdout)
 
     def test_cli_bench_quick(self):
-        res = subprocess.run([str(BIN_PATH), \"bench\", \"--quick\"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f\"CLI bench failed: {res.stderr}\")
-        self.assertIn(\"Titans vs Standard Attention Scaling Benchmark\", res.stdout)
+        res = subprocess.run([str(BIN_PATH), "bench", "--quick"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"CLI bench failed: {res.stderr}")
+        self.assertIn("Titans vs Standard Attention Scaling Benchmark", res.stdout)
 
     def test_cli_needle(self):
-        res = subprocess.run([str(BIN_PATH), \"needle\", \"--length\", \"100\"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f\"CLI needle failed: {res.stderr}\")
-        self.assertIn(\"Needle successfully retained in Neural Long-Term Memory\", res.stdout)
+        res = subprocess.run([str(BIN_PATH), "needle", "--length", "100"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"CLI needle failed: {res.stderr}")
+        self.assertIn("Needle successfully retained in Neural Long-Term Memory", res.stdout)
 
     def test_cli_inspect(self):
-        res = subprocess.run([str(BIN_PATH), \"inspect\"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f\"CLI inspect failed: {res.stderr}\")
-        self.assertIn(\"Titans Layer Architecture Configuration\", res.stdout)
+        res = subprocess.run([str(BIN_PATH), "inspect"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"CLI inspect failed: {res.stderr}")
+        self.assertIn("Titans Layer Architecture Configuration", res.stdout)
 
 
 if __name__ == '__main__':

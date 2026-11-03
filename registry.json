@@ -1058,5 +1058,22 @@
       "long-context"
     ],
     "evolved_at": "2026-11-03T21:38:06.856393"
+  },
+  {
+    "id": "titans-neural-memory",
+    "title": "Titans Test-Time Neural Long-Term Memory (LTM) Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion.",
+    "cli": "titans-ltm",
+    "tags": [
+      "Titans",
+      "NeuralMemory",
+      "TestTimeLearning",
+      "LTM",
+      "LongContext",
+      "SurpriseGating"
+    ],
+    "evolved_at": "2026-11-03T23:47:08.778384"
   }
 ]

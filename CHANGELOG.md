@@ -580,3 +580,8 @@
 - **Title**: Differential Attention (Diff-Transformer) and Noise Cancellation Engine
 - **Category**: research
 - **Description**: Dual-softmax differential attention (A_diff = A1 - lambda * A2) eliminating attention noise, preventing attention sink drift, and amplifying Needle-In-A-Haystack retrieval.
+
+### [2026-11-03 23:47:08] - Evolved `titans-neural-memory`
+- **Title**: Titans Test-Time Neural Long-Term Memory (LTM) Engine
+- **Category**: research
+- **Description**: Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion.
