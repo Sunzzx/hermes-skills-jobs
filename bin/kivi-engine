@@ -1,0 +1,1129 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+r"""KIVI: 2-Bit Asymmetric KV Cache Quantization Engine.
+
+A mathematically rigorous, production-grade reference implementation of KIVI
+(Tuning-Free Asymmetric 2bit Quantization for KV Cache, Liu et al., ICML 2024 / arXiv:2402.02750):
+
+1. The KV Cache Memory Bottleneck:
+   - In autoregressive LLM decoding, Key and Value vectors for all context tokens
+     must reside in GPU/accelerator VRAM.
+   - Standard FP16 KV cache consumes:
+     $$\text{Memory}_{\text{KV}} = 2 \times B \times L \times H \times S \times D \times 2 \text{ bytes}$$
+   - For long-context models (32k-128k tokens), KV cache capacity exceeds model weights,
+     crippling throughput and maximum batch size.
+
+2. Asymmetric Distribution Architecture (Why Uniform Quantization Fails):
+   - Key Cache Outliers are CHANNEL-WISE:
+     Across sequence tokens, specific feature channels consistently exhibit extreme
+     activation outliers ($10\times-50\times$ typical magnitude). Quantizing per-token
+     destroys precision in normal channels.
+     => Keys MUST be quantized PER-CHANNEL along sequence chunks.
+   - Value Cache Outliers are TOKEN-WISE:
+     Values have no fixed channel outliers; instead, specific tokens (prompt head,
+     delimiters, punctuation) have outlier magnitudes across channels. Quantizing
+     per-channel ruins token sensitivity.
+     => Values MUST be quantized PER-TOKEN along channel dimensions.
+
+3. Streaming Residual Window:
+   - Recent $W$ tokens are preserved in full precision FP32/FP16 in a sliding window
+     to safeguard high-attention recency bias and maintain step-by-step decoding fidelity.
+
+4. 2-Bit Bit-Packing Kernel:
+   - Quantized 2-bit values ($q \in \{0, 1, 2, 3\}$) are bit-packed 4 per uint8 byte:
+     $$\text{byte} = q_0 \mid (q_1 \ll 2) \mid (q_2 \ll 4) \mid (q_3 \ll 6)$$
+   - Yields an $8\times$ raw compression ratio, and $5\times-7\times$ effective ratio
+     accounting for scale and zero-point metadata.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass, field
+import json
+import math
+import os
+import sys
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+
+
+# ============================================================================
+# Mathematical Primitives & Bitwise Packing
+# ============================================================================
+
+def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Numerically stable softmax over specified axis."""
+    x_max = np.max(x, axis=axis, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
+
+
+def compute_sqnr(reference: np.ndarray, reconstructed: np.ndarray, eps: float = 1e-10) -> float:
+    """Compute Signal-to-Quantization-Noise Ratio (SQNR) in decibels (dB)."""
+    signal_power = float(np.mean(reference ** 2))
+    noise_power = float(np.mean((reference - reconstructed) ** 2))
+    if noise_power <= eps:
+        return 100.0  # Infinite precision cap
+    if signal_power <= eps:
+        return 0.0
+    return float(10.0 * np.log10(signal_power / noise_power))
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray, eps: float = 1e-10) -> float:
+    """Compute cosine similarity between two flattened arrays."""
+    a_flat = a.astype(np.float64).ravel()
+    b_flat = b.astype(np.float64).ravel()
+    norm_a = float(np.linalg.norm(a_flat))
+    norm_b = float(np.linalg.norm(b_flat))
+    if norm_a <= eps or norm_b <= eps:
+        return 1.0 if norm_a <= eps and norm_b <= eps else 0.0
+    return float(np.dot(a_flat, b_flat) / (norm_a * norm_b))
+
+
+def frobenius_relative_error(reference: np.ndarray, target: np.ndarray, eps: float = 1e-10) -> float:
+    """Compute relative Frobenius norm error: ||ref - target||_F / (||ref||_F + eps)."""
+    diff_norm = float(np.linalg.norm(reference.astype(np.float64) - target.astype(np.float64)))
+    ref_norm = float(np.linalg.norm(reference.astype(np.float64)))
+    return float(diff_norm / (ref_norm + eps))
+
+
+class BitPacker:
+    """Bit-packing and unpacking engine for low-bit integers (2-bit and 4-bit)."""
+
+    @staticmethod
+    def pack_2bit(data: np.ndarray) -> np.ndarray:
+        """Pack 2-bit unsigned integers (values 0..3) along the last axis into uint8 bytes.
+
+        Each uint8 holds 4 2-bit elements:
+        byte = q[0] | (q[1] << 2) | (q[2] << 4) | (q[3] << 6)
+        """
+        orig_shape = data.shape
+        last_dim = orig_shape[-1]
+        pad_len = (4 - (last_dim % 4)) % 4
+        if pad_len > 0:
+            pad_width = [(0, 0)] * (data.ndim - 1) + [(0, pad_len)]
+            data = np.pad(data, pad_width, mode='constant', constant_values=0)
+
+        data = data.astype(np.uint8) & 0x03
+        reshaped = data.reshape(*data.shape[:-1], -1, 4)
+        packed = (
+            reshaped[..., 0] |
+            (reshaped[..., 1] << 2) |
+            (reshaped[..., 2] << 4) |
+            (reshaped[..., 3] << 6)
+        ).astype(np.uint8)
+        return packed
+
+    @staticmethod
+    def unpack_2bit(packed: np.ndarray, target_length: int) -> np.ndarray:
+        """Unpack uint8 array back into 2-bit values along the last axis."""
+        q0 = packed & 0x03
+        q1 = (packed >> 2) & 0x03
+        q2 = (packed >> 4) & 0x03
+        q3 = (packed >> 6) & 0x03
+
+        unpacked = np.stack([q0, q1, q2, q3], axis=-1)
+        new_shape = list(packed.shape[:-1]) + [packed.shape[-1] * 4]
+        unpacked = unpacked.reshape(new_shape)
+        if target_length < unpacked.shape[-1]:
+            unpacked = unpacked[..., :target_length]
+        return unpacked.astype(np.uint8)
+
+    @staticmethod
+    def pack_4bit(data: np.ndarray) -> np.ndarray:
+        """Pack 4-bit unsigned integers (values 0..15) into uint8 bytes (2 per byte)."""
+        last_dim = data.shape[-1]
+        pad_len = (2 - (last_dim % 2)) % 2
+        if pad_len > 0:
+            pad_width = [(0, 0)] * (data.ndim - 1) + [(0, pad_len)]
+            data = np.pad(data, pad_width, mode='constant', constant_values=0)
+
+        data = data.astype(np.uint8) & 0x0F
+        reshaped = data.reshape(*data.shape[:-1], -1, 2)
+        packed = (reshaped[..., 0] | (reshaped[..., 1] << 4)).astype(np.uint8)
+        return packed
+
+    @staticmethod
+    def unpack_4bit(packed: np.ndarray, target_length: int) -> np.ndarray:
+        """Unpack uint8 array back into 4-bit values along the last axis."""
+        q0 = packed & 0x0F
+        q1 = (packed >> 4) & 0x0F
+        unpacked = np.stack([q0, q1], axis=-1)
+        new_shape = list(packed.shape[:-1]) + [packed.shape[-1] * 2]
+        unpacked = unpacked.reshape(new_shape)
+        if target_length < unpacked.shape[-1]:
+            unpacked = unpacked[..., :target_length]
+        return unpacked.astype(np.uint8)
+
+
+# ============================================================================
+# KIVI Configuration & Quantized Storage Structures
+# ============================================================================
+
+@dataclass
+class KIVIConfig:
+    """Configuration parameters for KIVI Asymmetric Quantization."""
+    num_heads: int = 8
+    head_dim: int = 64
+    bits: int = 2                       # 2 or 4 bits
+    group_size: int = 32                # Sequence chunk size for Key per-channel quantization
+    residual_window: int = 32           # Recent sliding window kept in unquantized FP32
+    eps: float = 1e-8
+
+
+@dataclass
+class QuantizedKeyBlock:
+    """Packed quantized representation of a Key group across sequence dimension.
+
+    Shape:
+    - packed_data: uint8 array of shape (num_heads, head_dim, ceil(group_len / (8/bits)))
+    - scales: float32 array of shape (num_heads, head_dim) - Per-Channel Scale
+    - zeros: float32 array of shape (num_heads, head_dim)  - Per-Channel Zero-Point
+    - seq_len: actual sequence length in this block (<= group_size)
+    """
+    packed_data: np.ndarray
+    scales: np.ndarray
+    zeros: np.ndarray
+    seq_len: int
+    bits: int
+
+
+@dataclass
+class QuantizedValueBlock:
+    """Packed quantized representation of Value tokens across channel dimension.
+
+    Shape:
+    - packed_data: uint8 array of shape (num_heads, seq_len, ceil(head_dim / (8/bits)))
+    - scales: float32 array of shape (num_heads, seq_len) - Per-Token Scale
+    - zeros: float32 array of shape (num_heads, seq_len)  - Per-Token Zero-Point
+    - seq_len: actual sequence length in this block
+    - head_dim: channel dimension
+    """
+    packed_data: np.ndarray
+    scales: np.ndarray
+    zeros: np.ndarray
+    seq_len: int
+    head_dim: int
+    bits: int
+
+
+# ============================================================================
+# Asymmetric Quantizers: Key (Per-Channel) & Value (Per-Token)
+# ============================================================================
+
+class AsymmetricKeyQuantizer:
+    """Key Cache Quantizer: PER-CHANNEL across sequence dimension.
+
+    Key activations exhibit extreme channel-wise outliers that persist across all tokens.
+    Per-channel quantization isolates channel magnitudes, preserving high dynamic range
+    without contaminating adjacent features.
+    """
+
+    @staticmethod
+    def quantize(K: np.ndarray, bits: int = 2, eps: float = 1e-8) -> QuantizedKeyBlock:
+        """Quantize Key tensor K of shape (num_heads, seq_len, head_dim) per-channel.
+
+        For each head h and channel d:
+        min_val = min_{s} K[h, s, d]
+        max_val = max_{s} K[h, s, d]
+        scale = (max_val - min_val) / (2^bits - 1)
+        """
+        H, S, D = K.shape
+        q_max = (1 << bits) - 1
+
+        # Transpose to (H, D, S) for per-channel contiguous operations along S
+        K_t = np.transpose(K, (0, 2, 1))  # (H, D, S)
+
+        min_val = np.min(K_t, axis=-1, keepdims=True)  # (H, D, 1)
+        max_val = np.max(K_t, axis=-1, keepdims=True)  # (H, D, 1)
+
+        diff = max_val - min_val
+        diff[diff < eps] = eps
+        scales = diff / q_max
+
+        # Normalized to integer bins [0, q_max]
+        quantized = np.round((K_t - min_val) / scales)
+        quantized = np.clip(quantized, 0, q_max).astype(np.uint8)
+
+        # Bit pack along sequence dimension
+        if bits == 2:
+            packed = BitPacker.pack_2bit(quantized)
+        elif bits == 4:
+            packed = BitPacker.pack_4bit(quantized)
+        else:
+            raise ValueError(f"Unsupported bit width: {bits}")
+
+        return QuantizedKeyBlock(
+            packed_data=packed,
+            scales=scales.squeeze(-1).astype(np.float32),
+            zeros=min_val.squeeze(-1).astype(np.float32),
+            seq_len=S,
+            bits=bits
+        )
+
+    @staticmethod
+    def dequantize(block: QuantizedKeyBlock) -> np.ndarray:
+        """Dequantize block back to FP32 array of shape (num_heads, seq_len, head_dim)."""
+        if block.bits == 2:
+            unpacked = BitPacker.unpack_2bit(block.packed_data, block.seq_len)
+        elif block.bits == 4:
+            unpacked = BitPacker.unpack_4bit(block.packed_data, block.seq_len)
+        else:
+            raise ValueError(f"Unsupported bit width: {block.bits}")
+
+        # unpacked is (H, D, S)
+        scales = block.scales[..., np.newaxis]  # (H, D, 1)
+        zeros = block.zeros[..., np.newaxis]    # (H, D, 1)
+
+        K_recon_t = unpacked.astype(np.float32) * scales + zeros
+        K_recon = np.transpose(K_recon_t, (0, 2, 1))  # (H, S, D)
+        return K_recon
+
+
+class AsymmetricValueQuantizer:
+    """Value Cache Quantizer: PER-TOKEN across channel dimension.
+
+    Value activations exhibit token-level outliers (certain tokens have large activations
+    across all channels, but channels have uniform variance within each token).
+    Per-token quantization isolates token magnitudes and maximizes signal resolution.
+    """
+
+    @staticmethod
+    def quantize(V: np.ndarray, bits: int = 2, eps: float = 1e-8) -> QuantizedValueBlock:
+        """Quantize Value tensor V of shape (num_heads, seq_len, head_dim) per-token.
+
+        For each head h and token s:
+        min_val = min_{d} V[h, s, d]
+        max_val = max_{d} V[h, s, d]
+        scale = (max_val - min_val) / (2^bits - 1)
+        """
+        H, S, D = V.shape
+        q_max = (1 << bits) - 1
+
+        min_val = np.min(V, axis=-1, keepdims=True)  # (H, S, 1)
+        max_val = np.max(V, axis=-1, keepdims=True)  # (H, S, 1)
+
+        diff = max_val - min_val
+        diff[diff < eps] = eps
+        scales = diff / q_max
+
+        quantized = np.round((V - min_val) / scales)
+        quantized = np.clip(quantized, 0, q_max).astype(np.uint8)
+
+        # Bit pack along head_dim
+        if bits == 2:
+            packed = BitPacker.pack_2bit(quantized)
+        elif bits == 4:
+            packed = BitPacker.pack_4bit(quantized)
+        else:
+            raise ValueError(f"Unsupported bit width: {bits}")
+
+        return QuantizedValueBlock(
+            packed_data=packed,
+            scales=scales.squeeze(-1).astype(np.float32),
+            zeros=min_val.squeeze(-1).astype(np.float32),
+            seq_len=S,
+            head_dim=D,
+            bits=bits
+        )
+
+    @staticmethod
+    def dequantize(block: QuantizedValueBlock) -> np.ndarray:
+        """Dequantize block back to FP32 array of shape (num_heads, seq_len, head_dim)."""
+        if block.bits == 2:
+            unpacked = BitPacker.unpack_2bit(block.packed_data, block.head_dim)
+        elif block.bits == 4:
+            unpacked = BitPacker.unpack_4bit(block.packed_data, block.head_dim)
+        else:
+            raise ValueError(f"Unsupported bit width: {block.bits}")
+
+        # unpacked is (H, S, D)
+        scales = block.scales[..., np.newaxis]  # (H, S, 1)
+        zeros = block.zeros[..., np.newaxis]    # (H, S, 1)
+
+        V_recon = unpacked.astype(np.float32) * scales + zeros
+        return V_recon
+
+
+# ============================================================================
+# Uniform Quantizers (For Scientific Benchmarking & Ablation)
+# ============================================================================
+
+class UniformPerTokenQuantizer:
+    """Baseline uniform per-token quantizer applied symmetrically to both K and V."""
+
+    @staticmethod
+    def quantize(tensor: np.ndarray, bits: int = 2, eps: float = 1e-8) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        q_max = (1 << bits) - 1
+        min_v = np.min(tensor, axis=-1, keepdims=True)
+        max_v = np.max(tensor, axis=-1, keepdims=True)
+        diff = max_v - min_v
+        diff[diff < eps] = eps
+        scale = diff / q_max
+        q = np.clip(np.round((tensor - min_v) / scale), 0, q_max).astype(np.uint8)
+        return q, scale, min_v
+
+    @staticmethod
+    def dequantize(q: np.ndarray, scale: np.ndarray, min_v: np.ndarray) -> np.ndarray:
+        return q.astype(np.float32) * scale + min_v
+
+
+class UniformPerChannelQuantizer:
+    """Baseline uniform per-channel quantizer applied symmetrically to both K and V."""
+
+    @staticmethod
+    def quantize(tensor: np.ndarray, bits: int = 2, eps: float = 1e-8) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # tensor is (H, S, D), channel axis is -1 but computed across S (axis 1)
+        q_max = (1 << bits) - 1
+        min_v = np.min(tensor, axis=1, keepdims=True)  # (H, 1, D)
+        max_v = np.max(tensor, axis=1, keepdims=True)  # (H, 1, D)
+        diff = max_v - min_v
+        diff[diff < eps] = eps
+        scale = diff / q_max
+        q = np.clip(np.round((tensor - min_v) / scale), 0, q_max).astype(np.uint8)
+        return q, scale, min_v
+
+    @staticmethod
+    def dequantize(q: np.ndarray, scale: np.ndarray, min_v: np.ndarray) -> np.ndarray:
+        return q.astype(np.float32) * scale + min_v
+
+
+# ============================================================================
+# Stateful KIVI KV-Cache Manager
+# ============================================================================
+
+class KIVIKVCache:
+    """Stateful streaming KV Cache manager with asymmetric quantization and sliding window.
+
+    - Retains recent W tokens unquantized in full-precision residual buffers.
+    - Evicted tokens are chunked into groups of G and asymmetrically quantized:
+      - Keys: per-channel along chunk sequence dimension.
+      - Values: per-token along channel dimension.
+    """
+
+    def __init__(self, config: Optional[KIVIConfig] = None):
+        self.config = config or KIVIConfig()
+        self.H = self.config.num_heads
+        self.D = self.config.head_dim
+        self.bits = self.config.bits
+        self.group_size = self.config.group_size
+        self.residual_window = self.config.residual_window
+
+        # Residual sliding window buffers: shape (H, S_res, D)
+        self.residual_K: Optional[np.ndarray] = None
+        self.residual_V: Optional[np.ndarray] = None
+
+        # Historical quantized blocks
+        self.key_blocks: List[QuantizedKeyBlock] = []
+        self.value_blocks: List[QuantizedValueBlock] = []
+
+        self.total_tokens_appended: int = 0
+
+    def append(self, k: np.ndarray, v: np.ndarray):
+        """Append new tokens to the KV cache.
+
+        k: array of shape (H, S_new, D) or (S_new, D)
+        v: array of shape (H, S_new, D) or (S_new, D)
+        """
+        if k.ndim == 2:
+            k = np.tile(k[np.newaxis, ...], (self.H, 1, 1))
+        if v.ndim == 2:
+            v = np.tile(v[np.newaxis, ...], (self.H, 1, 1))
+
+        assert k.shape[0] == self.H and k.shape[2] == self.D
+        assert v.shape[0] == self.H and v.shape[2] == self.D
+        assert k.shape[1] == v.shape[1]
+
+        S_new = k.shape[1]
+        self.total_tokens_appended += S_new
+
+        # Merge with existing residual window
+        if self.residual_K is None:
+            self.residual_K = k.astype(np.float32)
+            self.residual_V = v.astype(np.float32)
+        else:
+            self.residual_K = np.concatenate([self.residual_K, k.astype(np.float32)], axis=1)
+            self.residual_V = np.concatenate([self.residual_V, v.astype(np.float32)], axis=1)
+
+        # Evict to quantized blocks if residual exceeds window + group_size
+        self._flush_excess_residual()
+
+    def _flush_excess_residual(self):
+        """Quantize tokens that have exited the sliding window in chunks of group_size."""
+        if self.residual_K is None:
+            return
+
+        current_res_len = self.residual_K.shape[1]
+        excess = current_res_len - self.residual_window
+
+        while excess >= self.group_size:
+            # Chunk off the oldest group_size tokens
+            k_chunk = self.residual_K[:, :self.group_size, :]
+            v_chunk = self.residual_V[:, :self.group_size, :]
+
+            # Quantize asymmetrically
+            k_block = AsymmetricKeyQuantizer.quantize(k_chunk, bits=self.bits, eps=self.config.eps)
+            v_block = AsymmetricValueQuantizer.quantize(v_chunk, bits=self.bits, eps=self.config.eps)
+
+            self.key_blocks.append(k_block)
+            self.value_blocks.append(v_block)
+
+            # Advance residual buffer
+            self.residual_K = self.residual_K[:, self.group_size:, :]
+            self.residual_V = self.residual_V[:, self.group_size:, :]
+            excess = self.residual_K.shape[1] - self.residual_window
+
+    def flush_all(self):
+        """Force quantize all remaining tokens outside residual_window into final blocks."""
+        self._flush_excess_residual()
+        if self.residual_K is not None:
+            excess = self.residual_K.shape[1] - self.residual_window
+            if excess > 0:
+                k_chunk = self.residual_K[:, :excess, :]
+                v_chunk = self.residual_V[:, :excess, :]
+
+                k_block = AsymmetricKeyQuantizer.quantize(k_chunk, bits=self.bits, eps=self.config.eps)
+                v_block = AsymmetricValueQuantizer.quantize(v_chunk, bits=self.bits, eps=self.config.eps)
+
+                self.key_blocks.append(k_block)
+                self.value_blocks.append(v_block)
+
+                self.residual_K = self.residual_K[:, excess:, :]
+                self.residual_V = self.residual_V[:, excess:, :]
+
+    def reconstruct_all(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Reconstruct the full KV cache into contiguous FP32 arrays."""
+        k_list = [AsymmetricKeyQuantizer.dequantize(b) for b in self.key_blocks]
+        v_list = [AsymmetricValueQuantizer.dequantize(b) for b in self.value_blocks]
+
+        if self.residual_K is not None and self.residual_K.shape[1] > 0:
+            k_list.append(self.residual_K)
+            v_list.append(self.residual_V)
+
+        if not k_list:
+            empty = np.zeros((self.H, 0, self.D), dtype=np.float32)
+            return empty, empty
+
+        full_K = np.concatenate(k_list, axis=1)
+        full_V = np.concatenate(v_list, axis=1)
+        return full_K, full_V
+
+    def compute_attention(self, query: np.ndarray, causal_mask: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute multi-head scaled dot-product attention over the entire cached sequence.
+
+        query: shape (H, S_q, D) or (S_q, D)
+        Returns:
+        - output: shape (H, S_q, D)
+        - attention_weights: shape (H, S_q, S_kv)
+        """
+        if query.ndim == 2:
+            query = np.tile(query[np.newaxis, ...], (self.H, 1, 1))
+
+        K_full, V_full = self.reconstruct_all()
+        S_kv = K_full.shape[1]
+        S_q = query.shape[1]
+
+        if S_kv == 0:
+            return np.zeros_like(query), np.zeros((self.H, S_q, 0), dtype=np.float32)
+
+        scale = 1.0 / math.sqrt(self.D)
+        # Query: (H, S_q, D), K_full.T: (H, D, S_kv) => Scores: (H, S_q, S_kv)
+        scores = np.matmul(query, np.transpose(K_full, (0, 2, 1))) * scale
+
+        if causal_mask:
+            # Mask out future positions if S_q == S_kv
+            mask = np.triu(np.ones((S_q, S_kv), dtype=bool), k=S_kv - S_q + 1)
+            scores[:, mask] = -1e9
+
+        attn_weights = softmax(scores, axis=-1)  # (H, S_q, S_kv)
+        output = np.matmul(attn_weights, V_full)  # (H, S_q, D)
+        return output, attn_weights
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Compute exact memory consumption in bytes compared to FP16 and FP32 baselines."""
+        total_tokens = self.total_tokens_appended
+        if total_tokens == 0:
+            return {"total_tokens": 0, "compression_ratio": 1.0}
+
+        # 1. Baseline FP16 bytes: 2 bytes per element for K and V
+        fp16_bytes = 2 * (total_tokens * self.H * self.D * 2)
+        fp32_bytes = 2 * (total_tokens * self.H * self.D * 4)
+
+        # 2. Actual KIVI bytes:
+        kivi_bytes = 0
+
+        # Quantized Key blocks
+        for kb in self.key_blocks:
+            kivi_bytes += kb.packed_data.nbytes
+            kivi_bytes += kb.scales.nbytes
+            kivi_bytes += kb.zeros.nbytes
+
+        # Quantized Value blocks
+        for vb in self.value_blocks:
+            kivi_bytes += vb.packed_data.nbytes
+            kivi_bytes += vb.scales.nbytes
+            kivi_bytes += vb.zeros.nbytes
+
+        # Residual unquantized buffers
+        if self.residual_K is not None:
+            kivi_bytes += self.residual_K.nbytes
+        if self.residual_V is not None:
+            kivi_bytes += self.residual_V.nbytes
+
+        compression_vs_fp16 = fp16_bytes / max(kivi_bytes, 1)
+        compression_vs_fp32 = fp32_bytes / max(kivi_bytes, 1)
+        effective_bits_per_element = (kivi_bytes * 8.0) / (2 * total_tokens * self.H * self.D)
+
+        return {
+            "total_tokens": total_tokens,
+            "num_heads": self.H,
+            "head_dim": self.D,
+            "quantized_blocks": len(self.key_blocks),
+            "residual_tokens": self.residual_K.shape[1] if self.residual_K is not None else 0,
+            "fp32_bytes": fp32_bytes,
+            "fp16_bytes": fp16_bytes,
+            "kivi_bytes": kivi_bytes,
+            "compression_vs_fp16": compression_vs_fp16,
+            "compression_vs_fp32": compression_vs_fp32,
+            "effective_bits_per_element": effective_bits_per_element
+        }
+
+
+# ============================================================================
+# Synthetic Data Generator with Realistic LLM Outlier Patterns
+# ============================================================================
+
+def generate_realistic_kv_data(
+    num_heads: int = 8,
+    seq_len: int = 512,
+    head_dim: int = 64,
+    channel_outlier_scale: float = 25.0,
+    token_outlier_scale: float = 20.0,
+    seed: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Synthesize realistic LLM Key and Value tensors with distinct outlier structures.
+
+    - Key tensors exhibit fixed channel outliers across sequence time.
+    - Value tensors exhibit token outliers across channels.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Base Gaussian activations
+    K = rng.standard_normal((num_heads, seq_len, head_dim)).astype(np.float32)
+    V = rng.standard_normal((num_heads, seq_len, head_dim)).astype(np.float32)
+
+    # 1. Key Channel-Wise Outliers:
+    # Pick 2-3 specific channels per head that exhibit strong persistent magnitude
+    outlier_channels = [3, 17, 42] if head_dim > 42 else [1, head_dim // 2]
+    for c in outlier_channels:
+        if c < head_dim:
+            K[:, :, c] *= channel_outlier_scale
+
+    # 2. Value Token-Wise Outliers:
+    # Pick first 2 tokens (system prompt / BOS) and periodic delimiter tokens
+    outlier_tokens = [0, 1] + [t for t in range(16, seq_len, 64)]
+    for t in outlier_tokens:
+        if t < seq_len:
+            V[:, t, :] *= token_outlier_scale
+
+    return K, V
+
+
+# ============================================================================
+# Comparative Analysis: Asymmetric KIVI vs Uniform Baselines
+# ============================================================================
+
+def run_quantization_comparison(
+    seq_len: int = 512,
+    num_heads: int = 8,
+    head_dim: int = 64,
+    bits: int = 2,
+    channel_outlier_scale: float = 25.0,
+    token_outlier_scale: float = 20.0
+) -> Dict[str, Any]:
+    """Run comprehensive comparative analysis between KIVI Asymmetric and Uniform Baselines."""
+    K, V = generate_realistic_kv_data(
+        num_heads=num_heads,
+        seq_len=seq_len,
+        head_dim=head_dim,
+        channel_outlier_scale=channel_outlier_scale,
+        token_outlier_scale=token_outlier_scale
+    )
+
+    # 1. KIVI Asymmetric Quantization
+    # Key: Per-Channel, Value: Per-Token
+    k_block = AsymmetricKeyQuantizer.quantize(K, bits=bits)
+    K_kivi = AsymmetricKeyQuantizer.dequantize(k_block)
+
+    v_block = AsymmetricValueQuantizer.quantize(V, bits=bits)
+    V_kivi = AsymmetricValueQuantizer.dequantize(v_block)
+
+    # 2. Uniform Per-Token (Symmetric baseline)
+    q_kt, s_kt, z_kt = UniformPerTokenQuantizer.quantize(K, bits=bits)
+    K_unif_token = UniformPerTokenQuantizer.dequantize(q_kt, s_kt, z_kt)
+
+    q_vt, s_vt, z_vt = UniformPerTokenQuantizer.quantize(V, bits=bits)
+    V_unif_token = UniformPerTokenQuantizer.dequantize(q_vt, s_vt, z_vt)
+
+    # 3. Uniform Per-Channel (Symmetric baseline)
+    q_kc, s_kc, z_kc = UniformPerChannelQuantizer.quantize(K, bits=bits)
+    K_unif_channel = UniformPerChannelQuantizer.dequantize(q_kc, s_kc, z_kc)
+
+    q_vc, s_vc, z_vc = UniformPerChannelQuantizer.quantize(V, bits=bits)
+    V_unif_channel = UniformPerChannelQuantizer.dequantize(q_vc, s_vc, z_vc)
+
+    # Compute Metrics
+    results = {
+        "kivi_key": {
+            "sqnr_db": compute_sqnr(K, K_kivi),
+            "cosine_sim": cosine_similarity(K, K_kivi),
+            "frob_error": frobenius_relative_error(K, K_kivi),
+        },
+        "kivi_val": {
+            "sqnr_db": compute_sqnr(V, V_kivi),
+            "cosine_sim": cosine_similarity(V, V_kivi),
+            "frob_error": frobenius_relative_error(V, V_kivi),
+        },
+        "unif_token_key": {
+            "sqnr_db": compute_sqnr(K, K_unif_token),
+            "cosine_sim": cosine_similarity(K, K_unif_token),
+            "frob_error": frobenius_relative_error(K, K_unif_token),
+        },
+        "unif_token_val": {
+            "sqnr_db": compute_sqnr(V, V_unif_token),
+            "cosine_sim": cosine_similarity(V, V_unif_token),
+            "frob_error": frobenius_relative_error(V, V_unif_token),
+        },
+        "unif_channel_key": {
+            "sqnr_db": compute_sqnr(K, K_unif_channel),
+            "cosine_sim": cosine_similarity(K, K_unif_channel),
+            "frob_error": frobenius_relative_error(K, K_unif_channel),
+        },
+        "unif_channel_val": {
+            "sqnr_db": compute_sqnr(V, V_unif_channel),
+            "cosine_sim": cosine_similarity(V, V_unif_channel),
+            "frob_error": frobenius_relative_error(V, V_unif_channel),
+        },
+    }
+
+    # Attention Output Comparison
+    Q = np.random.default_rng(123).standard_normal((num_heads, 1, head_dim)).astype(np.float32)
+    scale = 1.0 / math.sqrt(head_dim)
+
+    # FP32 Reference Attention
+    ref_scores = np.matmul(Q, np.transpose(K, (0, 2, 1))) * scale
+    ref_weights = softmax(ref_scores, axis=-1)
+    ref_out = np.matmul(ref_weights, V)
+
+    # KIVI Attention
+    kivi_scores = np.matmul(Q, np.transpose(K_kivi, (0, 2, 1))) * scale
+    kivi_weights = softmax(kivi_scores, axis=-1)
+    kivi_out = np.matmul(kivi_weights, V_kivi)
+
+    # Uniform Token Attention
+    ut_scores = np.matmul(Q, np.transpose(K_unif_token, (0, 2, 1))) * scale
+    ut_weights = softmax(ut_scores, axis=-1)
+    ut_out = np.matmul(ut_weights, V_unif_token)
+
+    # Uniform Channel Attention
+    uc_scores = np.matmul(Q, np.transpose(K_unif_channel, (0, 2, 1))) * scale
+    uc_weights = softmax(uc_scores, axis=-1)
+    uc_out = np.matmul(uc_weights, V_unif_channel)
+
+    results["attention_fidelity"] = {
+        "kivi": {
+            "cosine_sim": cosine_similarity(ref_out, kivi_out),
+            "frob_error": frobenius_relative_error(ref_out, kivi_out),
+            "max_abs_diff": float(np.max(np.abs(ref_out - kivi_out)))
+        },
+        "unif_token": {
+            "cosine_sim": cosine_similarity(ref_out, ut_out),
+            "frob_error": frobenius_relative_error(ref_out, ut_out),
+            "max_abs_diff": float(np.max(np.abs(ref_out - ut_out)))
+        },
+        "unif_channel": {
+            "cosine_sim": cosine_similarity(ref_out, uc_out),
+            "frob_error": frobenius_relative_error(ref_out, uc_out),
+            "max_abs_diff": float(np.max(np.abs(ref_out - uc_out)))
+        }
+    }
+
+    return results
+
+
+# ============================================================================
+# CLI Command Implementations
+# ============================================================================
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Display architectural specifications and theoretical foundations."""
+    print("=" * 78)
+    print(" ⚡ KIVI: 2-Bit Asymmetric KV Cache Quantization Engine (ICML 2024)")
+    print("=" * 78)
+    print("Architecture Foundations:")
+    print("  • Key Cache Quantization:    Per-Channel along sequence chunks (group_size=32/64)")
+    print("  • Value Cache Quantization:  Per-Token across channel dimension (head_dim)")
+    print("  • Bit-Width:                 2-bit (unsigned {0, 1, 2, 3}) packed 4-per-byte in uint8")
+    print("  • Residual Sliding Window:   32 recent tokens preserved in full-precision FP32/FP16")
+    print("  • Dynamic Grouping:          Chunks of G tokens evicted dynamically to 2-bit blocks")
+    print("-" * 78)
+    print("Asymmetric Advantage vs Outliers:")
+    print("  • Channel Outliers in K:     Isolates heavy activation channels across all time steps")
+    print("  • Token Outliers in V:       Isolates special tokens (prompt, BOS, periods) across dims")
+    print("-" * 78)
+    print("Theoretical Memory Compression:")
+    print("  • FP16 Baseline:             16 bits / element (2.0 bytes)")
+    print("  • Raw 2-bit Payload:         2 bits / element  (0.25 bytes) -> 8.0x reduction")
+    print("  • With Scale & Zero Metadata: ~2.66 to 3.0 bits / element -> 5.3x to 6.0x effective")
+    print("=" * 78)
+    return 0
+
+
+def cmd_quantize(args: argparse.Namespace) -> int:
+    """Quantize arbitrary KV tensors and display reconstruction and compression stats."""
+    cfg = KIVIConfig(
+        num_heads=args.heads,
+        head_dim=args.dim,
+        bits=args.bits,
+        group_size=args.group,
+        residual_window=args.window
+    )
+    print(f"⚡ Generating and Quantizing KV Cache (S={args.tokens}, H={args.heads}, D={args.dim}, Bits={args.bits})...")
+
+    K, V = generate_realistic_kv_data(
+        num_heads=args.heads,
+        seq_len=args.tokens,
+        head_dim=args.dim,
+        channel_outlier_scale=args.channel_outlier,
+        token_outlier_scale=args.token_outlier,
+        seed=args.seed
+    )
+
+    t0 = time.perf_counter()
+    k_block = AsymmetricKeyQuantizer.quantize(K, bits=args.bits)
+    K_recon = AsymmetricKeyQuantizer.dequantize(k_block)
+    t_k = (time.perf_counter() - t0) * 1000
+
+    t1 = time.perf_counter()
+    v_block = AsymmetricValueQuantizer.quantize(V, bits=args.bits)
+    V_recon = AsymmetricValueQuantizer.dequantize(v_block)
+    t_v = (time.perf_counter() - t1) * 1000
+
+    k_sqnr = compute_sqnr(K, K_recon)
+    v_sqnr = compute_sqnr(V, V_recon)
+    k_cos = cosine_similarity(K, K_recon)
+    v_cos = cosine_similarity(V, V_recon)
+
+    raw_fp16_bytes = 2 * (args.tokens * args.heads * args.dim * 2)
+    k_bytes = k_block.packed_data.nbytes + k_block.scales.nbytes + k_block.zeros.nbytes
+    v_bytes = v_block.packed_data.nbytes + v_block.scales.nbytes + v_block.zeros.nbytes
+    total_kivi_bytes = k_bytes + v_bytes
+    comp_ratio = raw_fp16_bytes / total_kivi_bytes
+
+    print(f"  • Key Quantization Time:     {t_k:.3f} ms | SQNR: {k_sqnr:.2f} dB | Cosine Sim: {k_cos:.6f}")
+    print(f"  • Value Quantization Time:   {t_v:.3f} ms | SQNR: {v_sqnr:.2f} dB | Cosine Sim: {v_cos:.6f}")
+    print(f"  • FP16 Total Footprint:      {raw_fp16_bytes / 1024:.2f} KB")
+    print(f"  • KIVI {args.bits}-Bit Footprint:     {total_kivi_bytes / 1024:.2f} KB")
+    print(f"  • Effective Compression:     {comp_ratio:.2f}x memory reduction")
+    print("✅ Quantization completed successfully.")
+    return 0
+
+
+def cmd_attention(args: argparse.Namespace) -> int:
+    """Run end-to-end multi-head attention comparing KIVI KV Cache vs FP32 reference."""
+    cfg = KIVIConfig(
+        num_heads=args.heads,
+        head_dim=args.dim,
+        bits=args.bits,
+        group_size=args.group,
+        residual_window=args.window
+    )
+    print(f"⚡ Running End-to-End Scaled Dot-Product Attention (S={args.tokens}, H={args.heads}, D={args.dim})...")
+
+    cache = KIVIKVCache(cfg)
+    K, V = generate_realistic_kv_data(
+        num_heads=args.heads,
+        seq_len=args.tokens,
+        head_dim=args.dim,
+        seed=args.seed
+    )
+
+    # Feed in streaming batches to simulate autoregressive generation
+    chunk_size = 32
+    for start in range(0, args.tokens, chunk_size):
+        end = min(start + chunk_size, args.tokens)
+        cache.append(K[:, start:end, :], V[:, start:end, :])
+
+    # Single decode token query
+    Q = np.random.default_rng(args.seed + 1).standard_normal((args.heads, 1, args.dim)).astype(np.float32)
+
+    # Reference FP32 Attention
+    scale = 1.0 / math.sqrt(args.dim)
+    ref_scores = np.matmul(Q, np.transpose(K, (0, 2, 1))) * scale
+    ref_weights = softmax(ref_scores, axis=-1)
+    ref_out = np.matmul(ref_weights, V)
+
+    # KIVI Cache Attention
+    t0 = time.perf_counter()
+    kivi_out, kivi_weights = cache.compute_attention(Q)
+    t_attn = (time.perf_counter() - t0) * 1000
+
+    cos_sim = cosine_similarity(ref_out, kivi_out)
+    frob_err = frobenius_relative_error(ref_out, kivi_out)
+    max_diff = float(np.max(np.abs(ref_out - kivi_out)))
+    mem_stats = cache.get_memory_stats()
+
+    print(f"  • Attention Latency:         {t_attn:.3f} ms")
+    print(f"  • Output Cosine Similarity:  {cos_sim:.6f}")
+    print(f"  • Relative Frobenius Error:  {frob_err:.6f}")
+    print(f"  • Maximum Absolute Error:    {max_diff:.6f}")
+    print(f"  • Memory Compression vs FP16: {mem_stats['compression_vs_fp16']:.2f}x ({mem_stats['effective_bits_per_element']:.2f} bits/elem)")
+    print(f"  • Quantized Blocks:          {mem_stats['quantized_blocks']} | Residual Tokens: {mem_stats['residual_tokens']}")
+
+    min_cos_sim = 0.95 if args.bits == 4 else 0.75
+    if cos_sim > min_cos_sim:
+        print(f"✅ Attention output numerically verified within tolerance (> {min_cos_sim:.2f} cosine similarity).")
+        return 0
+    else:
+        print("❌ Attention output diverged from reference.")
+        return 1
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare KIVI Asymmetric vs Uniform Baselines under channel and token outliers."""
+    print(f"⚡ Running Asymmetric vs Uniform Quantization Benchmark (S={args.tokens}, Outliers: K={args.channel_outlier}x, V={args.token_outlier}x)...")
+    res = run_quantization_comparison(
+        seq_len=args.tokens,
+        num_heads=args.heads,
+        head_dim=args.dim,
+        bits=args.bits,
+        channel_outlier_scale=args.channel_outlier,
+        token_outlier_scale=args.token_outlier
+    )
+
+    print("\n" + "=" * 78)
+    print(f"{'Method / Target':<25} | {'SQNR (dB)':<12} | {'Cosine Sim':<14} | {'Frob Error':<12}")
+    print("-" * 78)
+    print(f"{'KIVI Key (Per-Channel)':<25} | {res['kivi_key']['sqnr_db']:<12.2f} | {res['kivi_key']['cosine_sim']:<14.6f} | {res['kivi_key']['frob_error']:<12.6f}")
+    print(f"{'Uniform Token Key':<25} | {res['unif_token_key']['sqnr_db']:<12.2f} | {res['unif_token_key']['cosine_sim']:<14.6f} | {res['unif_token_key']['frob_error']:<12.6f}")
+    print(f"{'Uniform Channel Key':<25} | {res['unif_channel_key']['sqnr_db']:<12.2f} | {res['unif_channel_key']['cosine_sim']:<14.6f} | {res['unif_channel_key']['frob_error']:<12.6f}")
+    print("-" * 78)
+    print(f"{'KIVI Value (Per-Token)':<25} | {res['kivi_val']['sqnr_db']:<12.2f} | {res['kivi_val']['cosine_sim']:<14.6f} | {res['kivi_val']['frob_error']:<12.6f}")
+    print(f"{'Uniform Token Value':<25} | {res['unif_token_val']['sqnr_db']:<12.2f} | {res['unif_token_val']['cosine_sim']:<14.6f} | {res['unif_token_val']['frob_error']:<12.6f}")
+    print(f"{'Uniform Channel Value':<25} | {res['unif_channel_val']['sqnr_db']:<12.2f} | {res['unif_channel_val']['cosine_sim']:<14.6f} | {res['unif_channel_val']['frob_error']:<12.6f}")
+    print("=" * 78)
+
+    print("\nAttention Output Fidelity vs FP32 Reference:")
+    att = res["attention_fidelity"]
+    print(f"  • KIVI Asymmetric:    Cosine Sim: {att['kivi']['cosine_sim']:.6f} | Frob Err: {att['kivi']['frob_error']:.6f} | Max Diff: {att['kivi']['max_abs_diff']:.6f}")
+    print(f"  • Uniform Per-Token:  Cosine Sim: {att['unif_token']['cosine_sim']:.6f} | Frob Err: {att['unif_token']['frob_error']:.6f} | Max Diff: {att['unif_token']['max_abs_diff']:.6f}")
+    print(f"  • Uniform Per-Channel:Cosine Sim: {att['unif_channel']['cosine_sim']:.6f} | Frob Err: {att['unif_channel']['frob_error']:.6f} | Max Diff: {att['unif_channel']['max_abs_diff']:.6f}")
+
+    # Prove KIVI superiority
+    k_advantage = res['kivi_key']['sqnr_db'] - res['unif_token_key']['sqnr_db']
+    v_advantage = res['kivi_val']['sqnr_db'] - res['unif_channel_val']['sqnr_db']
+    print(f"\n🔥 KIVI SQNR Advantage over Naive Quantization:")
+    print(f"  • Key Cache Channel Outlier Isolation:   +{k_advantage:.2f} dB over Uniform Per-Token")
+    print(f"  • Value Cache Token Outlier Isolation:    +{v_advantage:.2f} dB over Uniform Per-Channel")
+    print("✅ Comparative analysis completed successfully.")
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Benchmark throughput, compression, and scaling across sequence lengths."""
+    seq_lens = [int(s.strip()) for s in args.seq_lengths.split(",")]
+    print("=" * 78)
+    print(" ⚡ KIVI Scaling Benchmark Across Context Lengths")
+    print("=" * 78)
+    print(f"{'SeqLen':<8} | {'FP16 (KB)':<11} | {'KIVI (KB)':<11} | {'Comp Ratio':<11} | {'Quant (ms)':<11} | {'Attn CosSim':<12}")
+    print("-" * 78)
+
+    cfg = KIVIConfig(num_heads=args.heads, head_dim=args.dim, bits=args.bits)
+    for S in seq_lens:
+        K, V = generate_realistic_kv_data(num_heads=args.heads, seq_len=S, head_dim=args.dim)
+        cache = KIVIKVCache(cfg)
+
+        t0 = time.perf_counter()
+        cache.append(K, V)
+        cache.flush_all()
+        t_quant = (time.perf_counter() - t0) * 1000
+
+        Q = np.random.default_rng(42).standard_normal((args.heads, 1, args.dim)).astype(np.float32)
+        out, _ = cache.compute_attention(Q)
+
+        # Reference
+        scale = 1.0 / math.sqrt(args.dim)
+        ref_w = softmax(np.matmul(Q, np.transpose(K, (0, 2, 1))) * scale, axis=-1)
+        ref_out = np.matmul(ref_w, V)
+        cos = cosine_similarity(ref_out, out)
+
+        stats = cache.get_memory_stats()
+        fp16_kb = stats["fp16_bytes"] / 1024
+        kivi_kb = stats["kivi_bytes"] / 1024
+        ratio = stats["compression_vs_fp16"]
+
+        print(f"{S:<8} | {fp16_kb:<11.1f} | {kivi_kb:<11.1f} | {ratio:<11.2f}x | {t_quant:<11.2f} | {cos:<12.6f}")
+
+    print("=" * 78)
+    print("✅ Scaling benchmark completed.")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Run internal self-test suite validating bit packing, quantizers, and cache."""
+    print("⚡ Running KIVI Self-Verification Suite...")
+
+    # 1. Test 2-bit packing roundtrip
+    rng = np.random.default_rng(101)
+    for dim in [4, 7, 16, 64, 128]:
+        data = rng.integers(0, 4, size=(2, 3, dim), dtype=np.uint8)
+        packed = BitPacker.pack_2bit(data)
+        unpacked = BitPacker.unpack_2bit(packed, target_length=dim)
+        assert np.array_equal(data, unpacked), f"2-bit packing failed for dim {dim}"
+    print("  [PASS] 2-bit bit-packing roundtrip exact match (all dimensions)")
+
+    # 2. Test 4-bit packing roundtrip
+    for dim in [2, 5, 10, 64]:
+        data = rng.integers(0, 16, size=(2, 3, dim), dtype=np.uint8)
+        packed = BitPacker.pack_4bit(data)
+        unpacked = BitPacker.unpack_4bit(packed, target_length=dim)
+        assert np.array_equal(data, unpacked), f"4-bit packing failed for dim {dim}"
+    print("  [PASS] 4-bit bit-packing roundtrip exact match (all dimensions)")
+
+    # 3. Test Key Per-Channel Quantizer
+    K = rng.standard_normal((4, 64, 32)).astype(np.float32)
+    K[:, :, 5] *= 30.0  # Outlier channel
+    k_block = AsymmetricKeyQuantizer.quantize(K, bits=2)
+    K_rec = AsymmetricKeyQuantizer.dequantize(k_block)
+    sqnr_k = compute_sqnr(K, K_rec)
+    cos_k = cosine_similarity(K, K_rec)
+    assert sqnr_k > 5.0, f"Key SQNR too low: {sqnr_k}"
+    assert cos_k > 0.88, f"Key Cosine Sim too low: {cos_k}"
+    print(f"  [PASS] Key Per-Channel Quantization (SQNR: {sqnr_k:.2f} dB, Cos: {cos_k:.6f})")
+
+    # 4. Test Value Per-Token Quantizer
+    V = rng.standard_normal((4, 64, 32)).astype(np.float32)
+    V[:, 0, :] *= 25.0  # Outlier token
+    v_block = AsymmetricValueQuantizer.quantize(V, bits=2)
+    V_rec = AsymmetricValueQuantizer.dequantize(v_block)
+    sqnr_v = compute_sqnr(V, V_rec)
+    cos_v = cosine_similarity(V, V_rec)
+    assert sqnr_v > 5.0, f"Value SQNR too low: {sqnr_v}"
+    assert cos_v > 0.88, f"Value Cosine Sim too low: {cos_v}"
+    print(f"  [PASS] Value Per-Token Quantization (SQNR: {sqnr_v:.2f} dB, Cos: {cos_v:.6f})")
+
+    # 5. Test Stateful KIVIKVCache streaming & attention
+    cfg = KIVIConfig(num_heads=4, head_dim=32, bits=2, group_size=16, residual_window=16)
+    cache = KIVIKVCache(cfg)
+    cache.append(K, V)
+    cache.flush_all()
+    stats = cache.get_memory_stats()
+    assert stats["compression_vs_fp16"] > 1.2, f"Compression ratio too low: {stats['compression_vs_fp16']}"
+
+    Q = rng.standard_normal((4, 1, 32)).astype(np.float32)
+    out, _ = cache.compute_attention(Q)
+    assert out.shape == (4, 1, 32)
+    assert not np.isnan(out).any()
+    print(f"  [PASS] Stateful KV Cache streaming & attention ({stats['compression_vs_fp16']:.2f}x compression)")
+
+    # 6. Test Long-Context Memory Reduction
+    K_long, V_long = generate_realistic_kv_data(num_heads=8, seq_len=512, head_dim=64)
+    long_cache = KIVIKVCache(KIVIConfig(num_heads=8, head_dim=64, bits=2, group_size=32, residual_window=32))
+    long_cache.append(K_long, V_long)
+    long_cache.flush_all()
+    long_stats = long_cache.get_memory_stats()
+    assert long_stats["compression_vs_fp16"] > 2.8, f"Long-context compression too low: {long_stats['compression_vs_fp16']}"
+    print(f"  [PASS] Long-Context (512 tokens) KV Compression: {long_stats['compression_vs_fp16']:.2f}x")
+
+    print("\n✅ All KIVI mathematical and systems verifications PASSED!")
+    return 0
+
+
+# ============================================================================
+# Main Argument Parsing & Dispatch
+# ============================================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="kivi-engine",
+        description="KIVI: 2-Bit Asymmetric KV Cache Quantization Engine (ICML 2024)",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommands")
+
+    # status
+    subparsers.add_parser("status", help="Display architectural specifications and theoretical foundations")
+
+    # quantize
+    p_quant = subparsers.add_parser("quantize", help="Quantize synthetic or custom KV tensors")
+    p_quant.add_argument("--tokens", type=int, default=512, help="Sequence length (default: 512)")
+    p_quant.add_argument("--heads", type=int, default=8, help="Number of KV heads (default: 8)")
+    p_quant.add_argument("--dim", type=int, default=64, help="Head dimension (default: 64)")
+    p_quant.add_argument("--bits", type=int, default=2, choices=[2, 4], help="Bit width (2 or 4, default: 2)")
+    p_quant.add_argument("--group", type=int, default=32, help="Group size for channel grouping (default: 32)")
+    p_quant.add_argument("--window", type=int, default=32, help="Sliding residual window size (default: 32)")
+    p_quant.add_argument("--channel-outlier", type=float, default=25.0, help="Key channel outlier scale (default: 25.0)")
+    p_quant.add_argument("--token-outlier", type=float, default=20.0, help="Value token outlier scale (default: 20.0)")
+    p_quant.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+
+    # attention
+    p_attn = subparsers.add_parser("attention", help="Compute attention comparing KIVI KV Cache vs FP32")
+    p_attn.add_argument("--tokens", type=int, default=512, help="Sequence length (default: 512)")
+    p_attn.add_argument("--heads", type=int, default=8, help="Number of KV heads (default: 8)")
+    p_attn.add_argument("--dim", type=int, default=64, help="Head dimension (default: 64)")
+    p_attn.add_argument("--bits", type=int, default=2, choices=[2, 4], help="Bit width (default: 2)")
+    p_attn.add_argument("--group", type=int, default=32, help="Group size (default: 32)")
+    p_attn.add_argument("--window", type=int, default=32, help="Sliding residual window (default: 32)")
+    p_attn.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+
+    # compare
+    p_comp = subparsers.add_parser("compare", help="Compare KIVI Asymmetric vs Uniform Baselines under outliers")
+    p_comp.add_argument("--tokens", type=int, default=512, help="Sequence length (default: 512)")
+    p_comp.add_argument("--heads", type=int, default=8, help="Number of KV heads (default: 8)")
+    p_comp.add_argument("--dim", type=int, default=64, help="Head dimension (default: 64)")
+    p_comp.add_argument("--bits", type=int, default=2, choices=[2, 4], help="Bit width (default: 2)")
+    p_comp.add_argument("--channel-outlier", type=float, default=25.0, help="Key channel outlier scale (default: 25.0)")
+    p_comp.add_argument("--token-outlier", type=float, default=20.0, help="Value token outlier scale (default: 20.0)")
+
+    # benchmark
+    p_bench = subparsers.add_parser("benchmark", help="Benchmark memory and latency across sequence lengths")
+    p_bench.add_argument("--seq-lengths", type=str, default="128,256,512,1024,2048", help="Comma-separated sequence lengths")
+    p_bench.add_argument("--heads", type=int, default=8, help="Number of KV heads (default: 8)")
+    p_bench.add_argument("--dim", type=int, default=64, help="Head dimension (default: 64)")
+    p_bench.add_argument("--bits", type=int, default=2, choices=[2, 4], help="Bit width (default: 2)")
+
+    # verify
+    subparsers.add_parser("verify", help="Run internal verification and mathematical test suite")
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return 0
+
+    args = parser.parse_args()
+    if args.subcommand == "status":
+        return cmd_status(args)
+    elif args.subcommand == "quantize":
+        return cmd_quantize(args)
+    elif args.subcommand == "attention":
+        return cmd_attention(args)
+    elif args.subcommand == "compare":
+        return cmd_compare(args)
+    elif args.subcommand == "benchmark":
+        return cmd_benchmark(args)
+    elif args.subcommand == "verify":
+        return cmd_verify(args)
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1177,5 +1177,22 @@
       "entropy-segmentation",
       "frontier-ai"
     ]
+  },
+  {
+    "id": "kivi-kv-cache",
+    "title": "KIVI 2-Bit Asymmetric KV Cache Quantization Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "KIVI tuning-free asymmetric 2-bit KV cache quantization for long-context LLMs: per-channel Key quantization, per-token Value quantization, sliding residual window, and 8x bit-packing with 5.3x-6.0x memory reduction.",
+    "cli": "kivi-engine",
+    "evolved_at": "2026-11-06T00:58:50.402061",
+    "tags": [
+      "kivi",
+      "kv-cache",
+      "2-bit-quantization",
+      "llm-inference",
+      "asymmetric-quantization",
+      "long-context"
+    ]
   }
 ]

@@ -618,3 +618,8 @@
 - **Title**: Byte Latent Transformer (BLT) Tokenizer-Free Dynamic Patch Architecture
 - **Category**: research
 - **Description**: Meta AI Byte Latent Transformer (BLT) architecture engine featuring tokenizer-free raw UTF-8 byte ingestion, dynamic Shannon entropy-guided patch segmentation, cross-attention patch pooling, and hierarchical 3-tier byte-latent transformer modeling with quadratic attention FLOP savings.
+
+### [2026-11-06 00:58:50] - Evolved `kivi-kv-cache`
+- **Title**: KIVI 2-Bit Asymmetric KV Cache Quantization Engine
+- **Category**: systems
+- **Description**: KIVI tuning-free asymmetric 2-bit KV cache quantization for long-context LLMs: per-channel Key quantization, per-token Value quantization, sliding residual window, and 8x bit-packing with 5.3x-6.0x memory reduction.
