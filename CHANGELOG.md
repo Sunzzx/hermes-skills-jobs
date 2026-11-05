@@ -633,3 +633,8 @@
 - **Title**: Muon Matrix-Level Orthogonal Optimizer via Newton-Schulz Iteration
 - **Category**: systems
 - **Description**: Muon (Momentum Orthogonalized by Newton-Schulz) optimizer: 5th-order matrix polar decomposition, aspect-ratio scaling, Nesterov momentum, and hybrid AdamW parameter routing.
+
+### [2026-11-06 05:29:53] - Evolved `muon-optimizer`
+- **Title**: Muon Matrix-Level Orthogonal Optimizer via Newton-Schulz Iteration
+- **Category**: systems
+- **Description**: Muon (Momentum Orthogonalized by Newton-Schulz) optimizer: 5th-order matrix polar decomposition, aspect-ratio scaling, Nesterov momentum, and hybrid AdamW parameter routing.
