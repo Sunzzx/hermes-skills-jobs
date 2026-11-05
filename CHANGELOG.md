@@ -628,3 +628,8 @@
 - **Title**: SimPO Reference-Free Preference Optimization & Margin Engine
 - **Category**: research
 - **Description**: SimPO reference-free direct preference optimization engine featuring sequence-length normalized implicit reward, target reward margin gamma, Bradley-Terry calibration, and verbosity bias mitigation.
+
+### [2026-11-06 04:26:00] - Evolved `muon-optimizer`
+- **Title**: Muon Matrix-Level Orthogonal Optimizer via Newton-Schulz Iteration
+- **Category**: systems
+- **Description**: Muon (Momentum Orthogonalized by Newton-Schulz) optimizer: 5th-order matrix polar decomposition, aspect-ratio scaling, Nesterov momentum, and hybrid AdamW parameter routing.

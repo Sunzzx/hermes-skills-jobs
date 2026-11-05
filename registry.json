@@ -1211,5 +1211,23 @@
       "PreferenceOptimization",
       "FrontierAI"
     ]
+  },
+  {
+    "id": "muon-optimizer",
+    "title": "Muon Matrix-Level Orthogonal Optimizer via Newton-Schulz Iteration",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Muon (Momentum Orthogonalized by Newton-Schulz) optimizer: 5th-order matrix polar decomposition, aspect-ratio scaling, Nesterov momentum, and hybrid AdamW parameter routing.",
+    "cli": "muon-optimizer",
+    "evolved_at": "2026-11-06T04:26:00.000000",
+    "tags": [
+      "muon",
+      "optimizer",
+      "newton-schulz",
+      "polar-decomposition",
+      "matrix-orthogonalization",
+      "deep-learning",
+      "systems"
+    ]
   }
 ]
