@@ -608,3 +608,8 @@
 - **Title**: Multi-Token Prediction (MTP) & Speculative Drafting Engine
 - **Category**: systems
 - **Description**: DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting.
+
+### [2026-11-05 21:48:56] - Evolved `deepseek-grpo`
+- **Title**: DeepSeek-R1 Group Relative Policy Optimization (GRPO) & Reasoning Engine
+- **Category**: research
+- **Description**: DeepSeek-R1 Group Relative Policy Optimization (GRPO) reinforcement learning engine featuring critic-free group advantage estimation, rule-based verifiable reward checkers (math, countdown, format), per-token clipped surrogate loss, and unbiased Schulman KL divergence regularization.

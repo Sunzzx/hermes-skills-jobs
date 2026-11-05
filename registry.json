@@ -1143,5 +1143,22 @@
       "gemm",
       "transformer-training"
     ]
+  },
+  {
+    "id": "deepseek-grpo",
+    "title": "DeepSeek-R1 Group Relative Policy Optimization (GRPO) & Reasoning Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "DeepSeek-R1 Group Relative Policy Optimization (GRPO) reinforcement learning engine featuring critic-free group advantage estimation, rule-based verifiable reward checkers (math, countdown, format), per-token clipped surrogate loss, and unbiased Schulman KL divergence regularization.",
+    "cli": "grpo-engine",
+    "evolved_at": "2026-11-05T21:48:56.464817",
+    "tags": [
+      "deepseek-r1",
+      "grpo",
+      "reinforcement-learning",
+      "reasoning",
+      "cot",
+      "frontier-ai"
+    ]
   }
 ]

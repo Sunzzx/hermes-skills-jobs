@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-68-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-69-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (68 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (69 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -80,6 +80,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Multi-Token Prediction (MTP) & Speculative Drafting Engine** | `systems` | `mtp-engine` | DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting. | `deepseek-v3` `multi-token-prediction` `mtp` |
 | **Gated DeltaNet & Parallel Delta Rule Engine** | `research` | `deltanet` | Gated DeltaNet parallel delta-rule linear attention: Householder fast-weight updates, forget gates, chunkwise scan, associative memory probes, and exact sequential-parallel equivalence. | `Frontier-AI` `GatedDeltaNet` `DeltaRule` |
 | **DeepSeek-V3 FP8 Mixed-Precision Training & Quantized GEMM Engine** | `systems` | `fp8-engine` | DeepSeek-V3 fine-grained FP8 mixed-precision training: E4M3/E5M2 formats, 1x128 activation tile micro-scaling, 128x128 weight block scaling, outlier isolation, and high-precision chunked GEMM. | `deepseek-v3` `fp8` `mixed-precision` |
+| **DeepSeek-R1 Group Relative Policy Optimization (GRPO) & Reasoning Engine** | `research` | `grpo-engine` | DeepSeek-R1 Group Relative Policy Optimization (GRPO) reinforcement learning engine featuring critic-free group advantage estimation, rule-based verifiable reward checkers (math, countdown, format), per-token clipped surrogate loss, and unbiased Schulman KL divergence regularization. | `deepseek-r1` `grpo` `reinforcement-learning` |
 
 ---
 
@@ -110,4 +111,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-05 16:03:45*
+*Last Evolved: 2026-11-05 21:48:56*
