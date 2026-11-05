@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-05 16:03:45] - Evolved `deepseek-fp8`
+- **Title**: DeepSeek-V3 FP8 Mixed-Precision Training & Quantized GEMM Engine
+- **Category**: systems
+- **Description**: DeepSeek-V3 fine-grained FP8 mixed-precision training: E4M3/E5M2 formats, 1x128 activation tile micro-scaling, 128x128 weight block scaling, outlier isolation, and high-precision chunked GEMM.
+- **CLI**: `fp8-engine` (`status`, `quantize`, `gemm`, `benchmark`, `verify`)
+
 ### [2026-11-05 06:24:46] - Evolved `gated-deltanet`
 - **Title**: Gated DeltaNet & Parallel Delta Rule Engine
 - **Category**: research

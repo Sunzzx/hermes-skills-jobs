@@ -1125,5 +1125,23 @@
       "LinearAttention",
       "FastWeightProgrammers"
     ]
+  },
+  {
+    "id": "deepseek-fp8",
+    "title": "DeepSeek-V3 FP8 Mixed-Precision Training & Quantized GEMM Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "DeepSeek-V3 fine-grained FP8 mixed-precision training: E4M3/E5M2 formats, 1x128 activation tile micro-scaling, 128x128 weight block scaling, outlier isolation, and high-precision chunked GEMM.",
+    "cli": "fp8-engine",
+    "evolved_at": "2026-11-05T16:01:44.207177",
+    "tags": [
+      "deepseek-v3",
+      "fp8",
+      "mixed-precision",
+      "quantization",
+      "microscaling",
+      "gemm",
+      "transformer-training"
+    ]
   }
 ]
