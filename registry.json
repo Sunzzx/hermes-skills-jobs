@@ -1109,5 +1109,21 @@
       "transformer-inference",
       "acceleration"
     ]
+  },
+  {
+    "id": "gated-deltanet",
+    "title": "Gated DeltaNet & Parallel Delta Rule Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Gated DeltaNet parallel delta-rule linear attention: Householder fast-weight updates, forget gates, chunkwise scan, associative memory probes, and exact sequential-parallel equivalence.",
+    "cli": "deltanet",
+    "evolved_at": "2026-11-05T06:24:34.346293",
+    "tags": [
+      "Frontier-AI",
+      "GatedDeltaNet",
+      "DeltaRule",
+      "LinearAttention",
+      "FastWeightProgrammers"
+    ]
   }
 ]

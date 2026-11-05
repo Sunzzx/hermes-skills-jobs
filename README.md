@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-66-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-67-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (66 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (67 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -78,6 +78,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
 | **DualPipe Bidirectional Pipeline Parallelism & Overlapping Engine** | `systems` | `dualpipe` | DeepSeek-V3 DualPipe bidirectional pipeline parallelism with V-shaped pipeline folding, decoupled backward passes (B_X and B_W), and zero-bubble communication-computation overlapping. | `DualPipe` `DeepSeekV3` `PipelineParallelism` |
 | **Multi-Token Prediction (MTP) & Speculative Drafting Engine** | `systems` | `mtp-engine` | DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting. | `deepseek-v3` `multi-token-prediction` `mtp` |
+| **Gated DeltaNet & Parallel Delta Rule Engine** | `research` | `deltanet` | Gated DeltaNet parallel delta-rule linear attention: Householder fast-weight updates, forget gates, chunkwise scan, associative memory probes, and exact sequential-parallel equivalence. | `GatedDeltaNet` `DeltaRule` `LinearAttention` |
 
 ---
 
@@ -108,4 +109,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-04 02:36:09*
+*Last Evolved: 2026-11-05 06:24:46*

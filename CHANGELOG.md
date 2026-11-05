@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-05 06:24:46] - Evolved `gated-deltanet`
+- **Title**: Gated DeltaNet & Parallel Delta Rule Engine
+- **Category**: research
+- **Description**: Gated DeltaNet parallel delta-rule linear attention with Householder fast-weight updates, multiplicative forget gates, chunkwise parallel scan, associative memory probes, and machine-epsilon sequential↔parallel equivalence.
+- **CLI**: `deltanet` (`verify`, `benchmark`, `inspect`, `simulate`, `probe`)
+
 ### [2026-11-04 01:09:06 +05:30] - Evolved `dualpipe`
 - **Title**: DualPipe Bidirectional Pipeline Parallelism & Overlapping Engine
 - **Category**: systems
