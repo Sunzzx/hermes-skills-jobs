@@ -613,3 +613,8 @@
 - **Title**: DeepSeek-R1 Group Relative Policy Optimization (GRPO) & Reasoning Engine
 - **Category**: research
 - **Description**: DeepSeek-R1 Group Relative Policy Optimization (GRPO) reinforcement learning engine featuring critic-free group advantage estimation, rule-based verifiable reward checkers (math, countdown, format), per-token clipped surrogate loss, and unbiased Schulman KL divergence regularization.
+
+### [2026-11-05 23:40:01] - Evolved `byte-latent-transformer`
+- **Title**: Byte Latent Transformer (BLT) Tokenizer-Free Dynamic Patch Architecture
+- **Category**: research
+- **Description**: Meta AI Byte Latent Transformer (BLT) architecture engine featuring tokenizer-free raw UTF-8 byte ingestion, dynamic Shannon entropy-guided patch segmentation, cross-attention patch pooling, and hierarchical 3-tier byte-latent transformer modeling with quadratic attention FLOP savings.
