@@ -623,3 +623,8 @@
 - **Title**: KIVI 2-Bit Asymmetric KV Cache Quantization Engine
 - **Category**: systems
 - **Description**: KIVI tuning-free asymmetric 2-bit KV cache quantization for long-context LLMs: per-channel Key quantization, per-token Value quantization, sliding residual window, and 8x bit-packing with 5.3x-6.0x memory reduction.
+
+### [2026-11-06 02:15:50] - Evolved `simpo-alignment`
+- **Title**: SimPO Reference-Free Preference Optimization & Margin Engine
+- **Category**: research
+- **Description**: SimPO reference-free direct preference optimization engine featuring sequence-length normalized implicit reward, target reward margin gamma, Bradley-Terry calibration, and verbosity bias mitigation.

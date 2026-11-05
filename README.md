@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-71-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-72-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (71 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (72 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -83,6 +83,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **DeepSeek-R1 Group Relative Policy Optimization (GRPO) & Reasoning Engine** | `research` | `grpo-engine` | DeepSeek-R1 Group Relative Policy Optimization (GRPO) reinforcement learning engine featuring critic-free group advantage estimation, rule-based verifiable reward checkers (math, countdown, format), per-token clipped surrogate loss, and unbiased Schulman KL divergence regularization. | `deepseek-r1` `grpo` `reinforcement-learning` |
 | **Byte Latent Transformer (BLT) Tokenizer-Free Dynamic Patch Architecture** | `research` | `blt-engine` | Meta AI Byte Latent Transformer (BLT) architecture engine featuring tokenizer-free raw UTF-8 byte ingestion, dynamic Shannon entropy-guided patch segmentation, cross-attention patch pooling, and hierarchical 3-tier byte-latent transformer modeling with quadratic attention FLOP savings. | `byte-latent-transformer` `blt` `tokenizer-free` |
 | **KIVI 2-Bit Asymmetric KV Cache Quantization Engine** | `systems` | `kivi-engine` | KIVI tuning-free asymmetric 2-bit KV cache quantization for long-context LLMs: per-channel Key quantization, per-token Value quantization, sliding residual window, and 8x bit-packing with 5.3x-6.0x memory reduction. | `kivi` `kv-cache` `2-bit-quantization` |
+| **SimPO Reference-Free Preference Optimization & Margin Engine** | `research` | `simpo-engine` | SimPO reference-free direct preference optimization engine featuring sequence-length normalized implicit reward, target reward margin gamma, Bradley-Terry calibration, and verbosity bias mitigation. | `SimPO` `DPO` `Alignment` |
 
 ---
 
@@ -113,4 +114,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-06 00:58:50*
+*Last Evolved: 2026-11-06 02:15:50*

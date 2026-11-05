@@ -1194,5 +1194,22 @@
       "asymmetric-quantization",
       "long-context"
     ]
+  },
+  {
+    "id": "simpo-alignment",
+    "title": "SimPO Reference-Free Preference Optimization & Margin Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "SimPO reference-free direct preference optimization engine featuring sequence-length normalized implicit reward, target reward margin gamma, Bradley-Terry calibration, and verbosity bias mitigation.",
+    "cli": "simpo-engine",
+    "evolved_at": "2026-11-06T02:15:50.235791",
+    "tags": [
+      "SimPO",
+      "DPO",
+      "Alignment",
+      "RLHF",
+      "PreferenceOptimization",
+      "FrontierAI"
+    ]
   }
 ]
