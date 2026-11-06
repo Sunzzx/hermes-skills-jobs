@@ -1285,5 +1285,23 @@
       "vLLM",
       "FrontierAI"
     ]
+  },
+  {
+    "id": "nsa-attention-engine",
+    "title": "DeepSeek-V3 Native Sparse Attention (NSA) Hierarchical Attention Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "DeepSeek-V3 Native Sparse Attention engine featuring multi-scale compressed token attention, dynamic top-k coarse block routing, and sliding-window local context.",
+    "cli": "nsa-attention-engine",
+    "evolved_at": "2026-11-07T01:51:01.803306",
+    "tags": [
+      "Frontier-AI",
+      "DeepSeek-V3",
+      "SparseAttention",
+      "NativeSparseAttention",
+      "AttentionKernels",
+      "NSA",
+      "LongContext"
+    ]
   }
 ]

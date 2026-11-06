@@ -662,3 +662,9 @@
 - **Title**: DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine
 - **Category**: systems
 - **Description**: Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch.
+
+
+### [2026-11-07 01:51:01] - Evolved `nsa-attention-engine`
+- **Title**: DeepSeek-V3 Native Sparse Attention (NSA) Hierarchical Attention Engine
+- **Category**: research
+- **Description**: DeepSeek-V3 Native Sparse Attention engine featuring multi-scale compressed token attention, dynamic top-k coarse block routing, and sliding-window local context.
