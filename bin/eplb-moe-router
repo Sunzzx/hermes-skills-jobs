@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""
+DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+
+@dataclass
+class ExpertPlacementPlan:
+    num_experts: int
+    num_gpus: int
+    num_nodes: int
+    gpus_per_node: int
+    num_replicas_total: int
+    expert_to_gpus: Dict[int, List[int]]
+    gpu_to_experts: Dict[int, List[int]]
+    expert_replication_factors: Dict[int, int]
+    replicated_experts: List[int]
+    peak_gpu_load: float
+    mean_gpu_load: float
+    load_imbalance_ratio: float
+    cross_node_traffic_ratio: float
+
+
+@dataclass
+class DispatchResult:
+    num_tokens: int
+    top_k: int
+    total_dispatched_tokens: int
+    gpu_token_counts: Dict[int, int]
+    expert_token_counts: Dict[int, int]
+    dropped_tokens: int
+    cross_node_transfers: int
+    intra_node_transfers: int
+    cross_node_ratio: float
+    max_gpu_token_imbalance: float
+
+
+class EPLBLoadBalancer:
+    def __init__(
+        self,
+        num_experts: int = 256,
+        num_nodes: int = 2,
+        gpus_per_node: int = 8,
+        total_slots: Optional[int] = None,
+    ):
+        self.num_experts = int(num_experts)
+        self.num_nodes = int(num_nodes)
+        self.gpus_per_node = int(gpus_per_node)
+        self.num_gpus = self.num_nodes * self.gpus_per_node
+
+        if total_slots is None:
+            slots_per_gpu = max(1, math.ceil(self.num_experts * 1.25 / self.num_gpus))
+            self.total_slots = slots_per_gpu * self.num_gpus
+        else:
+            self.total_slots = int(total_slots)
+
+        self.slots_per_gpu = self.total_slots // self.num_gpus
+        if self.total_slots < self.num_experts:
+            raise ValueError(
+                f"Total capacity slots ({self.total_slots}) must be >= num_experts ({self.num_experts})"
+            )
+
+    def compute_replication_factors(
+        self, expert_loads: np.ndarray
+    ) -> Tuple[np.ndarray, List[int]]:
+        loads = np.maximum(expert_loads, 1e-6)
+        total_load = np.sum(loads)
+        normalized_loads = loads / total_load
+
+        extra_slots = self.total_slots - self.num_experts
+        if extra_slots <= 0:
+            replication_factors = np.ones(self.num_experts, dtype=np.int32)
+            return replication_factors, []
+
+        quotas = normalized_loads * extra_slots
+        floor_quotas = np.floor(quotas).astype(np.int32)
+        remainders = quotas - floor_quotas
+
+        unallocated = extra_slots - np.sum(floor_quotas)
+        sorted_indices = np.argsort(-remainders)
+        for i in range(unallocated):
+            floor_quotas[sorted_indices[i]] += 1
+
+        replication_factors = 1 + floor_quotas
+        replicated = [int(i) for i in range(self.num_experts) if replication_factors[i] > 1]
+        return replication_factors, replicated
+
+    def balance_and_place(
+        self, expert_loads: Optional[np.ndarray] = None
+    ) -> ExpertPlacementPlan:
+        if expert_loads is None:
+            ranks = np.arange(1, self.num_experts + 1, dtype=np.float64)
+            raw_loads = 1.0 / (ranks ** 0.85)
+            np.random.seed(42)
+            np.random.shuffle(raw_loads)
+            expert_loads = raw_loads
+        else:
+            expert_loads = np.asarray(expert_loads, dtype=np.float64)
+            if len(expert_loads) != self.num_experts:
+                raise ValueError(f"expert_loads length {len(expert_loads)} != {self.num_experts}")
+
+        replication_factors, replicated_experts = self.compute_replication_factors(expert_loads)
+
+        replica_items: List[Tuple[float, int, int]] = []
+        for exp_id in range(self.num_experts):
+            rep_count = int(replication_factors[exp_id])
+            rep_load = float(expert_loads[exp_id] / rep_count)
+            for r in range(rep_count):
+                replica_items.append((rep_load, exp_id, r))
+
+        replica_items.sort(key=lambda x: x[0], reverse=True)
+
+        slots_per_node = self.slots_per_gpu * self.gpus_per_node
+        node_loads = [0.0] * self.num_nodes
+        node_items: List[List[Tuple[float, int, int]]] = [[] for _ in range(self.num_nodes)]
+        node_expert_membership: List[set] = [set() for _ in range(self.num_nodes)]
+
+        for rep_load, exp_id, r_idx in replica_items:
+            eligible_nodes = [
+                nid for nid in range(self.num_nodes) if len(node_items[nid]) < slots_per_node
+            ]
+            if not eligible_nodes:
+                raise RuntimeError("Slot capacity exceeded during Node bin packing!")
+
+            eligible_nodes.sort(
+                key=lambda nid: (1 if exp_id in node_expert_membership[nid] else 0, node_loads[nid])
+            )
+            chosen_node = eligible_nodes[0]
+            node_items[chosen_node].append((rep_load, exp_id, r_idx))
+            node_expert_membership[chosen_node].add(exp_id)
+            node_loads[chosen_node] += rep_load
+
+        gpu_to_experts: Dict[int, List[int]] = {g: [] for g in range(self.num_gpus)}
+        expert_to_gpus: Dict[int, List[int]] = {e: [] for e in range(self.num_experts)}
+        gpu_loads = [0.0] * self.num_gpus
+
+        for nid in range(self.num_nodes):
+            local_gpus = [nid * self.gpus_per_node + local_idx for local_idx in range(self.gpus_per_node)]
+            node_items[nid].sort(key=lambda x: x[0], reverse=True)
+
+            for rep_load, exp_id, _ in node_items[nid]:
+                eligible_gpus = [g for g in local_gpus if len(gpu_to_experts[g]) < self.slots_per_gpu]
+                if not eligible_gpus:
+                    raise RuntimeError(f"Slot capacity exceeded on node {nid}!")
+
+                eligible_gpus.sort(
+                    key=lambda gid: (1 if exp_id in gpu_to_experts[gid] else 0, gpu_loads[gid])
+                )
+                chosen_gpu = eligible_gpus[0]
+                gpu_to_experts[chosen_gpu].append(exp_id)
+                expert_to_gpus[exp_id].append(chosen_gpu)
+                gpu_loads[chosen_gpu] += rep_load
+
+        peak_load = float(max(gpu_loads))
+        mean_load = float(np.mean(gpu_loads))
+        imbalance_ratio = float(peak_load / (mean_load + 1e-9))
+
+        cross_node_samples = 0
+        total_samples = 0
+        for exp_id in range(self.num_experts):
+            g_list = expert_to_gpus[exp_id]
+            exp_nodes = set(g // self.gpus_per_node for g in g_list)
+            weight = expert_loads[exp_id]
+            remote_fraction = (self.num_nodes - len(exp_nodes)) / self.num_nodes
+            cross_node_samples += weight * remote_fraction
+            total_samples += weight
+
+        cross_node_ratio = float(cross_node_samples / (total_samples + 1e-9))
+
+        return ExpertPlacementPlan(
+            num_experts=self.num_experts,
+            num_gpus=self.num_gpus,
+            num_nodes=self.num_nodes,
+            gpus_per_node=self.gpus_per_node,
+            num_replicas_total=self.total_slots,
+            expert_to_gpus=expert_to_gpus,
+            gpu_to_experts=gpu_to_experts,
+            expert_replication_factors={int(k): int(v) for k, v in enumerate(replication_factors)},
+            replicated_experts=replicated_experts,
+            peak_gpu_load=peak_load,
+            mean_gpu_load=mean_load,
+            load_imbalance_ratio=imbalance_ratio,
+            cross_node_traffic_ratio=cross_node_ratio,
+        )
+
+
+class DynamicMoEDispatcher:
+    def __init__(self, plan: ExpertPlacementPlan):
+        self.plan = plan
+        self.num_gpus = plan.num_gpus
+        self.gpus_per_node = plan.gpus_per_node
+        self.num_nodes = plan.num_nodes
+
+    def simulate_routing(
+        self,
+        num_tokens: int = 2048,
+        top_k: int = 8,
+        token_source_gpus: Optional[np.ndarray] = None,
+        router_probs: Optional[np.ndarray] = None,
+    ) -> DispatchResult:
+        if token_source_gpus is None:
+            token_source_gpus = np.random.randint(0, self.num_gpus, size=num_tokens)
+
+        if router_probs is None:
+            logits = np.random.randn(num_tokens, self.plan.num_experts) * 1.5
+            for e in self.plan.replicated_experts[:16]:
+                logits[:, e] += 2.0
+            router_probs = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
+            router_probs = router_probs / np.sum(router_probs, axis=-1, keepdims=True)
+
+        topk_indices = np.argsort(-router_probs, axis=-1)[:, :top_k]
+
+        gpu_token_counts = {g: 0 for g in range(self.num_gpus)}
+        expert_token_counts = {e: 0 for e in range(self.plan.num_experts)}
+        cross_node_transfers = 0
+        intra_node_transfers = 0
+
+        for t in range(num_tokens):
+            src_gpu = int(token_source_gpus[t])
+            src_node = src_gpu // self.gpus_per_node
+            chosen_experts = topk_indices[t]
+
+            for exp_id in chosen_experts:
+                exp_id = int(exp_id)
+                expert_token_counts[exp_id] += 1
+                target_gpus = self.plan.expert_to_gpus[exp_id]
+
+                chosen_target = None
+                if src_gpu in target_gpus:
+                    chosen_target = src_gpu
+                else:
+                    intra_candidates = [g for g in target_gpus if (g // self.gpus_per_node) == src_node]
+                    if intra_candidates:
+                        intra_candidates.sort(key=lambda g: gpu_token_counts[g])
+                        chosen_target = intra_candidates[0]
+                    else:
+                        remote_candidates = list(target_gpus)
+                        remote_candidates.sort(key=lambda g: gpu_token_counts[g])
+                        chosen_target = remote_candidates[0]
+
+                gpu_token_counts[chosen_target] += 1
+                target_node = chosen_target // self.gpus_per_node
+                if target_node == src_node:
+                    if chosen_target != src_gpu:
+                        intra_node_transfers += 1
+                else:
+                    cross_node_transfers += 1
+
+        total_dispatched = num_tokens * top_k
+        total_comm = cross_node_transfers + intra_node_transfers
+        cross_ratio = float(cross_node_transfers / (total_comm + 1e-9))
+        gpu_vals = list(gpu_token_counts.values())
+        imbalance = float(max(gpu_vals) / (np.mean(gpu_vals) + 1e-9))
+
+        return DispatchResult(
+            num_tokens=num_tokens,
+            top_k=top_k,
+            total_dispatched_tokens=total_dispatched,
+            gpu_token_counts=gpu_token_counts,
+            expert_token_counts=expert_token_counts,
+            dropped_tokens=0,
+            cross_node_transfers=cross_node_transfers,
+            intra_node_transfers=intra_node_transfers,
+            cross_node_ratio=cross_ratio,
+            max_gpu_token_imbalance=imbalance,
+        )
+
+
+def run_balance_cli(args: argparse.Namespace) -> None:
+    balancer = EPLBLoadBalancer(
+        num_experts=args.num_experts,
+        num_nodes=args.num_nodes,
+        gpus_per_node=args.gpus_per_node,
+        total_slots=args.num_replicas,
+    )
+    plan = balancer.balance_and_place()
+
+    output = {
+        "num_experts": plan.num_experts,
+        "num_gpus": plan.num_gpus,
+        "num_nodes": plan.num_nodes,
+        "gpus_per_node": plan.gpus_per_node,
+        "total_slots": plan.num_replicas_total,
+        "replicated_expert_count": len(plan.replicated_experts),
+        "replicated_sample_ids": plan.replicated_experts[:10],
+        "load_imbalance_ratio": round(plan.load_imbalance_ratio, 4),
+        "peak_gpu_load": round(plan.peak_gpu_load, 4),
+        "mean_gpu_load": round(plan.mean_gpu_load, 4),
+        "cross_node_traffic_ratio": round(plan.cross_node_traffic_ratio, 4),
+        "slots_per_gpu": balancer.slots_per_gpu,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print("=== EPLB Expert Parallelism Load Balancing Plan ===")
+        for k, v in output.items():
+            print(f"  {k:26}: {v}")
+
+
+def run_dispatch_cli(args: argparse.Namespace) -> None:
+    balancer = EPLBLoadBalancer(
+        num_experts=args.experts,
+        num_nodes=args.nodes,
+        gpus_per_node=args.gpus_per_node,
+    )
+    plan = balancer.balance_and_place()
+    dispatcher = DynamicMoEDispatcher(plan)
+    res = dispatcher.simulate_routing(num_tokens=args.tokens, top_k=args.top_k)
+
+    output = {
+        "tokens": res.num_tokens,
+        "top_k": res.top_k,
+        "total_dispatched": res.total_dispatched_tokens,
+        "cross_node_transfers": res.cross_node_transfers,
+        "intra_node_transfers": res.intra_node_transfers,
+        "cross_node_ratio": round(res.cross_node_ratio, 4),
+        "max_gpu_token_imbalance": round(res.max_gpu_token_imbalance, 4),
+        "gpu_token_counts_summary": {
+            "min": min(res.gpu_token_counts.values()),
+            "max": max(res.gpu_token_counts.values()),
+            "mean": round(float(np.mean(list(res.gpu_token_counts.values()))), 1),
+        },
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print("=== EPLB Dynamic Token Dispatch Simulation ===")
+        for k, v in output.items():
+            print(f"  {k:24}: {v}")
+
+
+def run_benchmark_cli(args: argparse.Namespace) -> None:
+    print(f"Benchmarking EPLB Load Balancer ({args.trials} trials)...")
+    durations = []
+    balancer = EPLBLoadBalancer(num_experts=256, num_nodes=4, gpus_per_node=8, total_slots=384)
+
+    for _ in range(args.trials):
+        t0 = time.perf_counter()
+        plan = balancer.balance_and_place()
+        disp = DynamicMoEDispatcher(plan)
+        disp.simulate_routing(num_tokens=4096, top_k=8)
+        durations.append((time.perf_counter() - t0) * 1000)
+
+    avg_ms = float(np.mean(durations))
+    print(f"EPLB Execution: Avg: {avg_ms:.2f} ms")
+    print(f"Throughput: {4096 / (avg_ms / 1000.0):.1f} tokens/sec simulated dispatch over 32 GPUs")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="EPLB MoE Router")
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    bal_parser = subparsers.add_parser("balance")
+    bal_parser.add_argument("--num-experts", type=int, default=256)
+    bal_parser.add_argument("--num-nodes", type=int, default=2)
+    bal_parser.add_argument("--gpus-per-node", type=int, default=8)
+    bal_parser.add_argument("--num-replicas", type=int, default=320)
+    bal_parser.add_argument("--json", action="store_true")
+
+    disp_parser = subparsers.add_parser("dispatch")
+    disp_parser.add_argument("--tokens", type=int, default=2048)
+    disp_parser.add_argument("--experts", type=int, default=256)
+    disp_parser.add_argument("--top-k", type=int, default=8)
+    disp_parser.add_argument("--nodes", type=int, default=2)
+    disp_parser.add_argument("--gpus-per-node", type=int, default=8)
+    disp_parser.add_argument("--json", action="store_true")
+
+    bench_parser = subparsers.add_parser("benchmark")
+    bench_parser.add_argument("--trials", type=int, default=10)
+
+    args = parser.parse_args()
+    if args.subcommand == "balance":
+        run_balance_cli(args)
+    elif args.subcommand == "dispatch":
+        run_dispatch_cli(args)
+    elif args.subcommand == "benchmark":
+        run_benchmark_cli(args)
+
+
+if __name__ == "__main__":
+    main()

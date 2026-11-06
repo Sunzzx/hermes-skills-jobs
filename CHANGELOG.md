@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-06 23:43:00 +05:30] - Evolved `eplb-moe-router`
+- **Title**: DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch.
+- **CLI**: `eplb-moe-router` (`balance`, `dispatch`, `benchmark`)
+
 ### [2026-11-06 08:50:00] - Evolved `disaggregated-prefill-decode`
 - **Title**: Disaggregated Prefill-Decode Architecture (Chunked Prefill & RDMA KV Transfer)
 - **Category**: systems

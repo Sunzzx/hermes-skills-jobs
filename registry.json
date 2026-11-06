@@ -1266,5 +1266,25 @@
       "FrontierAI",
       "TensorCores"
     ]
+  },
+  {
+    "id": "eplb-moe-router",
+    "title": "DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch.",
+    "path": "skills/systems/eplb-moe-router/SKILL.md",
+    "bin": "bin/eplb-moe-router",
+    "test": "tests/test_eplb_moe_router.py",
+    "tags": [
+      "DeepSeekV3",
+      "DeepSeekR1",
+      "MoE",
+      "EPLB",
+      "LoadBalancing",
+      "ExpertParallelism",
+      "vLLM",
+      "FrontierAI"
+    ]
   }
 ]
