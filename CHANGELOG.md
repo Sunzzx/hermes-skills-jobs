@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-06 08:50:00] - Evolved `disaggregated-prefill-decode`
+- **Title**: Disaggregated Prefill-Decode Architecture (Chunked Prefill & RDMA KV Transfer)
+- **Category**: systems
+- **Type**: skill
+- **Description**: Disaggregated LLM inference serving architecture decoupling compute-bound chunked prefill from memory-bandwidth-bound decode with zero-copy paged KV transfer.
+
 ### [2026-11-05 16:03:45] - Evolved `deepseek-fp8`
 - **Title**: DeepSeek-V3 FP8 Mixed-Precision Training & Quantized GEMM Engine
 - **Category**: systems
