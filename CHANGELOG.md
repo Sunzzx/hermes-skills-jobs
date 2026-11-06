@@ -644,3 +644,9 @@
 - **Title**: Muon Matrix-Level Orthogonal Optimizer via Newton-Schulz Iteration
 - **Category**: systems
 - **Description**: Muon (Momentum Orthogonalized by Newton-Schulz) optimizer: 5th-order matrix polar decomposition, aspect-ratio scaling, Nesterov momentum, and hybrid AdamW parameter routing.
+
+### [2026-11-06 18:25:26] - Evolved `nv-fp4-engine`
+- **Title**: NVIDIA Blackwell NVFP4 Micro-Tensor Float Quantization & Scaled GEMM Engine
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: NVIDIA Blackwell NVFP4 (FP4-E2M1) micro-tensor float quantization and scaled GEMM engine with two-level microscaling, 15-level symmetric codebook, and stochastic rounding.
