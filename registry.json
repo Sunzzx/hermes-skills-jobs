@@ -1229,5 +1229,23 @@
       "deep-learning",
       "systems"
     ]
+  },
+  {
+    "id": "disaggregated-prefill-decode",
+    "title": "Disaggregated Prefill-Decode Architecture & Paged KV Transfer",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Disaggregated LLM serving architecture decoupling compute-bound chunked prefill from memory-bandwidth-bound decode with zero-copy paged RDMA KV transfer.",
+    "cli": "disaggregated-pd-engine",
+    "evolved_at": "2026-11-06T08:56:45.000000",
+    "tags": [
+      "DisaggregatedServing",
+      "ChunkedPrefill",
+      "KVCache",
+      "vLLM",
+      "Mooncake",
+      "DistServe",
+      "RDMA"
+    ]
   }
 ]
