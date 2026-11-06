@@ -657,3 +657,8 @@
 - **Category**: systems
 - **Type**: skill+tool
 - **Description**: NVIDIA Blackwell NVFP4 (FP4-E2M1) micro-tensor float quantization and scaled GEMM engine with two-level microscaling, 15-level symmetric codebook, and stochastic rounding.
+
+### [2026-11-07 00:45:31] - Evolved `eplb-moe-router`
+- **Title**: DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine
+- **Category**: systems
+- **Description**: Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch.

@@ -1273,9 +1273,8 @@
     "category": "systems",
     "type": "skill+tool",
     "description": "Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch.",
-    "path": "skills/systems/eplb-moe-router/SKILL.md",
-    "bin": "bin/eplb-moe-router",
-    "test": "tests/test_eplb_moe_router.py",
+    "cli": null,
+    "evolved_at": "2026-11-07T00:45:31.553635",
     "tags": [
       "DeepSeekV3",
       "DeepSeekR1",
