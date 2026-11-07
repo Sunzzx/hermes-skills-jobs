@@ -1356,5 +1356,22 @@
       "LongContext",
       "SurpriseGating"
     ]
+  },
+  {
+    "id": "quest-attention-engine",
+    "title": "Quest Query-Aware Sparsity KV Cache Attention Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference.",
+    "cli": "quest-attention-engine",
+    "evolved_at": "2026-11-07T22:20:00",
+    "tags": [
+      "LLM",
+      "Inference",
+      "KVCache",
+      "SparseAttention",
+      "LongContext",
+      "Efficiency"
+    ]
   }
 ]

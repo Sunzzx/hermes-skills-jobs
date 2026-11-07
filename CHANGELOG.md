@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-07 22:20:00 +05:30] - Evolved `quest-attention-engine`
+- **Title**: Quest Query-Aware Sparsity KV Cache Attention Engine
+- **Category**: inference
+- **Type**: skill+tool
+- **Description**: Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference.
+- **CLI**: `quest-attention-engine` (`--test`, `--benchmark`)
+
 ### [2026-11-06 23:43:00 +05:30] - Evolved `eplb-moe-router`
 - **Title**: DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine
 - **Category**: systems
