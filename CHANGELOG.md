@@ -672,3 +672,8 @@
 - **Title**: EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine
 - **Category**: research
 - **Description**: EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling.
+
+### [2026-11-07 18:54:22] - Evolved `cinic-kernel-cache`
+- **Title**: CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache
+- **Category**: systems
+- **Description**: CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression.

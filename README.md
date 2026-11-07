@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-78-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-79-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (78 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (79 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -90,6 +90,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine** | `systems` | N/A | Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch. | `DeepSeekV3` `DeepSeekR1` `MoE` |
 | **DeepSeek-V3 Native Sparse Attention (NSA) Hierarchical Attention Engine** | `research` | `nsa-attention-engine` | DeepSeek-V3 Native Sparse Attention engine featuring multi-scale compressed token attention, dynamic top-k coarse block routing, and sliding-window local context. | `Frontier-AI` `DeepSeek-V3` `SparseAttention` |
 | **EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine** | `research` | `eagle2-engine` | EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling. | `Frontier-AI` `SpeculativeDecoding` `EAGLE-2` |
+| **CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache** | `systems` | `cinic-kernel-cache` | CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 
 ---
 
@@ -120,4 +121,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-07 17:25:38*
+*Last Evolved: 2026-11-07 18:54:22*

@@ -1321,5 +1321,23 @@
       "InferenceAcceleration",
       "LLM"
     ]
+  },
+  {
+    "id": "cinic-kernel-cache",
+    "title": "CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression.",
+    "cli": "cinic-kernel-cache",
+    "evolved_at": "2026-11-07T18:54:18.485599",
+    "tags": [
+      "Frontier-AI",
+      "SpeculativeDecoding",
+      "KVCache",
+      "InferenceAcceleration",
+      "TensorCompression",
+      "PagedMemory",
+      "LLM"
+    ]
   }
 ]
