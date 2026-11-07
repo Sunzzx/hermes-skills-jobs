@@ -1,5 +1,10 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-08 00:30:00 +05:30] - Evolved `medusa-speculative-engine`
+- **Title**: Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine
+- **Category**: inference
+- **Description**: Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration.
+
 ### [2026-11-07 22:20:00 +05:30] - Evolved `quest-attention-engine`
 - **Title**: Quest Query-Aware Sparsity KV Cache Attention Engine
 - **Category**: inference
