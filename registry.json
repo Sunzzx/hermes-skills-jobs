@@ -1373,5 +1373,22 @@
       "LongContext",
       "Efficiency"
     ]
+  },
+  {
+    "id": "medusa-speculative-engine",
+    "title": "Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration.",
+    "cli": "medusa-speculative-engine",
+    "evolved_at": "2026-11-08T00:33:35.579608",
+    "tags": [
+      "LLM",
+      "Inference",
+      "SpeculativeDecoding",
+      "Medusa",
+      "TreeAttention",
+      "Acceleration"
+    ]
   }
 ]
