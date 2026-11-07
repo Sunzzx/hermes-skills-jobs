@@ -75,7 +75,6 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **State Space Duality (SSD) & Mamba-2 SSM-Attention Engine** | `systems` | `ssd-engine` | Exact mathematical duality between structured SSMs and causal linear attention with 1-semiseparable decay masks. | `mamba-2` `ssm` `state-space-duality` |
 | **DeepSpeed Ulysses & Sequence Parallelism Engine** | `systems` | `sequence-parallel` | Distributed ultra-long context scaling with dual All-to-All collective transposition, zero-communication RMSNorm/MLP paths, and hybrid USP 2D parallelism. | `deepspeed-ulysses` `sequence-parallelism` `all-to-all` |
 | **Differential Attention (Diff-Transformer) and Noise Cancellation Engine** | `research` | `diff-attn` | Dual-softmax differential attention (A_diff = A1 - lambda * A2) eliminating attention noise, preventing attention sink drift, and amplifying Needle-In-A-Haystack retrieval. | `diff-transformer` `differential-attention` `noise-cancellation` |
-| **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
 | **DualPipe Bidirectional Pipeline Parallelism & Overlapping Engine** | `systems` | `dualpipe` | DeepSeek-V3 DualPipe bidirectional pipeline parallelism with V-shaped pipeline folding, decoupled backward passes (B_X and B_W), and zero-bubble communication-computation overlapping. | `DualPipe` `DeepSeekV3` `PipelineParallelism` |
 | **Multi-Token Prediction (MTP) & Speculative Drafting Engine** | `systems` | `mtp-engine` | DeepSeek-V3 Multi-Token Prediction (MTP) architecture: sequential MTP modules, dual representation fusion, shared unembedding projection, and zero-overhead speculative drafting. | `deepseek-v3` `multi-token-prediction` `mtp` |
 | **Gated DeltaNet & Parallel Delta Rule Engine** | `research` | `deltanet` | Gated DeltaNet parallel delta-rule linear attention: Householder fast-weight updates, forget gates, chunkwise scan, associative memory probes, and exact sequential-parallel equivalence. | `Frontier-AI` `GatedDeltaNet` `DeltaRule` |
@@ -92,6 +91,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine** | `research` | `eagle2-engine` | EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling. | `Frontier-AI` `SpeculativeDecoding` `EAGLE-2` |
 | **CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache** | `systems` | `cinic-kernel-cache` | CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 | **Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine** | `research` | `lightning-attention-2` | Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence. | `Frontier-AI` `LinearAttention` `LightningAttention` |
+| **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
 
 ---
 
@@ -122,4 +122,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-07 20:01:43*
+*Last Evolved: 2026-11-07 21:13:37*

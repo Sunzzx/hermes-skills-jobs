@@ -682,3 +682,8 @@
 - **Title**: Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine
 - **Category**: research
 - **Description**: Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence.
+
+### [2026-11-07 21:13:37] - Evolved `titans-neural-memory`
+- **Title**: Titans Test-Time Neural Long-Term Memory (LTM) Engine
+- **Category**: research
+- **Description**: Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion.
