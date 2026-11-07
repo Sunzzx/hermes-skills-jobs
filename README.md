@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-76-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-78-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (76 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (78 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -88,6 +88,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Disaggregated Prefill-Decode Architecture & Paged KV Transfer** | `systems` | `disaggregated-pd-engine` | Disaggregated LLM serving architecture decoupling compute-bound chunked prefill from memory-bandwidth-bound decode with zero-copy paged RDMA KV transfer. | `DisaggregatedServing` `ChunkedPrefill` `KVCache` |
 | **NVIDIA Blackwell NVFP4 Micro-Tensor Float Quantization & Scaled GEMM Engine** | `systems` | `nv-fp4-engine` | NVIDIA Blackwell NVFP4 (FP4-E2M1) micro-tensor float quantization and scaled GEMM engine with two-level microscaling, 15-level symmetric codebook, and stochastic rounding. | `NVFP4` `FP4` `Blackwell` |
 | **DeepSeek-V3 / vLLM Expert Parallelism Load Balancer (EPLB) & Dynamic Routing Engine** | `systems` | N/A | Hierarchical expert parallelism load balancer with redundant expert replication via Hamilton quota allocation, 2-stage multi-node LPT bin packing, and dynamic token-to-replica dispatch. | `DeepSeekV3` `DeepSeekR1` `MoE` |
+| **DeepSeek-V3 Native Sparse Attention (NSA) Hierarchical Attention Engine** | `research` | `nsa-attention-engine` | DeepSeek-V3 Native Sparse Attention engine featuring multi-scale compressed token attention, dynamic top-k coarse block routing, and sliding-window local context. | `Frontier-AI` `DeepSeek-V3` `SparseAttention` |
+| **EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine** | `research` | `eagle2-engine` | EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling. | `Frontier-AI` `SpeculativeDecoding` `EAGLE-2` |
 
 ---
 
@@ -118,4 +120,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-07 00:45:31*
+*Last Evolved: 2026-11-07 17:25:38*

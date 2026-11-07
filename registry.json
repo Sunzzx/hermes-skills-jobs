@@ -1303,5 +1303,23 @@
       "NSA",
       "LongContext"
     ]
+  },
+  {
+    "id": "eagle2-engine",
+    "title": "EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling.",
+    "cli": "eagle2-engine",
+    "evolved_at": "2026-11-07T17:25:23.205345",
+    "tags": [
+      "Frontier-AI",
+      "SpeculativeDecoding",
+      "EAGLE-2",
+      "TreeAttention",
+      "LosslessSampling",
+      "InferenceAcceleration",
+      "LLM"
+    ]
   }
 ]

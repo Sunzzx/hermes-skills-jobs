@@ -668,3 +668,7 @@
 - **Title**: DeepSeek-V3 Native Sparse Attention (NSA) Hierarchical Attention Engine
 - **Category**: research
 - **Description**: DeepSeek-V3 Native Sparse Attention engine featuring multi-scale compressed token attention, dynamic top-k coarse block routing, and sliding-window local context.
+### [2026-11-07 17:25:38] - Evolved `eagle2-engine`
+- **Title**: EAGLE-2 Dynamic Lossless Speculative Sampling & Draft Tree Attention Engine
+- **Category**: research
+- **Description**: EAGLE-2 dynamic lossless speculative sampling engine featuring context-aware dynamic draft tree expansion, 2D tree-structured causal attention verification, and multi-branch rejection sampling.
