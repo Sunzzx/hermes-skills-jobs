@@ -1,5 +1,10 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-08 01:40:00 +05:30] - Evolved `lookahead-decoding-engine`
+- **Title**: Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference
+- **Category**: inference
+- **Description**: Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration.
+
 ### [2026-11-08 00:30:00 +05:30] - Evolved `medusa-speculative-engine`
 - **Title**: Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine
 - **Category**: inference

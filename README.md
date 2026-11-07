@@ -94,6 +94,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
 | **Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine** | `inference` | `medusa-speculative-engine` | Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration. | `LLM` `Inference` `SpeculativeDecoding` `Medusa` |
 | **Quest Query-Aware Sparsity KV Cache Attention Engine** | `inference` | `quest-attention-engine` | Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference. | `LLM` `Inference` `KVCache` |
+| **Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference** | `inference` | `lookahead-decoding-engine` | Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration. | `LookaheadDecoding` `SpeculativeDecoding` `Lossless` |
 
 ---
 

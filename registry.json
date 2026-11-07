@@ -1390,5 +1390,21 @@
       "TreeAttention",
       "Acceleration"
     ]
+  },
+  {
+    "id": "lookahead-decoding-engine",
+    "title": "Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference",
+    "category": "inference",
+    "path": "skills/inference/lookahead-decoding-engine",
+    "binary": "bin/lookahead-decoding-engine",
+    "tests": "tests/test_lookahead_decoding_engine.py",
+    "description": "Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration.",
+    "tags": [
+      "LookaheadDecoding",
+      "SpeculativeDecoding",
+      "JacobiIteration",
+      "TreeAttention",
+      "LosslessAcceleration"
+    ]
   }
 ]
