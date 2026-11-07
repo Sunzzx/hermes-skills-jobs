@@ -715,3 +715,8 @@
 - **Title**: Quest Query-Aware Sparsity KV Cache Attention Engine
 - **Category**: inference
 - **Description**: Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference.
+
+### [2026-11-08 03:59:38] - Evolved `minference-engine`
+- **Title**: MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling
+- **Category**: inference
+- **Description**: MInference 1.0 dynamic sparse attention engine: accelerates long-context pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction.

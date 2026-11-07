@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-81-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-84-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (81 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (84 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -92,10 +92,10 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache** | `systems` | `cinic-kernel-cache` | CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 | **Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine** | `research` | `lightning-attention-2` | Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence. | `Frontier-AI` `LinearAttention` `LightningAttention` |
 | **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
-| **Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine** | `inference` | `medusa-speculative-engine` | Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration. | `LLM` `Inference` `SpeculativeDecoding` `Medusa` |
 | **Quest Query-Aware Sparsity KV Cache Attention Engine** | `inference` | `quest-attention-engine` | Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference. | `LLM` `Inference` `KVCache` |
-| **Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference** | `inference` | `lookahead-decoding-engine` | Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration. | `LookaheadDecoding` `SpeculativeDecoding` `Lossless` |
-| **MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling** | `inference` | `minference-engine` | Accelerate LLM prompt pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction. | `MInference` `SparseAttention` `LongContext` `Prefill` |
+| **Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine** | `inference` | `medusa-speculative-engine` | Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration. | `LLM` `Inference` `SpeculativeDecoding` |
+| **Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference** | `inference` | N/A | Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration. | `LookaheadDecoding` `SpeculativeDecoding` `JacobiIteration` |
+| **MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling** | `inference` | `minference-engine` | MInference 1.0 dynamic sparse attention engine: accelerates long-context pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction. | `MInference` `SparseAttention` `LongContext` |
 
 ---
 
@@ -126,4 +126,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-07 23:24:04*
+*Last Evolved: 2026-11-08 03:59:38*
