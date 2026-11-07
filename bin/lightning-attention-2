@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine.
+
+Implements the Lightning Attention-2 mechanism featuring exact numerical equivalence
+between linear RNN recurrent state updates and intra-block chunked attention
+with exponential decay positional priors and tile-level parallel reduction.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
+
+
+@dataclass
+class LightningAttentionConfig:
+    d_model: int = 128
+    n_heads: int = 4
+    d_head: int = 32
+    block_size: int = 64
+    decay_lambda: float = 0.05
+    eps: float = 1e-6
+
+
+class LightningAttention2Engine:
+    """Lightning Attention-2 Engine with chunked tiled parallel and recurrent inference modes."""
+
+    def __init__(self, config: Optional[LightningAttentionConfig] = None):
+        self.config = config or LightningAttentionConfig()
+        assert self.config.d_model == self.config.n_heads * self.config.d_head
+        # Precompute per-head decay factors: lambda_h in [0.01, 0.1]
+        self.lambdas = np.linspace(0.01, self.config.decay_lambda * 2.0, self.config.n_heads, dtype=np.float32)
+
+    def get_decay_matrix(self, length: int, head_idx: int) -> np.ndarray:
+        """Compute causal exponential decay matrix D_{i, j} = exp(-lambda * (i - j)) for i >= j."""
+        lam = float(self.lambdas[head_idx])
+        indices = np.arange(length, dtype=np.float32)
+        diff = indices[:, None] - indices[None, :]
+        mask = diff >= 0
+        decay = np.where(mask, np.exp(-lam * diff), 0.0)
+        return decay.astype(np.float32)
+
+    def forward_exact_causal(self, q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Exact quadratic ground-truth reference for linear attention with causal decay.
+
+        Args:
+            q, k, v: [B, H, S, D]
+        Returns:
+            out: [B, H, S, D]
+        """
+        b, h, s, d = q.shape
+        out = np.zeros_like(q)
+        for head_idx in range(h):
+            decay = self.get_decay_matrix(s, head_idx)  # [S, S]
+            # linear attention similarity: (Q K^T) * Decay
+            # q_h: [B, S, D], k_h: [B, S, D]
+            qk = np.matmul(q[:, head_idx], k[:, head_idx].transpose(0, 2, 1))  # [B, S, S]
+            causal_sim = qk * decay[None, :, :]  # [B, S, S]
+            out[:, head_idx] = np.matmul(causal_sim, v[:, head_idx])  # [B, S, D]
+        return out
+
+    def forward_recurrent(self, q: np.ndarray, k: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """O(1) Memory / Step Recurrent Autoregressive Inference Mode.
+
+        At each step t:
+          S_t = exp(-lambda) * S_{t-1} + k_t^T v_t
+          y_t = q_t S_t
+        Args:
+            q, k, v: [B, H, S, D]
+        Returns:
+            out: [B, H, S, D], final_state: [B, H, D, D]
+        """
+        b, h, s, d = q.shape
+        out = np.zeros_like(q)
+        state = np.zeros((b, h, d, d), dtype=np.float32)
+
+        for t in range(s):
+            q_t = q[:, :, t, :]  # [B, H, D]
+            k_t = k[:, :, t, :]  # [B, H, D]
+            v_t = v[:, :, t, :]  # [B, H, D]
+
+            # outer product k_t^T v_t -> [B, H, D, D]
+            kv = np.einsum('bhd,bhm->bhdm', k_t, v_t)
+            decay = np.exp(-self.lambdas)[None, :, None, None]  # [1, H, 1, 1]
+            state = state * decay + kv
+
+            # y_t = q_t @ state
+            y_t = np.einsum('bhd,bhdm->bhm', q_t, state)
+            out[:, :, t, :] = y_t
+
+        return out, state
+
+    def forward_chunked(self, q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Hardware-Efficient Tiled Chunked Attention Forward Pass.
+
+        Splits sequence of length S into chunks of size C (block_size).
+        For each chunk c:
+          1. Intra-chunk attention (intra-tile causal decay via GEMM)
+          2. Inter-chunk context: query transformed with accumulated state from prior chunks
+          3. State transition: update KV running state across chunks
+        """
+        b, h, s, d = q.shape
+        block_size = self.config.block_size
+        num_chunks = math.ceil(s / block_size)
+        pad_len = num_chunks * block_size - s
+
+        if pad_len > 0:
+            q_p = np.pad(q, ((0, 0), (0, 0), (0, pad_len), (0, 0)))
+            k_p = np.pad(k, ((0, 0), (0, 0), (0, pad_len), (0, 0)))
+            v_p = np.pad(v, ((0, 0), (0, 0), (0, pad_len), (0, 0)))
+        else:
+            q_p, k_p, v_p = q, k, v
+
+        out_p = np.zeros_like(q_p)
+        running_state = np.zeros((b, h, d, d), dtype=np.float32)
+
+        for c in range(num_chunks):
+            start_idx = c * block_size
+            end_idx = start_idx + block_size
+
+            q_c = q_p[:, :, start_idx:end_idx, :]  # [B, H, C, D]
+            k_c = k_p[:, :, start_idx:end_idx, :]  # [B, H, C, D]
+            v_c = v_p[:, :, start_idx:end_idx, :]  # [B, H, C, D]
+
+            # 1. Intra-chunk local causal linear attention
+            intra_out = np.zeros_like(q_c)
+            for head_idx in range(h):
+                decay_c = self.get_decay_matrix(block_size, head_idx)  # [C, C]
+                qk_c = np.matmul(q_c[:, head_idx], k_c[:, head_idx].transpose(0, 2, 1))
+                sim_c = qk_c * decay_c[None, :, :]
+                intra_out[:, head_idx] = np.matmul(sim_c, v_c[:, head_idx])
+
+            # 2. Inter-chunk contribution from accumulated past state
+            # Decay each query token in this chunk from the end of the previous chunk
+            # Pos offset within chunk is m in [0, C-1], distance from chunk start is (m + 1)
+            inter_out = np.zeros_like(q_c)
+            for head_idx in range(h):
+                lam = float(self.lambdas[head_idx])
+                # token at m has decayed from block boundary by exp(-lam * (m + 1))
+                m_indices = np.arange(block_size, dtype=np.float32) + 1.0
+                q_decay = np.exp(-lam * m_indices)[None, :, None]  # [1, C, 1]
+                decayed_q = q_c[:, head_idx] * q_decay  # [B, C, D]
+                inter_out[:, head_idx] = np.matmul(decayed_q, running_state[:, head_idx])  # [B, C, D]
+
+            out_p[:, :, start_idx:end_idx, :] = intra_out + inter_out
+
+            # 3. Update running state to chunk end
+            # Each key-value pair at position j within chunk decays to chunk boundary by exp(-lam * (C - 1 - j))
+            for head_idx in range(h):
+                lam = float(self.lambdas[head_idx])
+                j_indices = np.arange(block_size, dtype=np.float32)
+                kv_decay = np.exp(-lam * (block_size - 1 - j_indices))[None, :, None]  # [1, C, 1]
+                k_decayed = k_c[:, head_idx] * kv_decay
+                # chunk_state = sum_j (k_decayed_j^T v_j)
+                chunk_state = np.einsum('bcd,bcm->bdm', k_decayed, v_c[:, head_idx])
+                chunk_total_decay = float(np.exp(-lam * block_size))
+                running_state[:, head_idx] = running_state[:, head_idx] * chunk_total_decay + chunk_state
+
+        if pad_len > 0:
+            return out_p[:, :, :s, :]
+        return out_p
+
+
+def verify_equivalence(seq_len: int = 128, block_size: int = 32) -> Dict[str, Any]:
+    """Verify exact mathematical equivalence between exact, recurrent, and chunked modes."""
+    np.random.seed(42)
+    b, h, d_head = 2, 4, 32
+    d_model = h * d_head
+    cfg = LightningAttentionConfig(d_model=d_model, n_heads=h, d_head=d_head, block_size=block_size)
+    engine = LightningAttention2Engine(cfg)
+
+    q = np.random.randn(b, h, seq_len, d_head).astype(np.float32) * 0.1
+    k = np.random.randn(b, h, seq_len, d_head).astype(np.float32) * 0.1
+    v = np.random.randn(b, h, seq_len, d_head).astype(np.float32) * 0.1
+
+    out_exact = engine.forward_exact_causal(q, k, v)
+    out_recurrent, _ = engine.forward_recurrent(q, k, v)
+    out_chunked = engine.forward_chunked(q, k, v)
+
+    diff_recurrent = float(np.max(np.abs(out_exact - out_recurrent)))
+    diff_chunked = float(np.max(np.abs(out_exact - out_chunked)))
+    rel_err_chunked = float(diff_chunked / (np.mean(np.abs(out_exact)) + 1e-8))
+
+    passed = diff_recurrent < 1e-4 and diff_chunked < 1e-4
+    return {
+        "seq_len": seq_len,
+        "block_size": block_size,
+        "diff_recurrent": diff_recurrent,
+        "diff_chunked": diff_chunked,
+        "rel_err_chunked": rel_err_chunked,
+        "passed": passed,
+    }
+
+
+def run_benchmark(seq_lens: List[int] = [128, 256, 512, 1024], block_size: int = 64) -> Dict[str, Any]:
+    """Benchmark execution speed and memory scaling of Chunked vs Recurrent vs Quadratic."""
+    b, h, d_head = 1, 4, 32
+    cfg = LightningAttentionConfig(d_model=h * d_head, n_heads=h, d_head=d_head, block_size=block_size)
+    engine = LightningAttention2Engine(cfg)
+    results = []
+
+    for s in seq_lens:
+        q = np.random.randn(b, h, s, d_head).astype(np.float32) * 0.05
+        k = np.random.randn(b, h, s, d_head).astype(np.float32) * 0.05
+        v = np.random.randn(b, h, s, d_head).astype(np.float32) * 0.05
+
+        # Warmup
+        _ = engine.forward_chunked(q, k, v)
+
+        # Chunked
+        t0 = time.perf_counter()
+        for _ in range(5):
+            _ = engine.forward_chunked(q, k, v)
+        t_chunk = (time.perf_counter() - t0) / 5.0
+
+        # Recurrent
+        t0 = time.perf_counter()
+        for _ in range(5):
+            _ = engine.forward_recurrent(q, k, v)
+        t_recur = (time.perf_counter() - t0) / 5.0
+
+        # Exact Quadratic (only up to 512 for speed)
+        t_exact = None
+        if s <= 512:
+            t0 = time.perf_counter()
+            for _ in range(5):
+                _ = engine.forward_exact_causal(q, k, v)
+            t_exact = (time.perf_counter() - t0) / 5.0
+
+        results.append({
+            "seq_len": s,
+            "t_chunked_ms": round(t_chunk * 1000, 3),
+            "t_recurrent_ms": round(t_recur * 1000, 3),
+            "t_exact_ms": round(t_exact * 1000, 3) if t_exact else None,
+            "speedup_vs_exact": round(t_exact / t_chunk, 2) if t_exact else None,
+        })
+
+    return {"benchmarks": results, "config": asdict(cfg)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Lightning Attention-2 Tiled Linear Engine")
+    parser.add_argument("--test", action="store_true", help="Run numerical equivalence self-tests")
+    parser.add_argument("--benchmark", action="store_true", help="Run sequence length scaling benchmark")
+    parser.add_argument("--seq-len", type=int, default=256, help="Sequence length for test/simulation")
+    parser.add_argument("--block-size", type=int, default=64, help="Chunk tile block size (default: 64)")
+    parser.add_argument("--json", action="store_true", help="Output results as machine-readable JSON")
+    args = parser.parse_args()
+
+    if args.test:
+        res = verify_equivalence(seq_len=args.seq_len, block_size=args.block_size)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"⚡ Lightning Attention-2 Equivalence Test (Seq={args.seq_len}, Block={args.block_size}):")
+            print(f"  • Recurrent vs Exact Max Abs Diff: {res['diff_recurrent']:.2e}")
+            print(f"  • Chunked vs Exact Max Abs Diff:   {res['diff_chunked']:.2e}")
+            print(f"  • Relative Error:                  {res['rel_err_chunked']:.2e}")
+            print(f"  • Status:                          {'✅ PASSED' if res['passed'] else '❌ FAILED'}")
+        sys.exit(0 if res["passed"] else 1)
+
+    elif args.benchmark:
+        bench = run_benchmark(block_size=args.block_size)
+        if args.json:
+            print(json.dumps(bench, indent=2))
+        else:
+            print(f"🚀 Lightning Attention-2 Scaling Benchmark (BlockSize={args.block_size}):")
+            print(f"{'Seq Len':<10} | {'Chunked (ms)':<14} | {'Recurrent (ms)':<15} | {'Quadratic (ms)':<15} | {'Speedup':<10}")
+            print("-" * 75)
+            for row in bench["benchmarks"]:
+                exact_str = f"{row['t_exact_ms']:.2f}" if row['t_exact_ms'] else "N/A"
+                speed_str = f"{row['speedup_vs_exact']:.2f}x" if row['speedup_vs_exact'] else "N/A"
+                print(f"{row['seq_len']:<10} | {row['t_chunked_ms']:<14.2f} | {row['t_recurrent_ms']:<15.2f} | {exact_str:<15} | {speed_str:<10}")
+        sys.exit(0)
+
+    else:
+        # Default quick demonstration
+        res = verify_equivalence(seq_len=128, block_size=32)
+        print("⚡ Lightning Attention-2 Tiled Linear Engine initialized.")
+        print(f"Equivalence verified: Max error = {res['diff_chunked']:.2e} (Passed: {res['passed']})")
+        print("Run with --test or --benchmark for comprehensive verification.")
+
+
+if __name__ == '__main__':
+    main()

@@ -677,3 +677,8 @@
 - **Title**: CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache
 - **Category**: systems
 - **Description**: CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression.
+
+### [2026-11-07 20:01:43] - Evolved `lightning-attention-2`
+- **Title**: Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine
+- **Category**: research
+- **Description**: Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence.

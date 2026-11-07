@@ -1339,5 +1339,22 @@
       "PagedMemory",
       "LLM"
     ]
+  },
+  {
+    "id": "lightning-attention-2",
+    "title": "Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence.",
+    "cli": "lightning-attention-2",
+    "evolved_at": "2026-11-07T20:01:43.331158",
+    "tags": [
+      "Frontier-AI",
+      "LinearAttention",
+      "LightningAttention",
+      "RecurrentAttention",
+      "EfficientTransformers",
+      "InferenceEngine"
+    ]
   }
 ]
