@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-08 02:50:00 +05:30] - Evolved `minference-engine`
+- **Title**: MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling
+- **Category**: inference
+- **Description**: Accelerate LLM prompt pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction.
+- **CLI**: `minference-engine` (`--test`, `--benchmark`)
+
 ### [2026-11-08 01:40:00 +05:30] - Evolved `lookahead-decoding-engine`
 - **Title**: Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference
 - **Category**: inference

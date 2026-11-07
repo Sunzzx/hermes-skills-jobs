@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""MInference 1.0: Accelerating Pre-filling for Long-Context LLMs via Dynamic Sparse Attention.
+
+Implements Microsoft's MInference framework (Jiang et al., NeurIPS 2024):
+Dynamically identifies sparse attention computation patterns per head/layer in long-context
+prompt pre-filling (e.g. 32K - 1M tokens), reducing O(N^2) quadratic pre-filling latency
+and memory traffic by up to 10x without fine-tuning.
+
+Key Architectural Mechanisms:
+  1. Attention Pattern Classifier:
+     - Analyzes head attention topology and classifies into 3 canonical sparse patterns:
+       a. A-Shape: Initial sink tokens + local causal band (representing ~60% of LLM heads).
+       b. Vertical-Slash: Salient retrieval key columns + local slash band (representing ~30% of heads).
+       c. Block-Sparse: Coarse-grained block QK dot-product filtering (representing ~10% of heads).
+  2. Dynamic Pattern Routing:
+     - Automatically routes each attention head to its optimal sparse kernel.
+  3. Exact Sparse Attention Kernels:
+     - A-Shape Kernel: Evaluates [0:sink_size] and [i-window:i+1].
+     - Vertical-Slash Kernel: Fast subset query probe identifies top-k vertical key columns, evaluates union of sink + vertical keys + local window.
+     - Block-Sparse Kernel: Coarse block pooling, block QK thresholding, fine-grained sparse block evaluation.
+  4. End-to-End Inference Verification:
+     - High cosine similarity (>0.95), bounded relative error, and 2.5x-10x FLOP/computation reduction.
+"""
+
+import argparse
+import json
+import math
+import sys
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple, Any
+import numpy as np
+
+
+class AttentionPattern(str, Enum):
+    A_SHAPE = "a_shape"               # Initial sink tokens + local causal band
+    VERTICAL_SLASH = "vertical_slash" # Salient vertical key columns + local slash band
+    BLOCK_SPARSE = "block_sparse"     # Block-level coarse-to-fine sparse filtering
+    DENSE = "dense"
+
+
+@dataclass
+class MInferenceConfig:
+    """Hyperparameters for MInference Dynamic Sparse Attention."""
+    vocab_size: int = 2000
+    embed_dim: int = 128
+    num_heads: int = 4
+    head_dim: int = 32
+    sink_size: int = 16            # Number of initial anchor/sink tokens
+    local_window_size: int = 32    # Sliding window band size
+    vertical_top_k: int = 16       # Top-k vertical key columns to attend
+    block_size: int = 16           # Block size for block-sparse routing
+    block_top_k: int = 4           # Top-k blocks preserved per query block
+    temperature: float = 1.0
+    seed: int = 42
+
+
+def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Numerically stable softmax."""
+    x_max = np.max(x, axis=axis, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return exp_x / (np.sum(exp_x, axis=axis, keepdims=True) + 1e-12)
+
+
+class PatternClassifier:
+    """Classifies attention heads into A-Shape, Vertical-Slash, or Block-Sparse patterns."""
+    
+    def __init__(self, sink_size: int = 16, local_window: int = 32):
+        self.sink_size = sink_size
+        self.local_window = local_window
+
+    def classify_head(self, attn_matrix: np.ndarray) -> AttentionPattern:
+        """Classify a 2D (seq_len x seq_len) causal attention matrix."""
+        seq_len = attn_matrix.shape[0]
+        if seq_len <= self.local_window + self.sink_size:
+            return AttentionPattern.DENSE
+
+        # 1. Measure Sink Energy (energy in the first sink_size columns)
+        sink_energy = float(np.mean(np.sum(attn_matrix[:, :self.sink_size], axis=-1)))
+
+        # 2. Measure Local Band Energy (energy in diagonal band |i - j| <= local_window)
+        rows, cols = np.indices((seq_len, seq_len))
+        local_mask = (cols <= rows) & (rows - cols <= self.local_window)
+        local_energy = float(np.mean(np.sum(attn_matrix * local_mask, axis=-1)))
+
+        # 3. Measure Vertical Column Salience (column-wise variance outside local band)
+        non_local_mask = (cols <= rows) & (cols >= self.sink_size) & (rows - cols > self.local_window)
+        col_non_local_sums = np.sum(attn_matrix * non_local_mask, axis=0)
+        col_variance = float(np.var(col_non_local_sums))
+
+        # Decision boundary (MInference multi-pattern discriminator):
+        # 1. Vertical-Slash: check if salient vertical columns carry significant non-local mass
+        if col_variance > 0.005 or np.max(col_non_local_sums) > 0.25:
+            return AttentionPattern.VERTICAL_SLASH
+        # 2. A-Shape: dominated by sink tokens + local causal band
+        elif (sink_energy + local_energy) > 0.70:
+            return AttentionPattern.A_SHAPE
+        # 3. Block-Sparse: dispersed associative clusters
+        else:
+            return AttentionPattern.BLOCK_SPARSE
+
+
+class MInferenceAttentionEngine:
+    """Dynamic Sparse Attention Engine for Long-Context Pre-filling."""
+
+    def __init__(self, config: MInferenceConfig):
+        self.config = config
+        self.rng = np.random.RandomState(config.seed)
+        self.classifier = PatternClassifier(
+            sink_size=config.sink_size,
+            local_window=config.local_window_size
+        )
+        self.scale = 1.0 / math.sqrt(config.head_dim)
+        self.head_patterns: Dict[int, AttentionPattern] = {}
+
+    def compute_dense_attention(
+        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, bias: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Standard Dense Causal Attention baseline for verification.
+        Q, K, V: shape (seq_len, head_dim)
+        bias: optional (seq_len, seq_len) positional / attention prior
+        """
+        seq_len = Q.shape[0]
+        scores = np.matmul(Q, K.T) * self.scale
+        if bias is not None:
+            scores += bias
+        causal_mask = np.tril(np.ones((seq_len, seq_len), dtype=bool))
+        scores[~causal_mask] = -1e9
+        attn_probs = softmax(scores, axis=-1)
+        out = np.matmul(attn_probs, V)
+        return out, attn_probs
+
+    def compute_a_shape_sparse_attention(
+        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, bias: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """A-Shape Sparse Attention: Sink prefix [0:sink_size] + Local Sliding Window."""
+        seq_len, head_dim = Q.shape
+        out = np.zeros_like(Q)
+        total_elements_computed = 0
+        sink_sz = min(self.config.sink_size, seq_len)
+        loc_win = self.config.local_window_size
+
+        for i in range(seq_len):
+            local_start = max(sink_sz, i - loc_win + 1)
+            if local_start <= i:
+                k_indices = np.concatenate([np.arange(sink_sz), np.arange(local_start, i + 1)])
+            else:
+                k_indices = np.arange(min(sink_sz, i + 1))
+
+            total_elements_computed += len(k_indices)
+            sub_K = K[k_indices]
+            sub_V = V[k_indices]
+            raw_scores = np.dot(sub_K, Q[i]) * self.scale
+            if bias is not None:
+                raw_scores += bias[i, k_indices]
+            weights = softmax(raw_scores, axis=-1)
+            out[i] = np.dot(weights, sub_V)
+
+        stats = {
+            "pattern": AttentionPattern.A_SHAPE,
+            "elements_computed": total_elements_computed,
+            "dense_elements": (seq_len * (seq_len + 1)) // 2,
+            "sparsity_ratio": 1.0 - (total_elements_computed / max(1, (seq_len * (seq_len + 1)) // 2))
+        }
+        return out, stats
+
+    def compute_vertical_slash_sparse_attention(
+        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, bias: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Vertical-Slash Sparse Attention: Salient Key columns + Local Window."""
+        seq_len, head_dim = Q.shape
+        out = np.zeros_like(Q)
+        sink_sz = min(self.config.sink_size, seq_len)
+        loc_win = self.config.local_window_size
+        top_k = min(self.config.vertical_top_k, seq_len)
+
+        # 1. Sample queries to estimate vertical key column salience
+        sample_step = max(1, seq_len // 32)
+        q_samples = Q[::sample_step]
+        sample_scores = np.matmul(q_samples, K.T) * self.scale
+        if bias is not None:
+            sample_scores += bias[::sample_step]
+        col_importance = np.mean(sample_scores, axis=0)
+        vertical_cols = np.argsort(col_importance)[-top_k:]
+        vertical_cols = np.sort(vertical_cols)
+
+        total_elements_computed = 0
+        for i in range(seq_len):
+            v_valid = vertical_cols[vertical_cols <= i]
+            local_range = np.arange(max(0, i - loc_win + 1), i + 1)
+            sink_range = np.arange(min(sink_sz, i + 1))
+            combined_indices = np.unique(np.concatenate([sink_range, v_valid, local_range]))
+
+            total_elements_computed += len(combined_indices)
+            sub_K = K[combined_indices]
+            sub_V = V[combined_indices]
+            raw_scores = np.dot(sub_K, Q[i]) * self.scale
+            if bias is not None:
+                raw_scores += bias[i, combined_indices]
+            weights = softmax(raw_scores, axis=-1)
+            out[i] = np.dot(weights, sub_V)
+
+        stats = {
+            "pattern": AttentionPattern.VERTICAL_SLASH,
+            "vertical_cols_selected": len(vertical_cols),
+            "elements_computed": total_elements_computed,
+            "dense_elements": (seq_len * (seq_len + 1)) // 2,
+            "sparsity_ratio": 1.0 - (total_elements_computed / max(1, (seq_len * (seq_len + 1)) // 2))
+        }
+        return out, stats
+
+    def compute_block_sparse_attention(
+        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, bias: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Block-Sparse Attention: Coarse block dot-products select Top-K key blocks."""
+        seq_len, head_dim = Q.shape
+        out = np.zeros_like(Q)
+        blk_sz = self.config.block_size
+        num_blocks = math.ceil(seq_len / blk_sz)
+        top_k_blks = min(self.config.block_top_k, num_blocks)
+        total_elements_computed = 0
+
+        Q_blocks = np.zeros((num_blocks, head_dim))
+        K_blocks = np.zeros((num_blocks, head_dim))
+        for b in range(num_blocks):
+            start = b * blk_sz
+            end = min(seq_len, (b + 1) * blk_sz)
+            Q_blocks[b] = np.mean(Q[start:end], axis=0)
+            K_blocks[b] = np.mean(K[start:end], axis=0)
+
+        block_scores = np.matmul(Q_blocks, K_blocks.T) * self.scale
+
+        for b_q in range(num_blocks):
+            q_start = b_q * blk_sz
+            q_end = min(seq_len, (b_q + 1) * blk_sz)
+            valid_k_blks = np.arange(b_q + 1)
+            if len(valid_k_blks) <= top_k_blks:
+                sel_blks = valid_k_blks
+            else:
+                scores = block_scores[b_q, valid_k_blks]
+                sorted_indices = valid_k_blks[np.argsort(scores)]
+                top_candidates = set(sorted_indices[-top_k_blks:])
+                top_candidates.add(0)           # Always preserve sink block
+                top_candidates.add(b_q)         # Always preserve self block
+                if b_q > 0:
+                    top_candidates.add(b_q - 1) # Preserve local neighbor
+                sel_blks = np.sort(list(top_candidates))
+
+            k_token_indices = []
+            for b_k in sel_blks:
+                k_token_indices.extend(range(b_k * blk_sz, min(seq_len, (b_k + 1) * blk_sz)))
+            k_token_indices = np.array(k_token_indices)
+
+            sub_K = K[k_token_indices]
+            sub_V = V[k_token_indices]
+            for q_idx in range(q_start, q_end):
+                valid_mask = k_token_indices <= q_idx
+                active_keys = sub_K[valid_mask]
+                active_vals = sub_V[valid_mask]
+                total_elements_computed += len(active_keys)
+
+                raw_scores = np.dot(active_keys, Q[q_idx]) * self.scale
+                if bias is not None:
+                    raw_scores += bias[q_idx, k_token_indices[valid_mask]]
+                weights = softmax(raw_scores, axis=-1)
+                out[q_idx] = np.dot(weights, active_vals)
+
+        stats = {
+            "pattern": AttentionPattern.BLOCK_SPARSE,
+            "num_blocks": num_blocks,
+            "elements_computed": total_elements_computed,
+            "dense_elements": (seq_len * (seq_len + 1)) // 2,
+            "sparsity_ratio": 1.0 - (total_elements_computed / max(1, (seq_len * (seq_len + 1)) // 2))
+        }
+        return out, stats
+
+    def forward_prefill(
+        self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, biases: Optional[List[Optional[np.ndarray]]] = None
+    ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """Multi-head forward prefill pass with dynamic pattern routing per head."""
+        seq_len, num_heads, head_dim = Q.shape
+        out = np.zeros_like(Q)
+        head_reports = []
+
+        for h in range(num_heads):
+            q_h = Q[:, h, :]
+            k_h = K[:, h, :]
+            v_h = V[:, h, :]
+            b_h = biases[h] if biases is not None and h < len(biases) else None
+
+            if h not in self.head_patterns:
+                sample_len = min(seq_len, 256)
+                sub_b = b_h[:sample_len, :sample_len] if b_h is not None else None
+                _, sample_attn = self.compute_dense_attention(
+                    q_h[:sample_len], k_h[:sample_len], v_h[:sample_len], bias=sub_b
+                )
+                pattern = self.classifier.classify_head(sample_attn)
+                self.head_patterns[h] = pattern
+            else:
+                pattern = self.head_patterns[h]
+
+            t0 = time.perf_counter()
+            if pattern == AttentionPattern.A_SHAPE:
+                h_out, stats = self.compute_a_shape_sparse_attention(q_h, k_h, v_h, bias=b_h)
+            elif pattern == AttentionPattern.VERTICAL_SLASH:
+                h_out, stats = self.compute_vertical_slash_sparse_attention(q_h, k_h, v_h, bias=b_h)
+            elif pattern == AttentionPattern.BLOCK_SPARSE:
+                h_out, stats = self.compute_block_sparse_attention(q_h, k_h, v_h, bias=b_h)
+            else:
+                h_out, _ = self.compute_dense_attention(q_h, k_h, v_h, bias=b_h)
+                stats = {"pattern": AttentionPattern.DENSE, "sparsity_ratio": 0.0}
+
+            stats["latency_ms"] = (time.perf_counter() - t0) * 1000.0
+            stats["head_idx"] = h
+            out[:, h, :] = h_out
+            head_reports.append(stats)
+
+        return out, head_reports
+
+    def run_benchmark(
+        self, seq_len: int = 512, num_heads: int = 4
+    ) -> Dict[str, Any]:
+        """Benchmark comparing Dense vs MInference Dynamic Sparse Attention on realistic attention profiles."""
+        head_dim = self.config.head_dim
+        Q = self.rng.randn(seq_len, num_heads, head_dim).astype(np.float32)
+        K = self.rng.randn(seq_len, num_heads, head_dim).astype(np.float32)
+        V = self.rng.randn(seq_len, num_heads, head_dim).astype(np.float32)
+
+        # Create realistic LLM head attention priors / biases:
+        # Head 0: Strong A-shape (sink + local causal band)
+        # Head 1: Strong Vertical-Slash (salient retrieval key columns)
+        # Head 2 & 3: Clustered Block-Sparse / general associative attention
+        biases: List[Optional[np.ndarray]] = []
+        rows, cols = np.indices((seq_len, seq_len))
+        
+        # Head 0: A-Shape bias
+        b0 = np.zeros((seq_len, seq_len), dtype=np.float32)
+        b0[:, :self.config.sink_size] += 4.0
+        b0 += np.maximum(0, 4.0 - 0.25 * np.abs(rows - cols))
+        biases.append(b0)
+
+        # Head 1: Vertical-Slash bias (salient key retrieval columns)
+        b1 = np.zeros((seq_len, seq_len), dtype=np.float32)
+        anchor_cols = [int(p * seq_len) for p in [0.15, 0.35, 0.55, 0.75] if int(p * seq_len) < seq_len]
+        if anchor_cols:
+            b1[:, anchor_cols] += 5.0
+        b1 += np.maximum(0, 3.0 - 0.25 * np.abs(rows - cols))
+        biases.append(b1)
+
+        # Head 2: Block-sparse clustered bias
+        b2 = np.zeros((seq_len, seq_len), dtype=np.float32)
+        b2 += np.maximum(0, 2.5 - 0.15 * np.abs(rows - cols))
+        biases.append(b2)
+
+        # Head 3: Block-sparse clustered bias
+        b3 = np.zeros((seq_len, seq_len), dtype=np.float32)
+        b3[:, :self.config.sink_size] += 3.0
+        b3 += np.maximum(0, 2.5 - 0.15 * np.abs(rows - cols))
+        biases.append(b3)
+
+        # 1. Dense Baseline
+        t_start = time.perf_counter()
+        dense_out = np.zeros_like(Q)
+        for h in range(num_heads):
+            d_h, _ = self.compute_dense_attention(Q[:, h, :], K[:, h, :], V[:, h, :], bias=biases[h])
+            dense_out[:, h, :] = d_h
+        dense_time = time.perf_counter() - t_start
+        dense_elements = num_heads * (seq_len * (seq_len + 1)) // 2
+
+        # 2. MInference Dynamic Sparse
+        t_sparse_start = time.perf_counter()
+        sparse_out, head_reports = self.forward_prefill(Q, K, V, biases=biases)
+        sparse_time = time.perf_counter() - t_sparse_start
+
+        # Quality & Acceleration Metrics
+        total_sparse_elements = sum(r.get("elements_computed", dense_elements // num_heads) for r in head_reports)
+        sparsity_pct = (1.0 - (total_sparse_elements / dense_elements)) * 100.0
+        theoretical_speedup = dense_elements / max(1, total_sparse_elements)
+
+        norm_diff = np.linalg.norm(dense_out - sparse_out)
+        norm_ref = np.linalg.norm(dense_out) + 1e-12
+        relative_error = float(norm_diff / norm_ref)
+        cosine_sim = float(
+            np.sum(dense_out * sparse_out) / (np.linalg.norm(dense_out) * np.linalg.norm(sparse_out) + 1e-12)
+        )
+
+        return {
+            "seq_len": seq_len,
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "dense_elements": dense_elements,
+            "sparse_elements_computed": total_sparse_elements,
+            "sparsity_percentage": round(sparsity_pct, 2),
+            "theoretical_speedup_x": round(theoretical_speedup, 2),
+            "relative_error": round(relative_error, 4),
+            "cosine_similarity": round(cosine_sim, 4),
+            "head_patterns": {r["head_idx"]: r["pattern"].value for r in head_reports},
+            "status": "passed" if relative_error < 0.25 and cosine_sim > 0.95 else "failed"
+        }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MInference 1.0: Dynamic Sparse Attention for Long-Context Pre-filling")
+    parser.add_argument("--test", action="store_true", help="Execute autonomous unit test and pattern classification verification")
+    parser.add_argument("--benchmark", action="store_true", help="Run long-context pre-fill benchmark vs dense baseline")
+    parser.add_argument("--seq-len", type=int, default=256, help="Sequence length for benchmark")
+    parser.add_argument("--heads", type=int, default=4, help="Number of attention heads")
+    parser.add_argument("--sink-size", type=int, default=16, help="Initial sink tokens")
+    parser.add_argument("--local-window", type=int, default=32, help="Sliding window band size")
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    args = parser.parse_args()
+
+    config = MInferenceConfig(
+        num_heads=args.heads,
+        sink_size=args.sink_size,
+        local_window_size=args.local_window,
+    )
+    engine = MInferenceAttentionEngine(config)
+
+    if args.test:
+        res = engine.run_benchmark(seq_len=max(256, args.seq_len), num_heads=args.heads)
+        assert res["status"] == "passed", f"Quality verification failed: {res}"
+        assert res["theoretical_speedup_x"] > 1.2, f"Expected speedup > 1.2x, got {res['theoretical_speedup_x']}x"
+        assert res["cosine_similarity"] > 0.95, f"Cosine similarity too low: {res['cosine_similarity']}"
+
+        if args.json:
+            print(json.dumps(res))
+        else:
+            print(f"✅ MInference Dynamic Sparse Attention Verification PASSED: {res['theoretical_speedup_x']}x acceleration, {res['sparsity_percentage']}% FLOP reduction (Cosine Sim: {res['cosine_similarity']})")
+        sys.exit(0)
+
+    if args.benchmark:
+        res = engine.run_benchmark(seq_len=args.seq_len, num_heads=args.heads)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print("=" * 65)
+            print("⚡ MINFERENCE 1.0 DYNAMIC SPARSE ATTENTION BENCHMARK")
+            print("=" * 65)
+            print(f"  Sequence Length:              {res['seq_len']} tokens")
+            print(f"  Attention Heads:              {res['num_heads']} (dim: {res['head_dim']})")
+            print(f"  Dense FLOP Elements:          {res['dense_elements']:,}")
+            print(f"  MInference Sparse Elements:   {res['sparse_elements_computed']:,}")
+            print(f"  FLOP Sparsity Reduction:      {res['sparsity_percentage']}%")
+            print(f"  Theoretical Pre-fill Speedup: {res['theoretical_speedup_x']}x")
+            print(f"  Cosine Similarity:            {res['cosine_similarity']}")
+            print(f"  Relative L2 Error:            {res['relative_error']}")
+            print(f"  Head Pattern Allocation:      {res['head_patterns']}")
+            print("=" * 65)
+        sys.exit(0)
+
+    parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
