@@ -694,3 +694,8 @@
 - **Title**: Titans Test-Time Neural Long-Term Memory (LTM) Engine
 - **Category**: research
 - **Description**: Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion.
+
+### [2026-11-07 23:24:04] - Evolved `quest-attention-engine`
+- **Title**: Quest Query-Aware Sparsity KV Cache Attention Engine
+- **Category**: inference
+- **Description**: Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference.

@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-80-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-81-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (80 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (81 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -37,7 +37,6 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **LSM-Tree Storage Engine with Leveled Compaction & WAL** | `systems` | `lsm-tree` | Production-grade Log-Structured Merge-tree (LSM-Tree) storage engine: Concurrent SkipList MemTable with O(log n) lookups, append-only WAL with CRC32 polynomial framing, immutable SSTables with sparse indexing, Murmur/CRC32 Bloom filters, Leveled Compaction with multi-way min-heap merge-sort, and MVCC point-in-time snapshot isolation. | `Hardcore-Systems` `LSM-Tree` `StorageEngine` |
 | **Environment Drift, Secret Leak, and Schema Enforcement Engine** | `software-development` | `env-guard` | Deterministic environment preflight auditor enforcing .env / .env.example parity, secret leak prevention in committed templates, and strict type constraints. | `DevOps` `Environment` `Secrets` |
 | **Stripe Payments & Payouts Engine** | `finance` | `stripe-tool` | Inspect live Stripe balances, track bank payouts, generate instant payment links, and monitor digital revenue. | `Finance` `Stripe` `Payments` |
-| **Quest Query-Aware Sparsity KV Cache Attention Engine** | `inference` | `quest-attention-engine` | Dynamic token page bounding box estimation (K_min, K_max) with provable upper bounds, top-k selective fetch, and >90% KV memory transfer reduction. | `LLM` `KVCache` `SparseAttention` |
 | **Hyperdimensional 4D Fractal Raymarcher & Quaternion Julia Engine** | `creative` | `fractal-4d` | Production-grade 4D raymarcher in pure Python: Quaternion Julia sets, Mandelbulbs, Clifford Tori, SO(4) rotations, Blinn-Phong lighting, ambient occlusion, and Truecolor ANSI terminal visualization. | `Generative-Aesthetics` `4D-Fractals` `Quaternions` |
 | **Sparse Autoencoders & Mechanistic Interpretability Engine** | `research` | `sae-lens` | Mathematically rigorous Sparse Autoencoder (SAE) & Mechanistic Interpretability engine: Top-K sparse dictionary learning, polysemanticity disentanglement, dead latent residual resampling, causal activation steering, and monosemanticity evaluation. | `FrontierAI` `MechanisticInterpretability` `SparseAutoencoders` |
 | **Incident Timeline** | `software-development` | `trace-timeline` | Merge mixed timestamped logs into a sorted UTC event timeline with severity filtering and JSON output. | `IncidentResponse` `Logs` `Debugging` |
@@ -93,6 +92,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **CINIC: Compressed In-Network Inference & Kernel Paged Speculative Cache** | `systems` | `cinic-kernel-cache` | CINIC compressed in-network inference & kernel paged speculative cache featuring zero-copy tensor paging, tiered LRU memory management, and uniform 8-bit quantization with entropy compression. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 | **Lightning Attention-2: O(1) Linear Complexity Tiled Attention Engine** | `research` | `lightning-attention-2` | Lightning Attention-2 tiled linear attention engine featuring intra-block chunked GEMM, inter-block exponential state decay, and exact recurrent inference equivalence. | `Frontier-AI` `LinearAttention` `LightningAttention` |
 | **Titans Test-Time Neural Long-Term Memory (LTM) Engine** | `research` | `titans-ltm` | Titans test-time neural memory architecture with online gradient descent surprise learning, adaptive momentum/forgetting gates, persistent priors, and MAC/MAG sliding-window attention fusion. | `Titans` `NeuralMemory` `TestTimeLearning` |
+| **Quest Query-Aware Sparsity KV Cache Attention Engine** | `inference` | `quest-attention-engine` | Quest query-aware sparsity KV cache attention engine with dynamic page bounding-box estimation, top-k page selection, and >90% memory transfer reduction for long-context LLM inference. | `LLM` `Inference` `KVCache` |
 
 ---
 
@@ -123,4 +123,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-07 21:13:37*
+*Last Evolved: 2026-11-07 23:24:04*
