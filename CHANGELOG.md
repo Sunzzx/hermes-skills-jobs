@@ -742,3 +742,8 @@
 - **Title**: PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine
 - **Category**: inference
 - **Description**: Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction.
+
+### [2026-11-09 01:53:23] - Evolved `eagle2-engine`
+- **Title**: EAGLE-2: Lossless Speculative Decoding with Dynamic Feature-Extrapolation Trees
+- **Category**: inference
+- **Description**: Lossless speculative decoding architecture utilizing feature-level draft extrapolation and context-aware dynamic candidate tree construction for 2.5x-4.0x LLM inference speedup.

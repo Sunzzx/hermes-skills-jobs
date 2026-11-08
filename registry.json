@@ -1491,5 +1491,22 @@
       "llm-inference",
       "memory-optimization"
     ]
+  },
+  {
+    "id": "eagle2-engine",
+    "title": "EAGLE-2: Lossless Speculative Decoding with Dynamic Feature-Extrapolation Trees",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Lossless speculative decoding architecture utilizing feature-level draft extrapolation and context-aware dynamic candidate tree construction for 2.5x-4.0x LLM inference speedup.",
+    "cli": "eagle2-engine",
+    "evolved_at": "2026-11-09T01:53:23.306622",
+    "tags": [
+      "eagle2",
+      "speculative-decoding",
+      "dynamic-tree",
+      "feature-extrapolation",
+      "llm-inference",
+      "acceleration"
+    ]
   }
 ]
