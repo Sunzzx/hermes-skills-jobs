@@ -1508,5 +1508,22 @@
       "TRIAD",
       "InferenceEngine"
     ]
+  },
+  {
+    "id": "magic-decoding-engine",
+    "title": "MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference.",
+    "cli": "magic-decoding-engine",
+    "evolved_at": "2026-11-09T05:15:49.177935",
+    "tags": [
+      "Frontier-AI",
+      "SpeculativeDecoding",
+      "KVCache",
+      "MAGIC",
+      "TreeDecoding",
+      "InferenceEngine"
+    ]
   }
 ]

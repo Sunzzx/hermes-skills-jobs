@@ -101,6 +101,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **StreamingLLM: Efficient Streaming Language Models with Attention Sinks** | `inference` | `streaming-llm-engine` | Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning. | `streaming-llm` `attention-sinks` `kv-cache` |
 | **PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine** | `inference` | `pyramidkv-engine` | Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction. | `pyramidkv` `kv-cache` `layer-adaptive` |
 | **TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning** | `inference` | `triad-engine` | Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
+| **MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning** | `inference` | `magic-decoding-engine` | Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` `MAGIC` |
 
 ---
 

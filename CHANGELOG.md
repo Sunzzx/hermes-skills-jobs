@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-09 05:15:00 +05:30] - Evolved `magic-decoding-engine`
+- **Title**: MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning
+- **Category**: inference
+- **Description**: Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference with attention-sink conservation and Leviathan-style unbiased tree verification.
+- **CLI**: `magic-decoding-engine` (`benchmark`, `verify`)
+- **Verification**: 5/5 pytest tests passed
+
 ### [2026-11-08 08:22:00 +05:30] - Evolved `snapkv-engine`
 - **Title**: SnapKV: Fine-Grained KV Cache Compression Engine
 - **Category**: inference
