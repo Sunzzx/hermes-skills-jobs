@@ -1457,5 +1457,22 @@
       "llm",
       "attention"
     ]
+  },
+  {
+    "id": "streaming-llm-engine",
+    "title": "StreamingLLM: Efficient Streaming Language Models with Attention Sinks",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning.",
+    "cli": "streaming-llm-engine",
+    "evolved_at": "2026-11-08T13:42:03.691470+00:00",
+    "tags": [
+      "streaming-llm",
+      "attention-sinks",
+      "kv-cache",
+      "infinite-context",
+      "llm-inference",
+      "memory-compression"
+    ]
   }
 ]

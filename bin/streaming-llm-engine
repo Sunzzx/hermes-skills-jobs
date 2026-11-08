@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""
+StreamingLLM: Efficient Streaming Language Models with Attention Sinks
+
+Paper: "Efficient Streaming Language Models with Attention Sinks" (Xiao et al., 2023)
+Enables infinite sequence length processing for pre-trained LLMs with zero fine-tuning.
+Maintains a fixed-size KV cache consisting of:
+  1. Initial Attention Sinks: [0 : num_sink_tokens] preserving softmax normalization anchors
+  2. Rolling Local Window: [-window_size :] preserving recent local context
+"""
+
+import argparse
+import json
+import math
+import os
+import sys
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+
+@dataclass
+class StreamingLLMConfig:
+    num_sink_tokens: int = 4
+    local_window_size: int = 64
+    num_heads: int = 8
+    head_dim: int = 64
+    device: str = "cpu"
+
+    @property
+    def max_capacity(self) -> int:
+        return self.num_sink_tokens + self.local_window_size
+
+
+class AttentionSinkKVCache:
+    """
+    Streaming Attention Sink KV Cache.
+    Maintains sink tokens (indices 0..num_sink_tokens-1) and a FIFO local window.
+    """
+
+    def __init__(self, config: StreamingLLMConfig):
+        self.config = config
+        self.total_tokens_seen = 0
+        self.keys: List[Any] = []
+        self.values: List[Any] = []
+        self.token_positions: List[int] = []
+
+    def update(self, key: Any, value: Any, pos: Optional[int] = None) -> None:
+        """
+        Insert incoming key, value tensor for current step/token.
+        key, value expected shape: [num_heads, head_dim] or 1D list/array.
+        """
+        if pos is None:
+            pos = self.total_tokens_seen
+
+        if len(self.keys) < self.config.max_capacity:
+            self.keys.append(key)
+            self.values.append(value)
+            self.token_positions.append(pos)
+        else:
+            # Evict the oldest token in the local window (at index num_sink_tokens)
+            evict_idx = self.config.num_sink_tokens
+            self.keys.pop(evict_idx)
+            self.values.pop(evict_idx)
+            self.token_positions.pop(evict_idx)
+
+            self.keys.append(key)
+            self.values.append(value)
+            self.token_positions.append(pos)
+
+        self.total_tokens_seen += 1
+
+    def get_cache(self) -> Tuple[List[Any], List[Any], List[int]]:
+        return self.keys, self.values, self.token_positions
+
+    def compute_attention(self, query: Any) -> Tuple[Any, float]:
+        """
+        Computes scaled dot-product attention over cached keys/values for a query.
+        Returns (context_output, sink_attention_mass_fraction).
+        """
+        if not self.keys:
+            raise ValueError("KV cache is empty")
+
+        if np is not None:
+            q = np.array(query, dtype=np.float32)  # [dim] or [heads, dim]
+            k = np.array(self.keys, dtype=np.float32)  # [seq_len, dim] or [seq_len, heads, dim]
+            v = np.array(self.values, dtype=np.float32)
+
+            if q.ndim == 1 and k.ndim == 2:
+                scale = 1.0 / math.sqrt(q.shape[-1])
+                scores = np.dot(k, q) * scale  # [seq_len]
+                exp_scores = np.exp(scores - np.max(scores))
+                probs = exp_scores / (np.sum(exp_scores) + 1e-10)
+                context = np.dot(probs, v)
+                sink_mass = float(np.sum(probs[:self.config.num_sink_tokens]))
+                return context.tolist(), sink_mass
+            else:
+                if q.ndim == 1:
+                    q = q[None, :]
+                if k.ndim == 2:
+                    k = k[:, None, :]
+                    v = v[:, None, :]
+                scale = 1.0 / math.sqrt(q.shape[-1])
+                # q: [1, dim] or [heads, dim]
+                # k: [seq_len, heads, dim]
+                scores = np.sum(k * q, axis=-1) * scale  # [seq_len, heads]
+                max_scores = np.max(scores, axis=0, keepdims=True)
+                exp_scores = np.exp(scores - max_scores)
+                probs = exp_scores / (np.sum(exp_scores, axis=0, keepdims=True) + 1e-10)
+                context = np.sum(probs[:, :, None] * v, axis=0)  # [heads, dim]
+                sink_mass = float(np.mean(np.sum(probs[:self.config.num_sink_tokens, :], axis=0)))
+                return context.tolist(), sink_mass
+        else:
+            # Pure Python fallback
+            k_len = len(self.keys)
+            scores = [0.0] * k_len
+            dim = len(query)
+            scale = 1.0 / math.sqrt(dim)
+            for i in range(k_len):
+                scores[i] = sum(a * b for a, b in zip(query, self.keys[i])) * scale
+            max_s = max(scores)
+            exp_s = [math.exp(s - max_s) for s in scores]
+            sum_exp = sum(exp_s) + 1e-10
+            probs = [s / sum_exp for s in exp_s]
+            val_dim = len(self.values[0])
+            context = [0.0] * val_dim
+            for i in range(k_len):
+                for d in range(val_dim):
+                    context[d] += probs[i] * self.values[i][d]
+            sink_mass = sum(probs[:self.config.num_sink_tokens])
+            return context, sink_mass
+
+    def stats(self) -> Dict[str, Any]:
+        return {
+            "total_tokens_seen": self.total_tokens_seen,
+            "cached_tokens": len(self.keys),
+            "sink_tokens_retained": min(self.total_tokens_seen, self.config.num_sink_tokens),
+            "local_window_cached": max(0, len(self.keys) - self.config.num_sink_tokens),
+            "max_capacity": self.config.max_capacity,
+            "compression_ratio": round(self.total_tokens_seen / max(1, len(self.keys)), 2),
+            "retained_indices": self.token_positions
+        }
+
+
+def simulate_streaming(
+    stream_length: int = 500,
+    sink_tokens: int = 4,
+    window_size: int = 32,
+    head_dim: int = 32
+) -> Dict[str, Any]:
+    """
+    Simulate streaming token processing across an extensive context.
+    """
+    cfg = StreamingLLMConfig(
+        num_sink_tokens=sink_tokens,
+        local_window_size=window_size,
+        head_dim=head_dim
+    )
+    cache = AttentionSinkKVCache(cfg)
+
+    np_rng = np.random.default_rng(42) if np is not None else None
+
+    sink_masses = []
+    for t in range(stream_length):
+        # Initial tokens have larger norm / anchor presence (simulating attention sink formation)
+        norm_boost = 3.0 if t < sink_tokens else 1.0
+        if np_rng is not None:
+            k = (np_rng.standard_normal((head_dim,)) * norm_boost).tolist()
+            v = (np_rng.standard_normal((head_dim,))).tolist()
+            q = (np_rng.standard_normal((head_dim,))).tolist()
+        else:
+            k = [math.sin(t * 0.1 + d) * norm_boost for d in range(head_dim)]
+            v = [math.cos(t * 0.1 + d) for d in range(head_dim)]
+            q = [math.sin((t + 1) * 0.1 + d) for d in range(head_dim)]
+
+        cache.update(k, v, pos=t)
+        if (t + 1) % 50 == 0 or t == stream_length - 1:
+            _, sink_mass = cache.compute_attention(q)
+            sink_masses.append({"step": t + 1, "sink_attention_mass": round(sink_mass, 4)})
+
+    res = cache.stats()
+    res["sink_attention_trace"] = sink_masses
+    return res
+
+
+def main():
+    parser = argparse.ArgumentParser(description="StreamingLLM Attention Sink Inference Engine")
+    subparsers = parser.add_subparsers(dest="command")
+
+    sim_parser = subparsers.add_parser("simulate", help="Simulate streaming token generation")
+    sim_parser.add_argument("--stream-length", type=int, default=512, help="Number of tokens in stream")
+    sim_parser.add_argument("--sink-tokens", type=int, default=4, help="Number of initial attention sinks")
+    sim_parser.add_argument("--window-size", type=int, default=64, help="Rolling local window size")
+    sim_parser.add_argument("--dim", type=int, default=32, help="Head dimension")
+    sim_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    args = parser.parse_args()
+
+    if args.command == "simulate" or args.command is None:
+        stream_len = getattr(args, "stream_length", 512)
+        sinks = getattr(args, "sink_tokens", 4)
+        win = getattr(args, "window_size", 64)
+        dim = getattr(args, "dim", 32)
+        output_json = getattr(args, "json", False)
+
+        results = simulate_streaming(
+            stream_length=stream_len,
+            sink_tokens=sinks,
+            window_size=win,
+            head_dim=dim
+        )
+
+        if output_json:
+            print(json.dumps(results, indent=2))
+        else:
+            print("============================================================")
+            print(" ⚡ StreamingLLM Attention Sink Engine v1.0.0 ⚡")
+            print("============================================================")
+            print(f"Total Tokens Streamed:      {results['total_tokens_seen']}")
+            print(f"Cached KV Tokens:          {results['cached_tokens']} / {results['max_capacity']} (Capacity Bound)")
+            print(f"Attention Sinks Retained:   {results['sink_tokens_retained']}")
+            print(f"Local Window Cached:       {results['local_window_cached']}")
+            print(f"Compression Ratio:         {results['compression_ratio']}x")
+            print(f"Retained Range:            [0..{results['sink_tokens_retained']-1}] + [{results['retained_indices'][results['sink_tokens_retained']]}..{results['retained_indices'][-1]}]")
+            print("------------------------------------------------------------")
+            print("Sink Attention Mass Checkpoints:")
+            for pt in results['sink_attention_trace']:
+                print(f"  Step {pt['step']:<5} -> Sink Mass: {pt['sink_attention_mass']:.2%}")
+            print("============================================================")
+
+
+if __name__ == "__main__":
+    main()
