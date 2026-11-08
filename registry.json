@@ -1426,12 +1426,12 @@
   },
   {
     "id": "snapkv-engine",
-    "name": "snapkv-engine",
     "title": "SnapKV: Fine-Grained KV Cache Compression Engine",
     "category": "inference",
+    "type": "skill+tool",
     "description": "SnapKV LLM fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention.",
-    "path": "skills/inference/snapkv-engine/SKILL.md",
-    "executable": "bin/snapkv-engine",
+    "cli": null,
+    "evolved_at": "2026-11-08T09:30:32.697865",
     "tags": [
       "SnapKV",
       "KVCache",

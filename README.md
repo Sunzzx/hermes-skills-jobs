@@ -1,18 +1,17 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-84-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-85-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (84 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (85 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
-| **SnapKV: Fine-Grained KV Cache Compression Engine** | `inference` | `snapkv-engine` | SnapKV fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention. | `SnapKV` `KVCache` `MemoryCompression` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -97,6 +96,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Medusa-2 Self-Speculative Multi-Head Tree Decoding Engine** | `inference` | `medusa-speculative-engine` | Medusa-2 multi-head self-speculative decoding engine with parallel draft heads, tree attention verification, and 2.5x-3.5x lossless inference acceleration. | `LLM` `Inference` `SpeculativeDecoding` |
 | **Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference** | `inference` | N/A | Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration. | `LookaheadDecoding` `SpeculativeDecoding` `JacobiIteration` |
 | **MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling** | `inference` | `minference-engine` | MInference 1.0 dynamic sparse attention engine: accelerates long-context pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction. | `MInference` `SparseAttention` `LongContext` |
+| **SnapKV: Fine-Grained KV Cache Compression Engine** | `inference` | N/A | SnapKV LLM fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention. | `SnapKV` `KVCache` `MemoryCompression` |
 
 ---
 
@@ -127,4 +127,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-08 03:59:38*
+*Last Evolved: 2026-11-08 09:30:32*

@@ -727,3 +727,8 @@
 - **Title**: MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling
 - **Category**: inference
 - **Description**: MInference 1.0 dynamic sparse attention engine: accelerates long-context pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction.
+
+### [2026-11-08 09:30:32] - Evolved `snapkv-engine`
+- **Title**: SnapKV: Fine-Grained KV Cache Compression Engine
+- **Category**: inference
+- **Description**: SnapKV LLM fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention.
