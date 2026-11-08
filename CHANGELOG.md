@@ -737,3 +737,8 @@
 - **Title**: StreamingLLM: Efficient Streaming Language Models with Attention Sinks
 - **Category**: inference
 - **Description**: Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning.
+
+### [2026-11-09 00:35:01] - Evolved `pyramidkv-engine`
+- **Title**: PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine
+- **Category**: inference
+- **Description**: Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction.

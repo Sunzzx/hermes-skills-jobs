@@ -1474,5 +1474,22 @@
       "llm-inference",
       "memory-compression"
     ]
+  },
+  {
+    "id": "pyramidkv-engine",
+    "title": "PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction.",
+    "cli": "pyramidkv-engine",
+    "evolved_at": "2026-11-09T00:34:57.782583",
+    "tags": [
+      "pyramidkv",
+      "kv-cache",
+      "layer-adaptive",
+      "attention-compression",
+      "llm-inference",
+      "memory-optimization"
+    ]
   }
 ]
