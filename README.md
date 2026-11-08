@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-88-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-89-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (88 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (89 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -100,6 +100,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **H2O: Heavy-Hitter Oracle KV Cache Eviction & Compression Engine** | `inference` | `h2o-kv-cache` | Dynamic KV cache eviction and compression algorithm identifying power-law Heavy Hitters (H2) and recent sliding context to achieve 5x-10x memory reduction during long context LLM inference. | `kv-cache` `inference` `heavy-hitter` |
 | **StreamingLLM: Efficient Streaming Language Models with Attention Sinks** | `inference` | `streaming-llm-engine` | Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning. | `streaming-llm` `attention-sinks` `kv-cache` |
 | **PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine** | `inference` | `pyramidkv-engine` | Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction. | `pyramidkv` `kv-cache` `layer-adaptive` |
+| **TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning** | `inference` | `triad-engine` | Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 
 ---
 
@@ -130,4 +131,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-09 01:55:53*
+*Last Evolved: 2026-11-09 03:00:26*

@@ -1491,5 +1491,22 @@
       "llm-inference",
       "memory-optimization"
     ]
+  },
+  {
+    "id": "triad-engine",
+    "title": "TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference.",
+    "cli": "triad-engine",
+    "evolved_at": "2026-11-09T03:00:17.794259",
+    "tags": [
+      "Frontier-AI",
+      "SpeculativeDecoding",
+      "KVCache",
+      "Pruning",
+      "TRIAD",
+      "InferenceEngine"
+    ]
   }
 ]
