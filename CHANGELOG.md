@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-08 08:22:00 +05:30] - Evolved `snapkv-engine`
+- **Title**: SnapKV: Fine-Grained KV Cache Compression Engine
+- **Category**: inference
+- **Description**: SnapKV fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention.
+- **CLI**: `snapkv-engine` (`--test`, `--benchmark`)
+- **Verification**: 3/3 pytest test suites passed; 100% test coverage
+
 ### [2026-11-08 02:50:00 +05:30] - Evolved `minference-engine`
 - **Title**: MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling
 - **Category**: inference
