@@ -97,28 +97,18 @@ class SnapKVCompressor:
         candidate_start = self.sink_tokens
         candidate_end = seq_len - recent_tokens
 
-        selected_indices_per_head = []
-        for b in range(batch_size):
-            head_indices = []
-            for h in range(num_heads):
-                middle_scores = pooled_weights[b, h, candidate_start:candidate_end]
-                k = min(rem_capacity, len(middle_scores))
-                if k > 0:
-                    top_rel_idx = np.argsort(middle_scores)[-k:]
-                    top_abs_idx = sorted(list(candidate_start + top_rel_idx))
-                else:
-                    top_abs_idx = []
-                sink_idx = list(range(0, self.sink_tokens))
-                recent_idx = list(range(candidate_end, seq_len))
-                full_head_idx = sorted(list(set(sink_idx + top_abs_idx + recent_idx)))
-                head_indices.append(full_head_idx)
-            selected_indices_per_head.append(head_indices)
-
-        all_selected = set()
-        for b in range(batch_size):
-            for h in range(num_heads):
-                all_selected.update(selected_indices_per_head[b][h])
-        unified_idx = sorted(list(all_selected))
+        # Aggregate pooled scores across batch and heads to strictly enforce target capacity
+        mean_pooled = np.mean(pooled_weights, axis=(0, 1))  # [seq_len]
+        middle_scores = mean_pooled[candidate_start:candidate_end]
+        k = min(rem_capacity, len(middle_scores))
+        if k > 0:
+            top_rel_idx = np.argsort(middle_scores)[-k:]
+            top_abs_idx = sorted(list(candidate_start + top_rel_idx))
+        else:
+            top_abs_idx = []
+        sink_idx = list(range(0, self.sink_tokens))
+        recent_idx = list(range(candidate_end, seq_len))
+        unified_idx = sorted(list(set(sink_idx + top_abs_idx + recent_idx)))
         
         compressed_keys = keys[:, :, unified_idx, :]
         compressed_values = values[:, :, unified_idx, :]
