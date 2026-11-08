@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""SnapKV: LLM Fine-Grained KV Cache Compression Engine.
+
+Implements SnapKV (Li et al., NeurIPS 2024 / EMNLP 2024):
+1. Observation Window Voting: Analyzes attention patterns from the tail L_obs tokens of prompt.
+2. Kernel Pooling Selection: Applies 1D pooling / max-pooling over attention weights to cluster contiguous key features.
+3. Attention Sinks + Clustered Important Tokens + Recent Sliding Window: Selects to…
