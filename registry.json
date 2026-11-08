@@ -1440,5 +1440,22 @@
       "LLMInference",
       "AttentionClustering"
     ]
+  },
+  {
+    "id": "h2o-kv-cache",
+    "title": "H2O: Heavy-Hitter Oracle KV Cache Eviction & Compression Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Dynamic KV cache eviction and compression algorithm identifying power-law Heavy Hitters (H2) and recent sliding context to achieve 5x-10x memory reduction during long context LLM inference.",
+    "cli": "h2o-kv-cache",
+    "evolved_at": "2026-11-08T12:36:23.396326+00:00",
+    "tags": [
+      "kv-cache",
+      "inference",
+      "heavy-hitter",
+      "compression",
+      "llm",
+      "attention"
+    ]
   }
 ]
