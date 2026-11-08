@@ -732,3 +732,8 @@
 - **Title**: SnapKV: Fine-Grained KV Cache Compression Engine
 - **Category**: inference
 - **Description**: SnapKV LLM fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention.
+
+### [2026-11-08 20:13:42] - Evolved `streaming-llm-engine`
+- **Title**: StreamingLLM: Efficient Streaming Language Models with Attention Sinks
+- **Category**: inference
+- **Description**: Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning.

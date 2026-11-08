@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-85-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-87-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (85 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (87 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -97,6 +97,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Lookahead Decoding Engine: Break Sequential Dependency in LLM Inference** | `inference` | N/A | Break sequential autoregressive dependency via 2D window Jacobi lookahead branches and 2D causal mask parallel verification with 1.5x-2.5x lossless acceleration. | `LookaheadDecoding` `SpeculativeDecoding` `JacobiIteration` |
 | **MInference 1.0: Dynamic Sparse Attention Engine for Long-Context Pre-filling** | `inference` | `minference-engine` | MInference 1.0 dynamic sparse attention engine: accelerates long-context pre-filling via head-wise A-Shape, Vertical-Slash, and Block-Sparse dynamic routing with up to 10x latency and FLOP reduction. | `MInference` `SparseAttention` `LongContext` |
 | **SnapKV: Fine-Grained KV Cache Compression Engine** | `inference` | N/A | SnapKV LLM fine-grained KV cache compression engine: achieves 3.8x-8.2x memory reduction during long-context generation via observation window voting, pooled kernel clustering, and lossless retrieval retention. | `SnapKV` `KVCache` `MemoryCompression` |
+| **H2O: Heavy-Hitter Oracle KV Cache Eviction & Compression Engine** | `inference` | `h2o-kv-cache` | Dynamic KV cache eviction and compression algorithm identifying power-law Heavy Hitters (H2) and recent sliding context to achieve 5x-10x memory reduction during long context LLM inference. | `kv-cache` `inference` `heavy-hitter` |
+| **StreamingLLM: Efficient Streaming Language Models with Attention Sinks** | `inference` | `streaming-llm-engine` | Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning. | `streaming-llm` `attention-sinks` `kv-cache` |
 
 ---
 
@@ -127,4 +129,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-08 09:30:32*
+*Last Evolved: 2026-11-08 20:13:42*
