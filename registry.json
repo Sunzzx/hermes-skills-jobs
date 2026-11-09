@@ -1596,5 +1596,21 @@
       "memory-efficiency",
       "long-context"
     ]
+  },
+  {
+    "id": "magic-kv-engine",
+    "name": "MagicPIG Multi-Scale KV Sparsifier",
+    "description": "MagicPIG multi-scale approximate attention with locality-sensitive projection sketching and speculative sampling",
+    "category": "inference",
+    "cli": "magic-kv-engine",
+    "version": "1.0.0",
+    "tags": [
+      "llm",
+      "inference",
+      "kv-cache",
+      "sparsification",
+      "multi-scale",
+      "locality-sensitive-hashing"
+    ]
   }
 ]
