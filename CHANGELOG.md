@@ -826,3 +826,8 @@
 - **Title**: MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine
 - **Category**: inference
 - **Description**: MagicPIG multi-scale approximate attention with locality-sensitive projection sketching and speculative sampling
+
+### [2026-11-09 19:04:29] - Evolved `chunk-kv-engine`
+- **Title**: ChunkKV Dynamic KV Cache Sparsifier & Token Budget Allocator
+- **Category**: inference
+- **Description**: ChunkKV contiguous chunk partitioning with dynamic cross-correlation scoring and top-k speculative token budget allocation for ultra-long context LLM inference.

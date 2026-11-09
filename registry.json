@@ -1615,5 +1615,22 @@
     "title": "MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine",
     "type": "skill+tool",
     "evolved_at": "2026-11-09T15:45:12.000000"
+  },
+  {
+    "id": "chunk-kv-engine",
+    "name": "ChunkKV Dynamic KV Cache Sparsifier",
+    "title": "ChunkKV Dynamic KV Cache Sparsifier & Token Budget Allocator",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "ChunkKV contiguous chunk partitioning with dynamic cross-correlation scoring and top-k speculative token budget allocation for ultra-long context LLM inference.",
+    "cli": "chunk-kv-engine",
+    "evolved_at": "2026-11-09T19:04:18.412473",
+    "tags": [
+      "Frontier-AI",
+      "InferenceEngine",
+      "KVCache",
+      "ChunkAttention",
+      "Sparsification"
+    ]
   }
 ]

@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-95-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-96-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (95 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (96 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -107,6 +107,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **DuoAttention: Dual-Path Retrieval & Streaming Head Specialization KV Cache Engine** | `inference` | `duo-attention-engine` | Head-specialization KV cache pruning and memory reduction engine partitioning attention heads into full-context Retrieval Heads and bounded-sink Streaming Heads for 70-85% memory savings. | `duo-attention` `kv-cache` `streaming-attention` |
 | **ShadowKV: High-Throughput Long-Context LLM Inference Engine via Offloaded Shadow Summarization** | `inference` | `shadow-kv-engine` | Maintains compact low-rank shadow sketches in fast GPU memory while offloading high-precision full KV cache tensors to host DRAM or NVMe, dynamically retrieving top-k chunks on decode steps. | `llm` `inference` `kv-cache` |
 | **MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine** | `inference` | `magic-kv-engine` | MagicPIG multi-scale approximate attention with locality-sensitive projection sketching and speculative sampling | `llm` `inference` `kv-cache` |
+| **ChunkKV Dynamic KV Cache Sparsifier & Token Budget Allocator** | `inference` | `chunk-kv-engine` | ChunkKV contiguous chunk partitioning with dynamic cross-correlation scoring and top-k speculative token budget allocation for ultra-long context LLM inference. | `Frontier-AI` `InferenceEngine` `KVCache` |
 
 ---
 
@@ -137,4 +138,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-09 17:58:10*
+*Last Evolved: 2026-11-09 19:04:29*
