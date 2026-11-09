@@ -1632,5 +1632,21 @@
       "ChunkAttention",
       "Sparsification"
     ]
+  },
+  {
+    "id": "subgen-kv-cache",
+    "title": "SubGen: Sub-Sentence Speculative Generation & Key-Value Cache Compactor Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "SubGen sub-sentence syntactic span clustering with real-time cross-attention relevance scoring and speculative KV cache budget compaction for long-context LLMs.",
+    "cli": "subgen-kv-cache",
+    "evolved_at": "2026-11-09T21:47:47.501140",
+    "tags": [
+      "Frontier-AI",
+      "InferenceEngine",
+      "KVCache",
+      "SpeculativeDecoding",
+      "LongContext"
+    ]
   }
 ]

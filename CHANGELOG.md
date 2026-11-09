@@ -831,3 +831,8 @@
 - **Title**: ChunkKV Dynamic KV Cache Sparsifier & Token Budget Allocator
 - **Category**: inference
 - **Description**: ChunkKV contiguous chunk partitioning with dynamic cross-correlation scoring and top-k speculative token budget allocation for ultra-long context LLM inference.
+
+### [2026-11-09 21:47:47] - Evolved `subgen-kv-cache`
+- **Title**: SubGen: Sub-Sentence Speculative Generation & Key-Value Cache Compactor Engine
+- **Category**: inference
+- **Description**: SubGen sub-sentence syntactic span clustering with real-time cross-attention relevance scoring and speculative KV cache budget compaction for long-context LLMs.
