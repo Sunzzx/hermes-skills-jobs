@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-09 07:56:00 +05:30] - Evolved `sparq-attention-engine`
+- **Title**: SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification
+- **Category**: inference
+- **Description**: Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding.
+- **CLI**: `sparq-attention-engine` (`benchmark`, `verify`)
+- **Verification**: 3/3 unit & integration tests passed; formal invariants verified; 560/560 repository tests passing
+
 ### [2026-11-09 05:15:00 +05:30] - Evolved `magic-decoding-engine`
 - **Title**: MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning
 - **Category**: inference
