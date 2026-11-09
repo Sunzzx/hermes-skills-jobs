@@ -804,3 +804,8 @@
 - **Title**: SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification
 - **Category**: inference
 - **Description**: Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding.
+
+### [2026-11-09 11:18:28] - Evolved `surge-attention-engine`
+- **Title**: SurgeAttention: Batch-Level Dynamic Head-Varying Sparsification & Outlier Preservation Engine
+- **Category**: inference
+- **Description**: Dynamic head-varying KV cache sparsification with Z-score outlier channel preservation, attention sinks, and local window protection for long-context LLM decoding bandwidth reduction.

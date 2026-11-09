@@ -1543,5 +1543,24 @@
       "MemoryBandwidth",
       "LLM"
     ]
+  },
+  {
+    "id": "surge-attention-engine",
+    "title": "SurgeAttention: Batch-Level Dynamic Head-Varying Sparsification & Outlier Preservation Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Dynamic head-varying KV cache sparsification with Z-score outlier channel preservation, attention sinks, and local window protection for long-context LLM decoding bandwidth reduction.",
+    "cli": "surge-attention-engine",
+    "evolved_at": "2026-11-09T11:18:28.282255",
+    "tags": [
+      "Frontier-AI",
+      "SurgeAttention",
+      "KVCache",
+      "Sparsification",
+      "HeadVarying",
+      "OutlierAware",
+      "InferenceEngine",
+      "LLM"
+    ]
   }
 ]
