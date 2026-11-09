@@ -821,3 +821,8 @@
 - **Title**: ShadowKV: High-Throughput Long-Context LLM Inference Engine via Offloaded Shadow Summarization
 - **Category**: inference
 - **Description**: Maintains compact low-rank shadow sketches in fast GPU memory while offloading high-precision full KV cache tensors to host DRAM or NVMe, dynamically retrieving top-k chunks on decode steps.
+
+### [2026-11-09 17:58:10] - Evolved `magic-kv-engine`
+- **Title**: MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine
+- **Category**: inference
+- **Description**: MagicPIG multi-scale approximate attention with locality-sensitive projection sketching and speculative sampling

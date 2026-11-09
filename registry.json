@@ -1611,6 +1611,9 @@
       "sparsification",
       "multi-scale",
       "locality-sensitive-hashing"
-    ]
+    ],
+    "title": "MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine",
+    "type": "skill+tool",
+    "evolved_at": "2026-11-09T15:45:12.000000"
   }
 ]
