@@ -1562,5 +1562,22 @@
       "InferenceEngine",
       "LLM"
     ]
+  },
+  {
+    "id": "duo-attention-engine",
+    "title": "DuoAttention: Dual-Path Retrieval & Streaming Head Specialization KV Cache Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Head-specialization KV cache pruning and memory reduction engine partitioning attention heads into full-context Retrieval Heads and bounded-sink Streaming Heads for 70-85% memory savings.",
+    "cli": "duo-attention-engine",
+    "evolved_at": "2026-11-09T12:22:15.328851",
+    "tags": [
+      "duo-attention",
+      "kv-cache",
+      "streaming-attention",
+      "long-context",
+      "head-specialization",
+      "llm-inference"
+    ]
   }
 ]

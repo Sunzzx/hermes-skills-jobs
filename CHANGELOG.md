@@ -1,5 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-09 12:20:00 +05:30] - Evolved `duo-attention-engine`
+- **Title**: DuoAttention: Dual-Path Retrieval & Streaming Head Specialization KV Cache Engine
+- **Category**: inference
+- **Description**: Head-specialization KV cache pruning and memory reduction engine partitioning attention heads into full-context Retrieval Heads and bounded-sink Streaming Heads for 70-85% memory savings.
+- **CLI**: `duo-attention-engine` (`status`, `benchmark`, `simulate`)
+- **Verification**: 5/5 pytest unit tests passed
+
 ### [2026-11-09 07:56:00 +05:30] - Evolved `sparq-attention-engine`
 - **Title**: SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification
 - **Category**: inference

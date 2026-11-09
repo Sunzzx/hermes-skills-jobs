@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-91-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-93-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -103,6 +103,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning** | `inference` | `triad-engine` | Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 | **MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning** | `inference` | `magic-decoding-engine` | Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
 | **SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification** | `inference` | `sparq-attention-engine` | Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding. | `Frontier-AI` `SparQ` `Sparsification` |
+| **SurgeAttention: Batch-Level Dynamic Head-Varying Sparsification & Outlier Preservation Engine** | `inference` | `surge-attention-engine` | Dynamic head-varying KV cache sparsification with Z-score outlier channel preservation, attention sinks, and local window protection for long-context LLM decoding bandwidth reduction. | `Frontier-AI` `SurgeAttention` `KVCache` |
+| **DuoAttention: Dual-Path Retrieval & Streaming Head Specialization KV Cache Engine** | `inference` | `duo-attention-engine` | Dual-path attention head specialization partitioning heads into full-context Retrieval Heads and bounded-sink Streaming Heads for 70-85% KV memory and bandwidth savings. | `Frontier-AI` `DuoAttention` `KVCache` |
 
 ---
 
