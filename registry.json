@@ -1579,5 +1579,22 @@
       "head-specialization",
       "llm-inference"
     ]
+  },
+  {
+    "id": "shadow-kv-engine",
+    "title": "ShadowKV: High-Throughput Long-Context LLM Inference Engine via Offloaded Shadow Summarization",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Maintains compact low-rank shadow sketches in fast GPU memory while offloading high-precision full KV cache tensors to host DRAM or NVMe, dynamically retrieving top-k chunks on decode steps.",
+    "cli": "shadow-kv-engine",
+    "evolved_at": "2026-11-09T14:37:53.863501",
+    "tags": [
+      "llm",
+      "inference",
+      "kv-cache",
+      "offloading",
+      "memory-efficiency",
+      "long-context"
+    ]
   }
 ]

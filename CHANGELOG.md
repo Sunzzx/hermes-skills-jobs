@@ -816,3 +816,8 @@
 - **Title**: SurgeAttention: Batch-Level Dynamic Head-Varying Sparsification & Outlier Preservation Engine
 - **Category**: inference
 - **Description**: Dynamic head-varying KV cache sparsification with Z-score outlier channel preservation, attention sinks, and local window protection for long-context LLM decoding bandwidth reduction.
+
+### [2026-11-09 14:37:53] - Evolved `shadow-kv-engine`
+- **Title**: ShadowKV: High-Throughput Long-Context LLM Inference Engine via Offloaded Shadow Summarization
+- **Category**: inference
+- **Description**: Maintains compact low-rank shadow sketches in fast GPU memory while offloading high-precision full KV cache tensors to host DRAM or NVMe, dynamically retrieving top-k chunks on decode steps.
