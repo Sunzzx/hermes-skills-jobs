@@ -799,3 +799,8 @@
 - **Title**: TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning
 - **Category**: inference
 - **Description**: Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference.
+
+### [2026-11-09 08:59:10] - Evolved `sparq-attention-engine`
+- **Title**: SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification
+- **Category**: inference
+- **Description**: Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding.

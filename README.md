@@ -12,7 +12,6 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
-| **SparQ-Attention Dual-Stage Sparsification Engine** | `inference` | `sparq-attention-engine` | Bandwidth-efficient LLM inference via adaptive top-k feature and sequence dual sparsification: pre-scores attention using top-r query components, gathers top-k tokens, and strictly preserves attention sinks and sliding local window. | `Frontier-AI` `SparQ` `Sparsification` `KVCache` `InferenceEngine` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -102,7 +101,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **StreamingLLM: Efficient Streaming Language Models with Attention Sinks** | `inference` | `streaming-llm-engine` | Infinite context LLM streaming inference engine utilizing initial Attention Sinks (retaining initial KV pairs) combined with a rolling local attention window to maintain softmax stability and eliminate catastrophic perplexity collapse without fine-tuning. | `streaming-llm` `attention-sinks` `kv-cache` |
 | **PyramidKV: Dynamic Layer-Adaptive Hierarchical KV Cache Compression Engine** | `inference` | `pyramidkv-engine` | Layer-adaptive hierarchical KV cache compression allocating budgets across transformer layers via pyramidal decay, hybrid attention sink retention, and observation window pooling for 4x-16x memory reduction. | `pyramidkv` `kv-cache` `layer-adaptive` |
 | **TRIAD: Towards Robust and Efficient Inference via Asynchronous Speculative Decoding & KV Pruning** | `inference` | `triad-engine` | Asynchronous speculative decoding and dynamic chunk-level KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
-| **MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning** | `inference` | `magic-decoding-engine` | Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` `MAGIC` |
+| **MAGIC-Decoding: Memory-Augmented Generative Inference via Speculative Candidate Trees & KV Saliency Pruning** | `inference` | `magic-decoding-engine` | Memory-augmented speculative tree generation and saliency-guided KV cache pruning engine for high-throughput LLM inference. | `Frontier-AI` `SpeculativeDecoding` `KVCache` |
+| **SparQ-Attention: Bandwidth-Efficient LLM Inference via Adaptive Top-k Feature & Sequence Sparsification** | `inference` | `sparq-attention-engine` | Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding. | `Frontier-AI` `SparQ` `Sparsification` |
 
 ---
 
@@ -133,4 +133,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-09 03:00:26*
+*Last Evolved: 2026-11-09 08:59:10*

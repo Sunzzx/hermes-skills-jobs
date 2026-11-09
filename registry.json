@@ -1533,7 +1533,7 @@
     "type": "skill+tool",
     "description": "Dual-stage feature-dimension pre-scoring and sequence-level top-k gathering engine with attention sink & sliding window conservation for bandwidth-efficient LLM decoding.",
     "cli": "sparq-attention-engine",
-    "evolved_at": "2026-11-09T02:26:22.732498",
+    "evolved_at": "2026-11-09T08:59:09.999580",
     "tags": [
       "Frontier-AI",
       "SparQ",
