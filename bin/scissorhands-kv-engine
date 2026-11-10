@@ -2,7 +2,7 @@
 """Scissorhands: Exploiting the Persistence of Importance Hypothesis for KV Cache Pruning.
 
 Scissorhands maintains a bounded-budget KV cache by identifying and maintaining
-"pivotal tokens" (attention persistence tokens) while pruning non-essential intermediate
+'pivotal tokens' (attention persistence tokens) while pruning non-essential intermediate
 tokens without degrading perplexity or generation quality.
 """
 
@@ -12,4 +12,276 @@ import math
 import os
 import random
 import sys
-import …
+import time
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Tuple, Any, Optional
+
+
+@dataclass
+class ScissorhandsConfig:
+    num_heads: int = 8
+    head_dim: int = 64
+    max_capacity: int = 512
+    window_size: int = 64
+    sink_tokens: int = 4
+    persistence_history_steps: int = 16
+    importance_threshold: float = 0.05
+    decay_factor: float = 0.95
+    random_seed: int = 42
+
+
+class PersistenceScorer:
+    """Scores token importance and tracks temporal persistence of attention."""
+
+    def __init__(self, decay_factor: float = 0.95, threshold: float = 0.05):
+        self.decay_factor = decay_factor
+        self.threshold = threshold
+
+    def update_persistence(
+        self,
+        history: Dict[int, float],
+        attention_weights: List[float],
+        token_indices: List[int]
+    ) -> Dict[int, float]:
+        """Update exponential moving average of attention scores across steps."""
+        updated = {}
+        for idx, score in zip(token_indices, attention_weights):
+            prev = history.get(idx, 0.0)
+            # Persistence of importance update
+            updated[idx] = prev * self.decay_factor + score
+        return updated
+
+    def identify_pivotal_tokens(
+        self,
+        persistence_scores: Dict[int, float],
+        top_k: int
+    ) -> List[int]:
+        """Return the top-k tokens exhibiting persistent importance."""
+        sorted_tokens = sorted(persistence_scores.items(), key=lambda kv: kv[1], reverse=True)
+        return [tok for tok, _ in sorted_tokens[:top_k]]
+
+
+class ScissorhandsKVCacheEngine:
+    """Scissorhands KV Cache Compression Engine implementing persistence pruning."""
+
+    def __init__(self, config: ScissorhandsConfig):
+        self.config = config
+        self.rng = random.Random(config.random_seed)
+        self.scorer = PersistenceScorer(config.decay_factor, config.importance_threshold)
+        self.reset()
+
+    def reset(self):
+        # Key/Value storage: head -> list of (token_idx, vector)
+        self.k_cache: List[List[Tuple[int, List[float]]]] = [[] for _ in range(self.config.num_heads)]
+        self.v_cache: List[List[Tuple[int, List[float]]]] = [[] for _ in range(self.config.num_heads)]
+        # Token persistence scores: head -> dict of token_idx -> score
+        self.persistence: List[Dict[int, float]] = [{} for _ in range(self.config.num_heads)]
+        self.total_tokens_processed = 0
+
+    def _generate_synthetic_vector(self, token_idx: int) -> List[float]:
+        phase = (token_idx % 128) / 128.0 * 2.0 * math.pi
+        return [
+            math.sin(phase + i * 0.1) * (1.0 / math.sqrt(self.config.head_dim))
+            for i in range(self.config.head_dim)
+        ]
+
+    def prefill(self, seq_len: int) -> Dict[str, Any]:
+        """Simulate prefill of prompt context, maintaining sinks, recent window, and pivotal tokens."""
+        start_time = time.perf_counter()
+        self.reset()
+        self.total_tokens_processed = seq_len
+
+        for h in range(self.config.num_heads):
+            # Initial synthetic persistence initialization
+            for pos in range(seq_len):
+                vec_k = self._generate_synthetic_vector(pos)
+                vec_v = self._generate_synthetic_vector(pos + 1)
+                self.k_cache[h].append((pos, vec_k))
+                self.v_cache[h].append((pos, vec_v))
+
+                # Periodic high attention spikes for simulated key semantic anchor points
+                if pos < self.config.sink_tokens or (pos % 37 == 0) or (pos >= seq_len - self.config.window_size):
+                    score = 0.8 / (1.0 + 0.05 * (seq_len - pos))
+                else:
+                    score = 0.01 * (1.0 + (pos % 7))
+                self.persistence[h][pos] = score
+
+            # Prune down to budget if exceeding max_capacity
+            if len(self.k_cache[h]) > self.config.max_capacity:
+                self._prune_head(h)
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        cached_tokens_per_head = len(self.k_cache[0])
+        total_cached = cached_tokens_per_head * self.config.num_heads
+        raw_tokens = seq_len * self.config.num_heads
+        savings_pct = max(0.0, (1.0 - total_cached / max(1, raw_tokens)) * 100.0)
+
+        return {
+            "total_tokens": seq_len,
+            "cached_tokens_per_head": cached_tokens_per_head,
+            "compression_ratio": round(raw_tokens / max(1, total_cached), 2),
+            "memory_savings_pct": round(savings_pct, 2),
+            "prefill_time_ms": round(elapsed_ms, 3)
+        }
+
+    def _prune_head(self, head_idx: int):
+        """Prune a specific head down to max_capacity while preserving sinks, window, and persistent tokens."""
+        current_tokens = [tok for tok, _ in self.k_cache[head_idx]]
+        if len(current_tokens) <= self.config.max_capacity:
+            return
+
+        sink_set = set(current_tokens[:self.config.sink_tokens])
+        window_set = set(current_tokens[-self.config.window_size:])
+        protected_set = sink_set.union(window_set)
+
+        candidate_tokens = [t for t in current_tokens if t not in protected_set]
+        available_slots = self.config.max_capacity - len(protected_set)
+
+        if available_slots > 0 and candidate_tokens:
+            cand_scores = {t: self.persistence[head_idx].get(t, 0.0) for t in candidate_tokens}
+            pivotal = self.scorer.identify_pivotal_tokens(cand_scores, available_slots)
+            keep_set = protected_set.union(set(pivotal))
+        else:
+            keep_set = protected_set
+
+        # Re-build cache preserving sequence ordering
+        new_k = [(t, v) for t, v in self.k_cache[head_idx] if t in keep_set]
+        new_v = [(t, v) for t, v in self.v_cache[head_idx] if t in keep_set]
+        self.k_cache[head_idx] = new_k
+        self.v_cache[head_idx] = new_v
+
+        # Clean up stale persistence scores
+        self.persistence[head_idx] = {t: s for t, s in self.persistence[head_idx].items() if t in keep_set}
+
+    def decode_step(self, step_idx: int) -> Tuple[List[float], Dict[str, Any]]:
+        """Run one auto-regressive decode step, appending new token and pruning under persistence hypothesis."""
+        start_time = time.perf_counter()
+        new_pos = self.total_tokens_processed
+        self.total_tokens_processed += 1
+
+        # Synthetic query vector
+        q = self._generate_synthetic_vector(new_pos)
+
+        for h in range(self.config.num_heads):
+            k_vec = self._generate_synthetic_vector(new_pos)
+            v_vec = self._generate_synthetic_vector(new_pos + 1)
+            self.k_cache[h].append((new_pos, k_vec))
+            self.v_cache[h].append((new_pos, v_vec))
+
+            # Compute simulated attention dot-products
+            tokens_in_cache = [t for t, _ in self.k_cache[h]]
+            attn_scores = []
+            for t, kv in self.k_cache[h]:
+                dot = sum(a * b for a, b in zip(q, kv))
+                attn_scores.append(math.exp(min(dot, 10.0)))
+            sum_exp = sum(attn_scores) or 1.0
+            norm_attn = [s / sum_exp for s in attn_scores]
+
+            # Update persistence table
+            self.persistence[h] = self.scorer.update_persistence(self.persistence[h], norm_attn, tokens_in_cache)
+
+            # Enforce capacity bound
+            if len(self.k_cache[h]) > self.config.max_capacity:
+                self._prune_head(h)
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        output_repr = [0.02 * (step_idx % 17) for _ in range(self.config.head_dim)]
+
+        stats = {
+            "step_time_ms": round(elapsed_ms, 3),
+            "current_pos": new_pos,
+            "cache_size_per_head": len(self.k_cache[0]),
+            "total_cached_tokens": len(self.k_cache[0]) * self.config.num_heads
+        }
+        return output_repr, stats
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "engine": "Scissorhands-KV-Engine",
+            "status": "ready",
+            "num_heads": self.config.num_heads,
+            "head_dim": self.config.head_dim,
+            "max_capacity": self.config.max_capacity,
+            "window_size": self.config.window_size,
+            "sink_tokens": self.config.sink_tokens,
+            "current_total_processed": self.total_tokens_processed,
+            "current_cached_per_head": len(self.k_cache[0]) if self.k_cache else 0
+        }
+
+
+def run_benchmark(
+    seq_len: int = 4096,
+    gen_tokens: int = 16,
+    max_capacity: int = 512,
+    num_heads: int = 8,
+    head_dim: int = 64
+) -> Dict[str, Any]:
+    config = ScissorhandsConfig(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        max_capacity=max_capacity,
+        window_size=64,
+        sink_tokens=4
+    )
+    engine = ScissorhandsKVCacheEngine(config)
+
+    prefill_stats = engine.prefill(seq_len=seq_len)
+
+    decode_times = []
+    for step in range(gen_tokens):
+        _, d_stats = engine.decode_step(step)
+        decode_times.append(d_stats["step_time_ms"])
+
+    avg_decode_ms = sum(decode_times) / max(1, len(decode_times))
+    throughput = 1000.0 / avg_decode_ms if avg_decode_ms > 0 else 0.0
+
+    return {
+        "engine": "Scissorhands-KV-Engine",
+        "context_length": seq_len,
+        "generated_tokens": gen_tokens,
+        "max_capacity_budget": max_capacity,
+        "prefill_stats": prefill_stats,
+        "avg_decode_time_ms": round(avg_decode_ms, 3),
+        "throughput_tok_s": round(throughput, 2),
+        "memory_savings_pct": prefill_stats["memory_savings_pct"]
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Scissorhands KV Cache Compression CLI")
+    subparsers = parser.add_subparsers(dest="command", help="Sub-command to execute")
+
+    # status
+    subparsers.add_parser("status", help="Inspect Scissorhands engine status")
+
+    # bench
+    bench_parser = subparsers.add_parser("bench", help="Run Scissorhands benchmark")
+    bench_parser.add_argument("--seq-len", type=int, default=2048, help="Prompt context length")
+    bench_parser.add_argument("--gen-tokens", type=int, default=16, help="Number of tokens to decode")
+    bench_parser.add_argument("--capacity", type=int, default=256, help="KV Cache token budget per head")
+    bench_parser.add_argument("--heads", type=int, default=8, help="Number of attention heads")
+    bench_parser.add_argument("--dim", type=int, default=64, help="Head dimension")
+
+    args = parser.parse_args()
+
+    if args.command == "status":
+        config = ScissorhandsConfig()
+        engine = ScissorhandsKVCacheEngine(config)
+        print(json.dumps(engine.get_status(), indent=2))
+    elif args.command == "bench":
+        result = run_benchmark(
+            seq_len=args.seq_len,
+            gen_tokens=args.gen_tokens,
+            max_capacity=args.capacity,
+            num_heads=args.heads,
+            head_dim=args.dim
+        )
+        print(json.dumps(result, indent=2))
+    else:
+        # Default benchmark run
+        result = run_benchmark(seq_len=1024, gen_tokens=8, max_capacity=256)
+        print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
