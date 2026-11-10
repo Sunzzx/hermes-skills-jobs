@@ -1663,5 +1663,22 @@
       "LowRank",
       "SparseAttention"
     ]
+  },
+  {
+    "id": "scissorhands-kv-engine",
+    "name": "scissorhands-kv-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "Scissorhands: Attention Persistence Bounded KV Cache Pruning Engine",
+    "description": "Exploits the persistence of importance hypothesis to prune non-pivotal tokens while bounding KV cache budget.",
+    "bin": "bin/scissorhands-kv-engine",
+    "skill": "skills/inference/scissorhands-kv-engine/SKILL.md",
+    "tags": [
+      "kv-cache",
+      "attention-persistence",
+      "llm-optimization",
+      "memory-reduction",
+      "scissorhands"
+    ]
   }
 ]

@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Scissorhands: Exploiting the Persistence of Importance Hypothesis for KV Cache Pruning.
+
+Scissorhands maintains a bounded-budget KV cache by identifying and maintaining
+"pivotal tokens" (attention persistence tokens) while pruning non-essential intermediate
+tokens without degrading perplexity or generation quality.
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import …
