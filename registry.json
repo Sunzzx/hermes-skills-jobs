@@ -1680,5 +1680,22 @@
       "memory-reduction",
       "scissorhands"
     ]
+  },
+  {
+    "id": "gearkv-engine",
+    "name": "gearkv-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "GEAR: Ultra-Low-Bit Quantization and Low-Rank Residual KV Cache Engine",
+    "description": "Compresses LLM KV caches down to ultra-low bitwidths using uniform quantization, low-rank residual reconstruction, and outlier retention.",
+    "bin": "bin/gearkv-engine",
+    "skill": "skills/inference/gearkv-engine/SKILL.md",
+    "tags": [
+      "kv-cache",
+      "low-rank",
+      "quantization",
+      "llm-inference",
+      "gear"
+    ]
   }
 ]

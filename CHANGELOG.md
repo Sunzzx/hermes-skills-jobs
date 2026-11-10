@@ -841,3 +841,8 @@
 - **Title**: LoSparse-KV Low-Rank & Dynamic Sparse Attention Engine
 - **Category**: inference
 - **Description**: Low-rank approximation and dynamic sparse attention engine for ultra-long context LLM KV cache compression.
+
+### [2026-11-11 01:15:00] - Evolved `gearkv-engine`
+- **Title**: GEAR: Ultra-Low-Bit Quantization and Low-Rank Residual KV Cache Engine
+- **Category**: inference
+- **Description**: Compresses LLM KV caches down to ultra-low bitwidths using uniform quantization, low-rank residual reconstruction, and outlier retention.
