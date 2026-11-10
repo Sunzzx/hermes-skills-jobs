@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-97-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-98-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (97 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (98 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -109,6 +109,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **MagicPIG: Multi-Scale Top-K KV Cache Sparsification & Speculative Sampling Engine** | `inference` | `magic-kv-engine` | MagicPIG multi-scale approximate attention with locality-sensitive projection sketching and speculative sampling | `llm` `inference` `kv-cache` |
 | **ChunkKV Dynamic KV Cache Sparsifier & Token Budget Allocator** | `inference` | `chunk-kv-engine` | ChunkKV contiguous chunk partitioning with dynamic cross-correlation scoring and top-k speculative token budget allocation for ultra-long context LLM inference. | `Frontier-AI` `InferenceEngine` `KVCache` |
 | **SubGen: Sub-Sentence Speculative Generation & Key-Value Cache Compactor Engine** | `inference` | `subgen-kv-cache` | SubGen sub-sentence syntactic span clustering with real-time cross-attention relevance scoring and speculative KV cache budget compaction for long-context LLMs. | `Frontier-AI` `InferenceEngine` `KVCache` |
+| **LoSparse-KV Low-Rank & Dynamic Sparse Attention Engine** | `inference` | `losparse-kv-engine` | Low-rank approximation and dynamic sparse attention engine for ultra-long context LLM KV cache compression. | `LLM` `Inference` `KVCache` |
 
 ---
 
@@ -139,4 +140,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-09 21:47:47*
+*Last Evolved: 2026-11-10 17:30:38*

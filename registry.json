@@ -1648,5 +1648,20 @@
       "SpeculativeDecoding",
       "LongContext"
     ]
+  },
+  {
+    "id": "losparse-kv-engine",
+    "title": "LoSparse-KV Low-Rank & Dynamic Sparse Attention Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Low-rank approximation and dynamic sparse attention engine for ultra-long context LLM KV cache compression.",
+    "cli": "losparse-kv-engine",
+    "tags": [
+      "LLM",
+      "Inference",
+      "KVCache",
+      "LowRank",
+      "SparseAttention"
+    ]
   }
 ]

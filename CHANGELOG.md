@@ -836,3 +836,8 @@
 - **Title**: SubGen: Sub-Sentence Speculative Generation & Key-Value Cache Compactor Engine
 - **Category**: inference
 - **Description**: SubGen sub-sentence syntactic span clustering with real-time cross-attention relevance scoring and speculative KV cache budget compaction for long-context LLMs.
+
+### [2026-11-10 17:30:38] - Evolved `losparse-kv-engine`
+- **Title**: LoSparse-KV Low-Rank & Dynamic Sparse Attention Engine
+- **Category**: inference
+- **Description**: Low-rank approximation and dynamic sparse attention engine for ultra-long context LLM KV cache compression.
