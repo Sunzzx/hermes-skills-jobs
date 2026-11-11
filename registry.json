@@ -1785,5 +1785,22 @@
       "neurips-2024",
       "memory-efficiency"
     ]
+  },
+  {
+    "id": "fastgen-engine",
+    "name": "fastgen-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "FastGen: Adaptive KV Cache Compression via Attention Profiling (NeurIPS 2024)",
+    "description": "Profiles attention heads dynamically into special sink, punctuation, local streaming, and retrieval archetypes to allocate structural token retention budgets during LLM inference.",
+    "cli": "fastgen-engine",
+    "tags": [
+      "inference",
+      "kv-cache",
+      "attention-profiling",
+      "fastgen",
+      "neurips-2024",
+      "memory-efficiency"
+    ]
   }
 ]
