@@ -3,10 +3,218 @@
 """CacheGen KV Cache Delta-Encoding & Adaptive Quantization Streaming Engine.
 
 A production-grade implementation of CacheGen (SIGCOMM / arXiv:2310.07240):
-fast KV cache compression, delta-encoding across attention layers/tokens, and
+Fast KV cache compression, delta-encoding across attention layers/tokens, and
 custom chunk-based entropy/run-length bitstream serialization for ultra-low-latency
 streaming and distributed LLM context migration.
 """
 
 import sys
-import o…
+import os
+import math
+import json
+import zlib
+import time
+import struct
+import argparse
+from typing import Dict, List, Tuple, Any, Optional
+
+class CacheGenQuantizer:
+    """Quantizes floating point KV vectors into dynamic bit-width integer representations."""
+    
+    @staticmethod
+    def quantize_tensor(tensor: List[float], bits: int = 4) -> Tuple[List[int], float, float]:
+        if not tensor:
+            return [], 0.0, 0.0
+        min_val = min(tensor)
+        max_val = max(tensor)
+        if abs(max_val - min_val) < 1e-9:
+            return [0] * len(tensor), min_val, 1.0
+        
+        qmax = (1 << bits) - 1
+        scale = (max_val - min_val) / qmax
+        quantized = [
+            max(0, min(qmax, int(round((x - min_val) / scale))))
+            for x in tensor
+        ]
+        return quantized, min_val, scale
+
+    @staticmethod
+    def dequantize_tensor(quantized: List[int], min_val: float, scale: float) -> List[float]:
+        return [min_val + q * scale for q in quantized]
+
+
+class CacheGenDeltaEncoder:
+    """Delta encoder calculating residual differences across successive tokens or channel dimensions."""
+    
+    @staticmethod
+    def encode_deltas(quantized_tokens: List[List[int]]) -> List[List[int]]:
+        """Compute first-order delta residuals along the sequence axis."""
+        if not quantized_tokens:
+            return []
+        deltas = [list(quantized_tokens[0])]  # base anchor token
+        for i in range(1, len(quantized_tokens)):
+            prev = quantized_tokens[i - 1]
+            curr = quantized_tokens[i]
+            delta = [c - p for c, p in zip(curr, prev)]
+            deltas.append(delta)
+        return deltas
+
+    @staticmethod
+    def decode_deltas(deltas: List[List[int]]) -> List[List[int]]:
+        """Reconstruct quantized tokens from base anchor and residual deltas."""
+        if not deltas:
+            return []
+        recovered = [list(deltas[0])]
+        for i in range(1, len(deltas)):
+            prev = recovered[i - 1]
+            curr = [p + d for p, d in zip(prev, deltas[i])]
+            recovered.append(curr)
+        return recovered
+
+
+class CacheGenBitstream:
+    """Compresses token deltas and metadata into an optimized binary stream via byte-packing and zlib."""
+    
+    @staticmethod
+    def pack_payload(deltas: List[List[int]], min_val: float, scale: float, bits: int, layer_id: int) -> bytes:
+        seq_len = len(deltas)
+        dim = len(deltas[0]) if seq_len > 0 else 0
+        header = struct.pack(">IIIffi", 0x4347454E, layer_id, seq_len, dim, min_val, scale, bits)  # Magic 'CGEN'
+        
+        flat_deltas = [val for row in deltas for val in row]
+        delta_bytes = bytearray()
+        for val in flat_deltas:
+            clipped = max(-128, min(127, val))
+            delta_bytes.append(clipped & 0xFF)
+            
+        compressed = zlib.compress(delta_bytes, level=6)
+        return header + compressed
+
+    @staticmethod
+    def unpack_payload(payload: bytes) -> Tuple[int, List[List[int]], float, float, int]:
+        header_size = struct.calcsize(">IIIffi")
+        magic, layer_id, seq_len, dim, min_val, scale, bits = struct.unpack(">IIIffi", payload[:header_size])
+        if magic != 0x4347454E:
+            raise ValueError("Invalid CacheGen bitstream header magic")
+            
+        compressed_data = payload[header_size:]
+        decompressed = zlib.decompress(compressed_data)
+        
+        flat_deltas = []
+        for b in decompressed:
+            val = b if b < 128 else b - 256
+            flat_deltas.append(val)
+            
+        deltas = []
+        for i in range(seq_len):
+            deltas.append(flat_deltas[i * dim : (i + 1) * dim])
+            
+        return layer_id, deltas, min_val, scale, bits
+
+
+class CacheGenEngine:
+    """High-level orchestrator for compressing, transferring, and restoring LLM KV Caches."""
+    
+    def __init__(self, num_layers: int = 4, hidden_dim: int = 64, quant_bits: int = 4):
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.quant_bits = quant_bits
+        
+    def generate_synthetic_kv(self, seq_len: int = 256) -> Dict[str, List[List[List[float]]]] :
+        """Generate smooth correlated KV cache layers (seq_len x hidden_dim)."""
+        kv_data = {"keys": [], "values": []}
+        for _ in range(self.num_layers):
+            layer_k = []
+            layer_v = []
+            for s in range(seq_len):
+                row_k = [math.sin(s * 0.05 + d * 0.1) + 0.02 * math.cos(d) for d in range(self.hidden_dim)]
+                row_v = [math.cos(s * 0.03 + d * 0.08) + 0.01 * math.sin(s) for d in range(self.hidden_dim)]
+                layer_k.append(row_k)
+                layer_v.append(row_v)
+            kv_data["keys"].append(layer_k)
+            kv_data["values"].append(layer_v)
+        return kv_data
+
+    def compress_kv(self, kv_layer: List[List[float]], layer_id: int) -> bytes:
+        flat = [val for row in kv_layer for val in row]
+        quantized_flat, min_val, scale = CacheGenQuantizer.quantize_tensor(flat, bits=self.quant_bits)
+        
+        dim = len(kv_layer[0])
+        quantized_rows = [
+            quantized_flat[i * dim : (i + 1) * dim]
+            for i in range(len(kv_layer))
+        ]
+        deltas = CacheGenDeltaEncoder.encode_deltas(quantized_rows)
+        return CacheGenBitstream.pack_payload(deltas, min_val, scale, self.quant_bits, layer_id)
+
+    def decompress_kv(self, payload: bytes) -> Tuple[int, List[List[float]]]:
+        layer_id, deltas, min_val, scale, _ = CacheGenBitstream.unpack_payload(payload)
+        quantized_rows = CacheGenDeltaEncoder.decode_deltas(deltas)
+        
+        flat_q = [val for row in quantized_rows for val in row]
+        flat_floats = CacheGenQuantizer.dequantize_tensor(flat_q, min_val, scale)
+        dim = len(quantized_rows[0])
+        recovered = [
+            flat_floats[i * dim : (i + 1) * dim]
+            for i in range(len(quantized_rows))
+        ]
+        return layer_id, recovered
+
+    def benchmark(self, seq_len: int = 512) -> Dict[str, Any]:
+        data = self.generate_synthetic_kv(seq_len=seq_len)
+        original_bytes = self.num_layers * 2 * seq_len * self.hidden_dim * 4  # FP32
+        
+        t0 = time.perf_counter()
+        compressed_payloads = []
+        for l in range(self.num_layers):
+            k_payload = self.compress_kv(data["keys"][l], layer_id=l)
+            v_payload = self.compress_kv(data["values"][l], layer_id=l)
+            compressed_payloads.append((k_payload, v_payload))
+        comp_time_ms = (time.perf_counter() - t0) * 1000.0
+        
+        total_compressed_bytes = sum(len(kp) + len(vp) for kp, vp in compressed_payloads)
+        compression_ratio = original_bytes / total_compressed_bytes if total_compressed_bytes > 0 else 1.0
+        
+        t1 = time.perf_counter()
+        for kp, vp in compressed_payloads:
+            _, _ = self.decompress_kv(kp)
+            _, _ = self.decompress_kv(vp)
+        decomp_time_ms = (time.perf_counter() - t1) * 1000.0
+        
+        return {
+            "seq_len": seq_len,
+            "num_layers": self.num_layers,
+            "hidden_dim": self.hidden_dim,
+            "quant_bits": self.quant_bits,
+            "original_bytes": original_bytes,
+            "compressed_bytes": total_compressed_bytes,
+            "compression_ratio": round(compression_ratio, 2),
+            "compression_time_ms": round(comp_time_ms, 2),
+            "decompression_time_ms": round(decomp_time_ms, 2),
+            "bandwidth_reduction_pct": round((1.0 - (total_compressed_bytes / original_bytes)) * 100.0, 2)
+        }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CacheGen KV Cache Compression & Streaming CLI")
+    subparsers = parser.add_subparsers(dest="action", help="Action to perform")
+    
+    bench_p = subparsers.add_parser("bench", help="Run synthetic benchmark")
+    bench_p.add_argument("--seq-len", type=int, default=512, help="Sequence length")
+    bench_p.add_argument("--layers", type=int, default=4, help="Number of layers")
+    bench_p.add_argument("--dim", type=int, default=64, help="Hidden dimension")
+    bench_p.add_argument("--bits", type=int, default=4, help="Quantization bits")
+    
+    args = parser.parse_args()
+    
+    if args.action == "bench" or not args.action:
+        seq_len = getattr(args, "seq_len", 512)
+        layers = getattr(args, "layers", 4)
+        dim = getattr(args, "dim", 64)
+        bits = getattr(args, "bits", 4)
+        engine = CacheGenEngine(num_layers=layers, hidden_dim=dim, quant_bits=bits)
+        results = engine.benchmark(seq_len=seq_len)
+        print(json.dumps(results, indent=2))
+
+if __name__ == "__main__":
+    main()
