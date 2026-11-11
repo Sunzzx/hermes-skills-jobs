@@ -1,5 +1,15 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 04:00:00 +05:30] - Evolved `fastgen-engine`
+- **Title**: FastGen: Adaptive KV Cache Compression via Attention Profiling (NeurIPS 2024)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/fastgen-engine`
+  - `skills/inference/fastgen-engine/SKILL.md`
+  - `tests/test_fastgen_engine.py`
+- **Capabilities**: Classifies attention heads dynamically into 4 structural archetypes (Special Sink, Punctuation, Local Streaming, Retrieval Context) and allocates tailored token retention budgets, yielding up to 90%+ memory savings with sub-10µs decoding latency.
+
 ### [2026-11-12 01:45:00 +05:30] - Evolved `adakv-engine`
 - **Title**: AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)
 - **Category**: inference
