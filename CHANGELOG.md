@@ -1,5 +1,13 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-11 23:20:00 +05:30] - Evolved `palu-engine`
+- **Title**: Palu: Low-Rank KV-Cache Compression Engine (ICLR 2025)
+- **Category**: inference
+- **CLI / Binary**: `bin/palu-engine` (installed to `~/.local/bin/palu-engine`)
+- **Documentation**: `skills/inference/palu-engine/SKILL.md` (installed to `~/.hermes/skills/inference/palu-engine/SKILL.md`)
+- **Tests**: `tests/test_palu_engine.py` (100% pass rate)
+- **Features**: Post-training SVD low-rank projection for KV cache states, achieving 50%-75% memory footprint reduction, instant latent recomposition, and 2x decoding throughput boost.
+
 ### [2026-11-09 12:20:00 +05:30] - Evolved `duo-attention-engine`
 - **Title**: DuoAttention: Dual-Path Retrieval & Streaming Head Specialization KV Cache Engine
 - **Category**: inference

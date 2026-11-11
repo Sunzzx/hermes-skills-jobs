@@ -1748,5 +1748,25 @@
       "delta-encoding",
       "compression"
     ]
+  },
+  {
+    "id": "palu-engine",
+    "name": "palu-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "Palu: Low-Rank KV-Cache Compression Engine (ICLR 2025)",
+    "description": "Post-training low-rank projection for KV cache states, reducing LLM memory footprint by 50-75% via latent SVD caching.",
+    "command": "bin/palu-engine",
+    "entry_point": "skills/inference/palu-engine/SKILL.md",
+    "test_cmd": "pytest tests/test_palu_engine.py",
+    "tags": [
+      "inference",
+      "kv-cache",
+      "palu",
+      "low-rank",
+      "svd",
+      "latent-projection",
+      "compression"
+    ]
   }
 ]
