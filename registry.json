@@ -1729,5 +1729,24 @@
       "nsa",
       "llm-inference"
     ]
+  },
+  {
+    "id": "cachegen-engine",
+    "name": "cachegen-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "CacheGen Streaming KV Cache Compression & Delta-Encoding Engine",
+    "description": "Fast streaming KV cache compression, delta-encoding, and context migration for distributed LLM serving.",
+    "command": "bin/cachegen-engine",
+    "entry_point": "skills/inference/cachegen-engine/SKILL.md",
+    "test_cmd": "pytest tests/test_cachegen_engine.py",
+    "tags": [
+      "inference",
+      "kv-cache",
+      "cachegen",
+      "streaming",
+      "delta-encoding",
+      "compression"
+    ]
   }
 ]
