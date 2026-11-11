@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-100-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-105-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (100 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (105 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -112,6 +112,11 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **LoSparse-KV Low-Rank & Dynamic Sparse Attention Engine** | `inference` | `losparse-kv-engine` | Low-rank approximation and dynamic sparse attention engine for ultra-long context LLM KV cache compression. | `LLM` `Inference` `KVCache` |
 | **Scissorhands: Attention Persistence Bounded KV Cache Pruning Engine** | `inference` | N/A | Exploits the persistence of importance hypothesis to prune non-pivotal tokens while bounding KV cache budget. | `kv-cache` `attention-persistence` `llm-optimization` |
 | **GEAR: Ultra-Low-Bit Quantization and Low-Rank Residual KV Cache Engine** | `inference` | N/A | Compresses LLM KV caches down to ultra-low bitwidths using uniform quantization, low-rank residual reconstruction, and outlier retention. | `kv-cache` `low-rank` `quantization` |
+| **ZipCache: Accurate and Efficient KV Cache Compression via Channel-Wise Discrepancy** | `inference` | `zipcache-engine` | Exploits channel-wise sensitivity discrepancy and dimension-specific non-uniform quantization for accurate KV cache compression. | `kv-cache` `quantization` `llm-inference` |
+| **Native Sparse Attention (NSA) Multi-Scale Dynamic KV Engine** | `inference` | `bin/nsa-engine` | Hardware-aligned Native Sparse Attention (NSA) engine combining compressed coarse tokens, dynamically selected fine-grained blocks, and local sliding window for ultra-long context LLM inference. | `kv-cache` `sparse-attention` `deepseek-v3` |
+| **CacheGen Streaming KV Cache Compression & Delta-Encoding Engine** | `inference` | N/A | Fast streaming KV cache compression, delta-encoding, and context migration for distributed LLM serving. | `inference` `kv-cache` `cachegen` |
+| **Palu: Low-Rank KV-Cache Compression Engine (ICLR 2025)** | `inference` | N/A | Post-training low-rank projection for KV cache states, reducing LLM memory footprint by 50-75% via latent SVD caching. | `inference` `kv-cache` `palu` |
+| **AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)** | `inference` | N/A | Dynamically optimizes token retention budgets across attention layers and heads based on prompt importance patterns, shifting memory budget to pivotal retrieval heads. | `inference` `kv-cache` `adakv` |
 
 ---
 
@@ -142,4 +147,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-11 01:15:00*
+*Last Evolved: 2026-11-12 02:49:07*

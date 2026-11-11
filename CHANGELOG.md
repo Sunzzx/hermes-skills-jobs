@@ -878,3 +878,8 @@
   - Adaptive bit-width quantization, inter-token residual delta encoding, and compressed bitstream packaging.
   - Delivers >90% bandwidth reduction and 10.6x compression ratio for fast LLM KV cache migration and distributed serving.
   - Fully tested with unit test suite in `tests/test_cachegen_engine.py`.
+
+### [2026-11-12 02:49:07] - Evolved `adakv-engine`
+- **Title**: AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)
+- **Category**: inference
+- **Description**: Dynamically optimizes token retention budgets across attention layers and heads based on prompt importance patterns, shifting memory budget to pivotal retrieval heads.
