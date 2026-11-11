@@ -79,7 +79,7 @@ class CacheGenBitstream:
     def pack_payload(deltas: List[List[int]], min_val: float, scale: float, bits: int, layer_id: int) -> bytes:
         seq_len = len(deltas)
         dim = len(deltas[0]) if seq_len > 0 else 0
-        header = struct.pack(">IIIffi", 0x4347454E, layer_id, seq_len, dim, min_val, scale, bits)  # Magic 'CGEN'
+        header = struct.pack(">IIIIffi", 0x4347454E, layer_id, seq_len, dim, min_val, scale, bits)  # Magic 'CGEN'
         
         flat_deltas = [val for row in deltas for val in row]
         delta_bytes = bytearray()
@@ -92,8 +92,8 @@ class CacheGenBitstream:
 
     @staticmethod
     def unpack_payload(payload: bytes) -> Tuple[int, List[List[int]], float, float, int]:
-        header_size = struct.calcsize(">IIIffi")
-        magic, layer_id, seq_len, dim, min_val, scale, bits = struct.unpack(">IIIffi", payload[:header_size])
+        header_size = struct.calcsize(">IIIIffi")
+        magic, layer_id, seq_len, dim, min_val, scale, bits = struct.unpack(">IIIIffi", payload[:header_size])
         if magic != 0x4347454E:
             raise ValueError("Invalid CacheGen bitstream header magic")
             
