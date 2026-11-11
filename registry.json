@@ -1712,5 +1712,22 @@
       "llm-inference",
       "zipcache"
     ]
+  },
+  {
+    "id": "nsa-engine",
+    "name": "nsa-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "Native Sparse Attention (NSA) Multi-Scale Dynamic KV Engine",
+    "description": "Hardware-aligned Native Sparse Attention (NSA) engine combining compressed coarse tokens, dynamically selected fine-grained blocks, and local sliding window for ultra-long context LLM inference.",
+    "cli": "bin/nsa-engine",
+    "skill": "skills/inference/nsa-engine/SKILL.md",
+    "tags": [
+      "kv-cache",
+      "sparse-attention",
+      "deepseek-v3",
+      "nsa",
+      "llm-inference"
+    ]
   }
 ]

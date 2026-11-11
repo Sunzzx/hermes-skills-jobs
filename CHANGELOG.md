@@ -846,3 +846,10 @@
 - **Title**: GEAR: Ultra-Low-Bit Quantization and Low-Rank Residual KV Cache Engine
 - **Category**: inference
 - **Description**: Compresses LLM KV caches down to ultra-low bitwidths using uniform quantization, low-rank residual reconstruction, and outlier retention.
+
+
+### [nsa-engine] - 2026-11-11 08:30:33
+- **Type:** `skill+tool`
+- **Category:** `inference`
+- **Title:** Native Sparse Attention (NSA) Multi-Scale Dynamic KV Engine
+- **Description:** Hardware-aligned Native Sparse Attention (NSA) engine combining compressed coarse tokens, dynamically selected fine-grained blocks, and local sliding window for ultra-long context LLM inference.
