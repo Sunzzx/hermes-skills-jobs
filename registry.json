@@ -1697,5 +1697,20 @@
       "llm-inference",
       "gear"
     ]
+  },
+  {
+    "id": "zipcache-engine",
+    "name": "zipcache-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "ZipCache: Accurate and Efficient KV Cache Compression via Channel-Wise Discrepancy",
+    "description": "Exploits channel-wise sensitivity discrepancy and dimension-specific non-uniform quantization for accurate KV cache compression.",
+    "cli": "zipcache-engine",
+    "tags": [
+      "kv-cache",
+      "quantization",
+      "llm-inference",
+      "zipcache"
+    ]
   }
 ]
