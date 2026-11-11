@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""CacheGen KV Cache Delta-Encoding & Adaptive Quantization Streaming Engine.
+
+A production-grade implementation of CacheGen (SIGCOMM / arXiv:2310.07240):
+fast KV cache compression, delta-encoding across attention layers/tokens, and
+custom chunk-based entropy/run-length bitstream serialization for ultra-low-latency
+streaming and distributed LLM context migration.
+"""
+
+import sys
+import o…
