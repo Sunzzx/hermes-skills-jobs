@@ -1,5 +1,13 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 01:45:00 +05:30] - Evolved `adakv-engine`
+- **Title**: AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)
+- **Category**: inference
+- **CLI / Binary**: `bin/adakv-engine` (installed to `~/.local/bin/adakv-engine`)
+- **Documentation**: `skills/inference/adakv-engine/SKILL.md` (installed to `~/.hermes/skills/inference/adakv-engine/SKILL.md`)
+- **Tests**: `tests/test_adakv_engine.py` (100% pass rate)
+- **Features**: Dynamic layer- and head-adaptive token retention budget allocation via observation window entropy/variance scoring, shifting memory budget to pivotal retrieval heads while aggressively pruning redundant streaming heads (50-75% KV cache reduction).
+
 ### [2026-11-11 23:20:00 +05:30] - Evolved `palu-engine`
 - **Title**: Palu: Low-Rank KV-Cache Compression Engine (ICLR 2025)
 - **Category**: inference

@@ -1768,5 +1768,24 @@
       "latent-projection",
       "compression"
     ]
+  },
+  {
+    "id": "adakv-engine",
+    "name": "adakv-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)",
+    "description": "Dynamically optimizes token retention budgets across attention layers and heads based on prompt importance patterns, shifting memory budget to pivotal retrieval heads.",
+    "command": "bin/adakv-engine",
+    "entry_point": "skills/inference/adakv-engine/SKILL.md",
+    "test_cmd": "pytest tests/test_adakv_engine.py",
+    "tags": [
+      "inference",
+      "kv-cache",
+      "adakv",
+      "adaptive-budget",
+      "neurips-2024",
+      "memory-efficiency"
+    ]
   }
 ]
