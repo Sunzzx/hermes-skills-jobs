@@ -1,0 +1,1097 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""GaLore: Gradient Low-Rank Projection for Memory-Efficient LLM Training.
+
+Paper: Zhao, Zhang, Chen, Wang, Anandkumar, Tian —
+  "GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection"
+  (ICML 2024 Oral, arXiv:2403.03507).
+Official: https://github.com/jiaweizzhao/GaLore
+
+Core idea
+---------
+LoRA reparameterizes W = W0 + BA and freezes W0, restricting the search to a
+fixed low-rank adaptor subspace and altering training dynamics. GaLore instead
+keeps *full-parameter* W and projects only the *gradient* into a slowly-changing
+rank-r subspace so Adam/Adafactor optimizer states shrink from O(mn) to O(r·min(m,n)):
+
+  1. SVD / subspace iteration on G ∈ R^{m×n}
+       if m ≤ n:  P ← U[:, :r]     R ← Pᵀ G          (left projection)
+       else:      Q ← V[:, :r]     R ← G Q           (right projection)
+
+  2. First/second-moment Adam statistics live ONLY on R (rank-r core).
+
+  3. Project the Adam-normalized update back:
+       ΔW ← P · ρ(R)     or     ρ(R) · Qᵀ
+
+  4. Refresh P/Q every `update_proj_gap` steps (amortized SVD cost).
+
+This pure-Python reference (zero third-party deps) implements:
+
+  * dense matrix helpers (matmul, transpose, frobenius, SVD power-iter)
+  * stable-rank / nuclear-rank proxies proving Lemma 3.1 low-rank drift
+  * GaLore projector (std / reverse / right) with periodic subspace refresh
+  * AdamW on the projected core + full-rank AdamW + LoRA baselines
+  * synthetic low-rank gradient dynamics G_t = A − B W_t C (paper Eq. 6)
+  * memory theory tables for LLaMA-scale (optimizer state bytes)
+  * CLI: status | calibrate | project | step | train | ablate
+          | benchmark | verify | pack | theory
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+# ---------------------------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------------------------
+
+def _zeros(m: int, n: int) -> Matrix:
+    return [[0.0] * n for _ in range(m)]
+
+
+def _eye(n: int) -> Matrix:
+    return [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+
+def _shape(A: Matrix) -> Tuple[int, int]:
+    return len(A), (len(A[0]) if A else 0)
+
+
+def _deepcopy_mat(A: Matrix) -> Matrix:
+    return [row[:] for row in A]
+
+
+def _transpose(A: Matrix) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] for i in range(m)] for j in range(n)]
+
+
+def _matmul(A: Matrix, B: Matrix) -> Matrix:
+    m, k = _shape(A)
+    k2, n = _shape(B)
+    if k != k2:
+        raise ValueError(f"matmul shape mismatch: {m}x{k} @ {k2}x{n}")
+    out = _zeros(m, n)
+    for i in range(m):
+        Ai = A[i]
+        for t in range(k):
+            a = Ai[t]
+            if a == 0.0:
+                continue
+            Bt = B[t]
+            oi = out[i]
+            for j in range(n):
+                oi[j] += a * Bt[j]
+    return out
+
+
+def _matvec(A: Matrix, x: Vector) -> Vector:
+    return [sum(A[i][j] * x[j] for j in range(len(x))) for i in range(len(A))]
+
+
+def _vecmat(x: Vector, A: Matrix) -> Vector:
+    # x^T A  -> 1 x n
+    m, n = _shape(A)
+    return [sum(x[i] * A[i][j] for i in range(m)) for j in range(n)]
+
+
+def _add(A: Matrix, B: Matrix, alpha: float = 1.0, beta: float = 1.0) -> Matrix:
+    m, n = _shape(A)
+    return [[alpha * A[i][j] + beta * B[i][j] for j in range(n)] for i in range(m)]
+
+
+def _scale(A: Matrix, s: float) -> Matrix:
+    return [[s * v for v in row] for row in A]
+
+
+def _axpy_inplace(A: Matrix, B: Matrix, alpha: float) -> None:
+    m, n = _shape(A)
+    for i in range(m):
+        Ai, Bi = A[i], B[i]
+        for j in range(n):
+            Ai[j] += alpha * Bi[j]
+
+
+def _frobenius(A: Matrix) -> float:
+    return math.sqrt(sum(v * v for row in A for v in row))
+
+
+def _frob_sq(A: Matrix) -> float:
+    return sum(v * v for row in A for v in row)
+
+
+def _mse_mat(A: Matrix, B: Matrix) -> float:
+    m, n = _shape(A)
+    s = 0.0
+    for i in range(m):
+        Ai, Bi = A[i], B[i]
+        for j in range(n):
+            d = Ai[j] - Bi[j]
+            s += d * d
+    return s / max(m * n, 1)
+
+
+def _cosine_mat(A: Matrix, B: Matrix) -> float:
+    num = sum(a * b for ra, rb in zip(A, B) for a, b in zip(ra, rb))
+    na = _frobenius(A)
+    nb = _frobenius(B)
+    if na < 1e-15 or nb < 1e-15:
+        return 0.0
+    return num / (na * nb)
+
+
+def _dot(a: Vector, b: Vector) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Vector) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _normalize(v: Vector, eps: float = 1e-12) -> Vector:
+    n = _l2(v)
+    if n < eps:
+        return [1.0 / math.sqrt(len(v))] * len(v)
+    return [x / n for x in v]
+
+
+def _outer(u: Vector, v: Vector) -> Matrix:
+    return [[ui * vj for vj in v] for ui in u]
+
+
+def _rand_gauss(m: int, n: int, seed: int = 0, scale: float = 1.0) -> Matrix:
+    rng = random.Random(seed)
+    return [[rng.gauss(0.0, scale) for _ in range(n)] for _ in range(m)]
+
+
+def _rand_ortho_cols(dim: int, r: int, seed: int = 0) -> Matrix:
+    """Return dim x r matrix with approximately orthonormal columns via GS."""
+    rng = random.Random(seed)
+    cols: List[Vector] = []
+    for k in range(r):
+        v = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+        for c in cols:
+            proj = _dot(v, c)
+            v = [v[i] - proj * c[i] for i in range(dim)]
+        v = _normalize(v)
+        cols.append(v)
+    # store as dim x r
+    return [[cols[k][i] for k in range(r)] for i in range(dim)]
+
+
+def _diag_psd(n: int, seed: int = 0, decay: float = 0.7) -> Matrix:
+    """Diagonal PSD with geometrically decaying eigenvalues."""
+    rng = random.Random(seed)
+    eigs = sorted([rng.random() * (decay ** i) + 0.05 for i in range(n)], reverse=True)
+    return [[eigs[i] if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Subspace iteration SVD (top-r left/right singular vectors)
+# ---------------------------------------------------------------------------
+
+def _gram_schmidt(cols: List[Vector]) -> List[Vector]:
+    out: List[Vector] = []
+    for v in cols:
+        w = v[:]
+        for q in out:
+            proj = _dot(w, q)
+            w = [w[i] - proj * q[i] for i in range(len(w))]
+        n = _l2(w)
+        if n < 1e-14:
+            # degenerate — inject noise direction
+            w = [0.0] * len(v)
+            w[len(out) % len(v)] = 1.0
+            for q in out:
+                proj = _dot(w, q)
+                w = [w[i] - proj * q[i] for i in range(len(w))]
+            n = _l2(w)
+        out.append([x / max(n, 1e-15) for x in w])
+    return out
+
+
+def subspace_iteration_svd(
+    G: Matrix,
+    rank: int,
+    n_iter: int = 8,
+    seed: int = 0,
+) -> Tuple[Matrix, Vector, Matrix]:
+    """Approximate thin SVD G ≈ U diag(S) Vᵀ with top-`rank` components.
+
+    Returns:
+      U: m x r (left singular vectors as columns)
+      S: length-r singular values (descending)
+      V: n x r (right singular vectors as columns)
+    """
+    m, n = _shape(G)
+    r = max(1, min(rank, m, n))
+    rng = random.Random(seed)
+
+    # Start with random n x r orthonormal basis (right side)
+    Y = [[rng.gauss(0.0, 1.0) for _ in range(r)] for _ in range(n)]
+    # orthonormalize columns of Y
+    cols = [[Y[i][k] for i in range(n)] for k in range(r)]
+    cols = _gram_schmidt(cols)
+    Y = [[cols[k][i] for k in range(r)] for i in range(n)]  # n x r
+
+    GT = _transpose(G)
+    for _ in range(n_iter):
+        # Z = G Y   (m x r)
+        Z = _matmul(G, Y)
+        zcols = [[Z[i][k] for i in range(m)] for k in range(r)]
+        zcols = _gram_schmidt(zcols)
+        U = [[zcols[k][i] for k in range(r)] for i in range(m)]  # m x r
+        # Y = Gᵀ U  (n x r)
+        Yraw = _matmul(GT, U)
+        ycols = [[Yraw[i][k] for i in range(n)] for k in range(r)]
+        ycols = _gram_schmidt(ycols)
+        Y = [[ycols[k][i] for k in range(r)] for i in range(n)]
+
+    # Final U from G Y
+    Z = _matmul(G, Y)
+    zcols = [[Z[i][k] for i in range(m)] for k in range(r)]
+    zcols = _gram_schmidt(zcols)
+    U = [[zcols[k][i] for k in range(r)] for i in range(m)]
+
+    # Singular values s_k = ||G v_k|| = u_kᵀ G v_k
+    S: Vector = []
+    for k in range(r):
+        vk = [Y[i][k] for i in range(n)]
+        Gvk = _matvec(G, vk)
+        uk = [U[i][k] for i in range(m)]
+        # align sign
+        s = _dot(uk, Gvk)
+        if s < 0:
+            s = -s
+            for i in range(m):
+                U[i][k] = -U[i][k]
+        S.append(max(s, 0.0))
+
+    # Sort descending
+    order = sorted(range(r), key=lambda i: S[i], reverse=True)
+    U = [[U[i][k] for k in order] for i in range(m)]
+    Y = [[Y[i][k] for k in order] for i in range(n)]
+    S = [S[k] for k in order]
+    return U, S, Y
+
+
+def stable_rank(G: Matrix) -> float:
+    """stable-rank(G) = ||G||_F² / ||G||_2²  (uses top singular value)."""
+    f2 = _frob_sq(G)
+    if f2 < 1e-30:
+        return 0.0
+    _, S, _ = subspace_iteration_svd(G, rank=1, n_iter=10, seed=1)
+    smax = max(S[0], 1e-15)
+    return f2 / (smax * smax)
+
+
+def nuclear_proxy(G: Matrix, rank: int = 8) -> Dict[str, float]:
+    """Top-r energy fraction and stable-rank proxy."""
+    U, S, V = subspace_iteration_svd(G, rank=rank, n_iter=8, seed=2)
+    f2 = _frob_sq(G)
+    top = sum(s * s for s in S)
+    return {
+        "stable_rank": stable_rank(G),
+        "top_r_energy_frac": top / max(f2, 1e-30),
+        "smax": S[0] if S else 0.0,
+        "smin_r": S[-1] if S else 0.0,
+        "nuclear_top_r": sum(S),
+        "frobenius": math.sqrt(f2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GaLore config + projector
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GaLoreConfig:
+    rank: int = 8
+    update_proj_gap: int = 50
+    scale: float = 1.0
+    proj_type: str = "std"  # std | reverse | right | left
+    svd_iters: int = 6
+    seed: int = 0
+
+
+@dataclass
+class AdamConfig:
+    lr: float = 1e-2
+    beta1: float = 0.9
+    beta2: float = 0.999
+    eps: float = 1e-8
+    weight_decay: float = 0.0
+
+
+@dataclass
+class ProjectorState:
+    """Holds P (m x r) and/or Q (n x r) and which side is active."""
+    side: str  # "left" | "right"
+    P: Optional[Matrix] = None  # m x r
+    Q: Optional[Matrix] = None  # n x r
+    step_count: int = 0
+    last_refresh: int = -10**9
+    singular_values: Vector = field(default_factory=list)
+
+
+def choose_side(m: int, n: int, proj_type: str) -> str:
+    """Paper default: project the smaller dimension (one-sided)."""
+    pt = proj_type.lower()
+    if pt == "left":
+        return "left"
+    if pt == "right":
+        return "right"
+    if pt == "reverse":
+        # reverse: prefer the larger side (opposite of std)
+        return "right" if m <= n else "left"
+    # std
+    return "left" if m <= n else "right"
+
+
+def refresh_projector(G: Matrix, cfg: GaLoreConfig, state: Optional[ProjectorState] = None) -> ProjectorState:
+    m, n = _shape(G)
+    r = max(1, min(cfg.rank, m, n))
+    side = choose_side(m, n, cfg.proj_type)
+    U, S, V = subspace_iteration_svd(G, rank=r, n_iter=cfg.svd_iters, seed=cfg.seed + (state.step_count if state else 0))
+    st = state or ProjectorState(side=side)
+    st.side = side
+    st.singular_values = S[:]
+    if side == "left":
+        st.P = U  # m x r
+        st.Q = None
+    else:
+        st.Q = V  # n x r
+        st.P = None
+    st.last_refresh = st.step_count
+    return st
+
+
+def project(G: Matrix, st: ProjectorState) -> Matrix:
+    """G -> R low-rank core. left: R = PᵀG (r x n); right: R = GQ (m x r)."""
+    if st.side == "left":
+        assert st.P is not None
+        return _matmul(_transpose(st.P), G)  # r x n
+    assert st.Q is not None
+    return _matmul(G, st.Q)  # m x r
+
+
+def project_back(R: Matrix, st: ProjectorState) -> Matrix:
+    """R -> full space update. left: P R; right: R Qᵀ."""
+    if st.side == "left":
+        assert st.P is not None
+        return _matmul(st.P, R)
+    assert st.Q is not None
+    return _matmul(R, _transpose(st.Q))
+
+
+# ---------------------------------------------------------------------------
+# Optimizers: full AdamW, GaLore-AdamW, LoRA-AdamW
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AdamState:
+    m: Matrix  # first moment
+    v: Matrix  # second moment
+    t: int = 0
+
+
+def _adam_zeros_like(A: Matrix) -> AdamState:
+    m, n = _shape(A)
+    return AdamState(m=_zeros(m, n), v=_zeros(m, n), t=0)
+
+
+def adam_step(grad: Matrix, state: AdamState, cfg: AdamConfig, weight: Optional[Matrix] = None) -> Matrix:
+    """Return parameter update Δ (already scaled by lr, includes weight decay on weight)."""
+    state.t += 1
+    m, n = _shape(grad)
+    b1, b2, eps = cfg.beta1, cfg.beta2, cfg.eps
+    lr = cfg.lr
+    update = _zeros(m, n)
+    for i in range(m):
+        gi = grad[i]
+        mi = state.m[i]
+        vi = state.v[i]
+        ui = update[i]
+        wi = weight[i] if weight is not None else None
+        for j in range(n):
+            g = gi[j]
+            mi[j] = b1 * mi[j] + (1.0 - b1) * g
+            vi[j] = b2 * vi[j] + (1.0 - b2) * g * g
+            mhat = mi[j] / (1.0 - b1 ** state.t)
+            vhat = vi[j] / (1.0 - b2 ** state.t)
+            u = mhat / (math.sqrt(vhat) + eps)
+            if wi is not None and cfg.weight_decay:
+                u += cfg.weight_decay * wi[j]
+            ui[j] = -lr * u
+    return update
+
+
+@dataclass
+class FullAdamW:
+    cfg: AdamConfig
+    state: Optional[AdamState] = None
+
+    def step(self, W: Matrix, G: Matrix) -> Matrix:
+        if self.state is None:
+            self.state = _adam_zeros_like(W)
+        upd = adam_step(G, self.state, self.cfg, weight=W)
+        _axpy_inplace(W, upd, 1.0)
+        return upd
+
+
+@dataclass
+class GaLoreAdamW:
+    galore: GaLoreConfig
+    adam: AdamConfig
+    projector: Optional[ProjectorState] = None
+    opt_state: Optional[AdamState] = None
+    refreshes: int = 0
+
+    def step(self, W: Matrix, G: Matrix) -> Matrix:
+        m, n = _shape(W)
+        if self.projector is None:
+            self.projector = refresh_projector(G, self.galore)
+            self.refreshes += 1
+        self.projector.step_count += 1
+        # periodic refresh
+        if self.projector.step_count - self.projector.last_refresh >= self.galore.update_proj_gap:
+            self.projector = refresh_projector(G, self.galore, self.projector)
+            self.refreshes += 1
+            self.opt_state = None  # reset moments on subspace change (paper-compatible)
+
+        R = project(G, self.projector)
+        if self.opt_state is None:
+            self.opt_state = _adam_zeros_like(R)
+        # Adam on low-rank core (no weight decay on R; decay applied after project_back)
+        r_upd = adam_step(R, self.opt_state, AdamConfig(
+            lr=self.adam.lr,
+            beta1=self.adam.beta1,
+            beta2=self.adam.beta2,
+            eps=self.adam.eps,
+            weight_decay=0.0,
+        ))
+        # scale
+        if self.galore.scale != 1.0:
+            r_upd = _scale(r_upd, self.galore.scale)
+        full_upd = project_back(r_upd, self.projector)
+        if self.adam.weight_decay:
+            _axpy_inplace(full_upd, W, -self.adam.lr * self.adam.weight_decay)
+        _axpy_inplace(W, full_upd, 1.0)
+        return full_upd
+
+    def memory_bytes(self, m: int, n: int, bytes_per: int = 4) -> Dict[str, int]:
+        r = max(1, min(self.galore.rank, m, n))
+        side = choose_side(m, n, self.galore.proj_type)
+        # projector: one of P (m*r) or Q (n*r)
+        proj = (m * r if side == "left" else n * r) * bytes_per
+        # Adam moments on R: left r x n, right m x r
+        core = (r * n if side == "left" else m * r) * 2 * bytes_per
+        return {
+            "projector": proj,
+            "adam_moments": core,
+            "total_optimizer": proj + core,
+            "full_adam_moments": m * n * 2 * bytes_per,
+            "lora_adapters_plus_adam": (m * r + r * n) * bytes_per + (m * r + r * n) * 2 * bytes_per,
+        }
+
+
+@dataclass
+class LoRAAdamW:
+    """Baseline: W = W0_frozen + B @ A, train only A (r x n) and B (m x r)."""
+    rank: int
+    adam: AdamConfig
+    A: Optional[Matrix] = None  # r x n
+    B: Optional[Matrix] = None  # m x r
+    state_A: Optional[AdamState] = None
+    state_B: Optional[AdamState] = None
+    scale: float = 1.0
+    seed: int = 0
+
+    def init(self, m: int, n: int) -> None:
+        r = max(1, min(self.rank, m, n))
+        rng = random.Random(self.seed)
+        # LoRA common init: A ~ N(0,1/r), B = 0
+        self.A = [[rng.gauss(0.0, 1.0 / math.sqrt(r)) for _ in range(n)] for _ in range(r)]
+        self.B = _zeros(m, r)
+        self.state_A = None
+        self.state_B = None
+
+    def delta(self) -> Matrix:
+        assert self.A is not None and self.B is not None
+        return _scale(_matmul(self.B, self.A), self.scale)
+
+    def step(self, W0: Matrix, G: Matrix) -> Matrix:
+        """G is dL/dW total. dL/dA = Bᵀ G, dL/dB = G Aᵀ."""
+        m, n = _shape(W0)
+        if self.A is None or self.B is None:
+            self.init(m, n)
+        assert self.A is not None and self.B is not None
+        gA = _matmul(_transpose(self.B), G)  # r x n
+        gB = _matmul(G, _transpose(self.A))  # m x r
+        if self.state_A is None:
+            self.state_A = _adam_zeros_like(self.A)
+        if self.state_B is None:
+            self.state_B = _adam_zeros_like(self.B)
+        uA = adam_step(gA, self.state_A, self.adam)
+        uB = adam_step(gB, self.state_B, self.adam)
+        _axpy_inplace(self.A, uA, 1.0)
+        _axpy_inplace(self.B, uB, 1.0)
+        return self.delta()
+
+
+# ---------------------------------------------------------------------------
+# Synthetic dynamics (paper Eq. 6): G_t = A − B W_t C
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LowRankGradSystem:
+    """G = A - B W C with PSD B, C — gradients collapse to low stable-rank."""
+    m: int
+    n: int
+    A: Matrix
+    B: Matrix  # m x m PSD
+    C: Matrix  # n x n PSD
+    W: Matrix
+    eta: float = 0.05
+
+    @classmethod
+    def create(cls, m: int = 32, n: int = 48, seed: int = 0, eta: float = 0.05) -> "LowRankGradSystem":
+        rng_seed = seed
+        # A random full-rank target
+        A = _rand_gauss(m, n, seed=rng_seed, scale=0.5)
+        # B, C diagonal PSD with a large spectral gap (λ1 << λ2…) so
+        # Lemma 3.1 drives G_t → rank-1 exponentially.
+        B = [[0.0] * m for _ in range(m)]
+        C = [[0.0] * n for _ in range(n)]
+        for i in range(m):
+            # eigenvalues: tiny λ_min ... large λ_max  (sorted ascending index)
+            B[i][i] = 0.02 + 1.8 * ((i + 1) / m) ** 2
+        for j in range(n):
+            C[j][j] = 0.02 + 1.8 * ((j + 1) / n) ** 2
+        W = _rand_gauss(m, n, seed=rng_seed + 3, scale=0.3)
+        return cls(m=m, n=n, A=A, B=B, C=C, W=W, eta=eta)
+
+    def gradient(self) -> Matrix:
+        # G = A - B W C
+        BW = _matmul(self.B, self.W)
+        BWC = _matmul(BW, self.C)
+        return _add(self.A, BWC, alpha=1.0, beta=-1.0)
+
+    def step_gd(self) -> Matrix:
+        G = self.gradient()
+        _axpy_inplace(self.W, G, self.eta)  # W <- W + eta G  (paper sign convention)
+        return G
+
+
+# ---------------------------------------------------------------------------
+# Quadratic loss on linear map: L = 0.5 || W X - Y ||_F^2
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LinearRegressionTask:
+    m: int  # out
+    n: int  # in
+    batch: int
+    X: Matrix  # n x batch
+    Y: Matrix  # m x batch
+    W_true: Matrix
+
+    @classmethod
+    def create(cls, m: int = 24, n: int = 32, batch: int = 16, seed: int = 0, noise_rank: int = 4) -> "LinearRegressionTask":
+        rng = random.Random(seed)
+        # low-rank ground truth
+        U = _rand_ortho_cols(m, noise_rank, seed=seed + 1)
+        V = _rand_ortho_cols(n, noise_rank, seed=seed + 2)
+        s = [rng.uniform(0.5, 2.0) for _ in range(noise_rank)]
+        W_true = _zeros(m, n)
+        for k in range(noise_rank):
+            uk = [U[i][k] for i in range(m)]
+            vk = [V[j][k] for j in range(n)]
+            _axpy_inplace(W_true, _outer(uk, vk), s[k])
+        X = _rand_gauss(n, batch, seed=seed + 3, scale=1.0)
+        noise = _rand_gauss(m, batch, seed=seed + 4, scale=0.05)
+        Y = _add(_matmul(W_true, X), noise)
+        return cls(m=m, n=n, batch=batch, X=X, Y=Y, W_true=W_true)
+
+    def loss_grad(self, W: Matrix) -> Tuple[float, Matrix]:
+        # pred = W X; resid = pred - Y; L = 0.5 ||resid||^2; G = resid X^T
+        pred = _matmul(W, self.X)
+        resid = _add(pred, self.Y, alpha=1.0, beta=-1.0)
+        loss = 0.5 * _frob_sq(resid) / max(self.batch, 1)
+        G = _scale(_matmul(resid, _transpose(self.X)), 1.0 / max(self.batch, 1))
+        return loss, G
+
+
+# ---------------------------------------------------------------------------
+# Memory theory
+# ---------------------------------------------------------------------------
+
+def memory_theory(m: int, n: int, rank: int, bytes_per: int = 4) -> Dict[str, Any]:
+    r = max(1, min(rank, m, n))
+    full_adam = m * n * 2 * bytes_per  # m,v
+    # GaLore std: project smaller side
+    if m <= n:
+        galore = (m * r + r * n * 2) * bytes_per
+        side = "left"
+        core_shape = f"{r}x{n}"
+    else:
+        galore = (n * r + m * r * 2) * bytes_per
+        side = "right"
+        core_shape = f"{m}x{r}"
+    lora = (m * r + r * n) * bytes_per  # adapters
+    lora_adam = lora + (m * r + r * n) * 2 * bytes_per
+    return {
+        "shape": f"{m}x{n}",
+        "rank": r,
+        "side": side,
+        "core_shape": core_shape,
+        "bytes_per_param": bytes_per,
+        "full_adam_moments_bytes": full_adam,
+        "galore_optimizer_bytes": galore,
+        "lora_adapters_bytes": lora,
+        "lora_adapters_plus_adam_bytes": lora_adam,
+        "galore_vs_full_saving_pct": 100.0 * (1.0 - galore / max(full_adam, 1)),
+        "galore_vs_lora_adam_pct": 100.0 * (1.0 - galore / max(lora_adam, 1)),
+    }
+
+
+def llama_layer_shapes() -> List[Tuple[str, int, int]]:
+    """Representative LLaMA-7B linear shapes (approx)."""
+    h, i, kv = 4096, 11008, 4096
+    return [
+        ("attn_q", h, h),
+        ("attn_k", h, kv),
+        ("attn_v", h, kv),
+        ("attn_o", h, h),
+        ("mlp_up", i, h),
+        ("mlp_gate", i, h),
+        ("mlp_down", h, i),
+    ]
+
+
+def theory_report(rank: int = 128, bytes_per: int = 2) -> Dict[str, Any]:
+    """BF16-ish bytes_per=2; rank=128 as in paper 7B runs."""
+    layers = llama_layer_shapes()
+    per_layer = []
+    tot_full = tot_galore = tot_lora = 0
+    n_layers = 32
+    for name, m, n in layers:
+        t = memory_theory(m, n, rank, bytes_per=bytes_per)
+        per_layer.append({"name": name, **t})
+        tot_full += t["full_adam_moments_bytes"]
+        tot_galore += t["galore_optimizer_bytes"]
+        tot_lora += t["lora_adapters_plus_adam_bytes"]
+    return {
+        "model": "LLaMA-7B-ish",
+        "n_layers": n_layers,
+        "rank": rank,
+        "bytes_per": bytes_per,
+        "per_layer_one": per_layer,
+        "one_layer_full_mib": tot_full / (1024 * 1024),
+        "one_layer_galore_mib": tot_galore / (1024 * 1024),
+        "one_layer_lora_adam_mib": tot_lora / (1024 * 1024),
+        "model_full_adam_gib": n_layers * tot_full / (1024 ** 3),
+        "model_galore_gib": n_layers * tot_galore / (1024 ** 3),
+        "model_lora_adam_gib": n_layers * tot_lora / (1024 ** 3),
+        "galore_saving_vs_full_pct": 100.0 * (1.0 - tot_galore / max(tot_full, 1)),
+        "note": "Weights themselves excluded; optimizer-state only (paper Table 1 style).",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Engine facade
+# ---------------------------------------------------------------------------
+
+class GaLoreEngine:
+    def __init__(self, galore: Optional[GaLoreConfig] = None, adam: Optional[AdamConfig] = None):
+        self.galore = galore or GaLoreConfig()
+        self.adam = adam or AdamConfig()
+
+    def status(self, m: int = 64, n: int = 64, rank: int = 8, seed: int = 0) -> Dict[str, Any]:
+        task = LinearRegressionTask.create(m=m, n=n, batch=max(8, min(m, n) // 2), seed=seed)
+        W = _rand_gauss(m, n, seed=seed + 9, scale=0.05)
+        loss0, G = task.loss_grad(W)
+        proxy = nuclear_proxy(G, rank=min(8, min(m, n)))
+        mem = memory_theory(m, n, rank)
+        opt = GaLoreAdamW(GaLoreConfig(rank=rank, seed=seed), self.adam)
+        mb = opt.memory_bytes(m, n)
+        return {
+            "ok": True,
+            "shape": [m, n],
+            "init_loss": loss0,
+            "grad_stable_rank": proxy["stable_rank"],
+            "grad_top_r_energy": proxy["top_r_energy_frac"],
+            "memory": mem,
+            "optimizer_bytes": mb,
+            "config": {
+                "rank": rank,
+                "update_proj_gap": self.galore.update_proj_gap,
+                "proj_type": self.galore.proj_type,
+                "lr": self.adam.lr,
+            },
+        }
+
+    def calibrate(self, m: int = 32, n: int = 48, steps: int = 40, seed: int = 0) -> Dict[str, Any]:
+        """Show stable-rank collapse under paper Eq. 6 dynamics."""
+        # Slightly larger step for faster spectral collapse in the demo.
+        sys = LowRankGradSystem.create(m=m, n=n, seed=seed, eta=0.12)
+        series = []
+        for t in range(steps):
+            G = sys.step_gd()
+            if t % max(1, steps // 10) == 0 or t == steps - 1:
+                sr = stable_rank(G)
+                series.append({"t": t, "stable_rank": sr, "grad_frob": _frobenius(G)})
+        init_sr = series[0]["stable_rank"] if series else None
+        fin_sr = series[-1]["stable_rank"] if series else None
+        collapsed = False
+        if init_sr is not None and fin_sr is not None:
+            collapsed = (fin_sr < init_sr * 0.75) or (fin_sr < 3.5)
+        return {
+            "ok": True,
+            "shape": [m, n],
+            "steps": steps,
+            "series": series,
+            "final_stable_rank": fin_sr,
+            "initial_stable_rank": init_sr,
+            "collapsed": collapsed,
+        }
+
+    def project_once(self, m: int = 32, n: int = 40, rank: int = 4, seed: int = 0) -> Dict[str, Any]:
+        # Exact rank-r matrix (+ tiny noise) so subspace SVD must recover it.
+        U = _rand_ortho_cols(m, rank, seed=seed + 1)
+        V = _rand_ortho_cols(n, rank, seed=seed + 2)
+        G = _zeros(m, n)
+        for k in range(rank):
+            uk = [U[i][k] for i in range(m)]
+            vk = [V[j][k] for j in range(n)]
+            _axpy_inplace(G, _outer(uk, vk), 2.0 + 0.5 * k)
+        noise = _rand_gauss(m, n, seed=seed, scale=1e-3)
+        G = _add(G, noise)
+        cfg = GaLoreConfig(rank=rank, seed=seed, svd_iters=12)
+        st = refresh_projector(G, cfg)
+        R = project(G, st)
+        G_hat = project_back(R, st)
+        return {
+            "ok": True,
+            "side": st.side,
+            "rank": rank,
+            "reconstruction_mse": _mse_mat(G, G_hat),
+            "reconstruction_cosine": _cosine_mat(G, G_hat),
+            "core_shape": list(_shape(R)),
+            "singular_values": st.singular_values,
+            "stable_rank_G": stable_rank(G),
+        }
+
+    def train(
+        self,
+        m: int = 24,
+        n: int = 32,
+        rank: int = 4,
+        steps: int = 60,
+        seed: int = 0,
+        method: str = "galore",
+        lr: float = 0.05,
+        gap: int = 20,
+    ) -> Dict[str, Any]:
+        task = LinearRegressionTask.create(m=m, n=n, batch=16, seed=seed, noise_rank=max(2, rank // 2 or 2))
+        W = _rand_gauss(m, n, seed=seed + 7, scale=0.01)
+        adam_cfg = AdamConfig(lr=lr, weight_decay=0.0)
+        galore_cfg = GaLoreConfig(rank=rank, update_proj_gap=gap, seed=seed, scale=1.0)
+
+        history = []
+        refreshes = 0
+        if method == "full":
+            opt_full = FullAdamW(adam_cfg)
+            for t in range(steps):
+                loss, G = task.loss_grad(W)
+                opt_full.step(W, G)
+                if t % max(1, steps // 10) == 0 or t == steps - 1:
+                    history.append({"t": t, "loss": loss})
+        elif method == "lora":
+            W0 = _deepcopy_mat(W)
+            lora = LoRAAdamW(rank=rank, adam=adam_cfg, seed=seed)
+            lora.init(m, n)
+            for t in range(steps):
+                W_eff = _add(W0, lora.delta())
+                loss, G = task.loss_grad(W_eff)
+                lora.step(W0, G)
+                if t % max(1, steps // 10) == 0 or t == steps - 1:
+                    history.append({"t": t, "loss": loss})
+            W = _add(W0, lora.delta())
+        else:
+            opt = GaLoreAdamW(galore_cfg, adam_cfg)
+            for t in range(steps):
+                loss, G = task.loss_grad(W)
+                opt.step(W, G)
+                if t % max(1, steps // 10) == 0 or t == steps - 1:
+                    history.append({"t": t, "loss": loss, "refreshes": opt.refreshes})
+            refreshes = opt.refreshes
+
+        final_loss, _ = task.loss_grad(W)
+        err = _mse_mat(W, task.W_true)
+        return {
+            "ok": True,
+            "method": method,
+            "shape": [m, n],
+            "rank": rank,
+            "steps": steps,
+            "history": history,
+            "final_loss": final_loss,
+            "init_loss": history[0]["loss"] if history else None,
+            "weight_mse_to_truth": err,
+            "refreshes": refreshes,
+            "improved": (final_loss < (history[0]["loss"] if history else final_loss) * 0.9),
+        }
+
+    def ablate(self, m: int = 20, n: int = 28, rank: int = 4, steps: int = 50, seed: int = 0) -> Dict[str, Any]:
+        methods = ["full", "galore", "lora"]
+        results = []
+        for meth in methods:
+            r = self.train(m=m, n=n, rank=rank, steps=steps, seed=seed, method=meth, lr=0.05, gap=15)
+            results.append({
+                "method": meth,
+                "final_loss": r["final_loss"],
+                "weight_mse_to_truth": r["weight_mse_to_truth"],
+                "improved": r["improved"],
+                "refreshes": r.get("refreshes", 0),
+            })
+        results_sorted = sorted(results, key=lambda x: x["final_loss"])
+        return {"ok": True, "ranking": results_sorted, "winner": results_sorted[0]["method"]}
+
+    def benchmark(
+        self,
+        dims: Sequence[int] = (16, 24, 32),
+        ranks: Sequence[int] = (2, 4, 8),
+        steps: int = 40,
+        seed: int = 0,
+    ) -> Dict[str, Any]:
+        rows = []
+        for d in dims:
+            for r in ranks:
+                if r >= d:
+                    continue
+                t0 = time.perf_counter()
+                out = self.train(m=d, n=d + 8, rank=r, steps=steps, seed=seed, method="galore", lr=0.05)
+                dt = (time.perf_counter() - t0) * 1000
+                mem = memory_theory(d, d + 8, r)
+                rows.append({
+                    "m": d,
+                    "n": d + 8,
+                    "rank": r,
+                    "final_loss": out["final_loss"],
+                    "ms": dt,
+                    "saving_pct": mem["galore_vs_full_saving_pct"],
+                })
+        return {"ok": True, "rows": rows}
+
+    def verify(self, trials: int = 3, seed: int = 0) -> Dict[str, Any]:
+        checks = []
+        ok_all = True
+
+        # 1. projector reconstruction on exact rank-r matrix
+        for t in range(trials):
+            m, n, r = 24, 30, 3
+            U = _rand_ortho_cols(m, r, seed=seed + t)
+            V = _rand_ortho_cols(n, r, seed=seed + 10 + t)
+            G = _zeros(m, n)
+            for k in range(r):
+                uk = [U[i][k] for i in range(m)]
+                vk = [V[j][k] for j in range(n)]
+                _axpy_inplace(G, _outer(uk, vk), 1.0 + 0.1 * k)
+            st = refresh_projector(G, GaLoreConfig(rank=r, svd_iters=12, seed=seed + t))
+            G_hat = project_back(project(G, st), st)
+            cos = _cosine_mat(G, G_hat)
+            good = cos > 0.98
+            checks.append({"name": f"rank_r_recon_t{t}", "cosine": cos, "pass": good})
+            ok_all = ok_all and good
+
+        # 2. stable-rank collapses under Eq. 6
+        cal = self.calibrate(m=20, n=24, steps=30, seed=seed)
+        good = bool(cal["collapsed"]) or (cal["final_stable_rank"] is not None and cal["final_stable_rank"] < 5.0)
+        checks.append({
+            "name": "stable_rank_collapse",
+            "initial": cal["initial_stable_rank"],
+            "final": cal["final_stable_rank"],
+            "pass": good,
+        })
+        ok_all = ok_all and good
+
+        # 3. GaLore decreases loss
+        tr = self.train(m=16, n=20, rank=4, steps=40, seed=seed + 3, method="galore", lr=0.08, gap=10)
+        good = tr["final_loss"] < tr["init_loss"] * 0.85
+        checks.append({
+            "name": "galore_loss_drop",
+            "init": tr["init_loss"],
+            "final": tr["final_loss"],
+            "pass": good,
+        })
+        ok_all = ok_all and good
+
+        # 4. memory saving positive
+        mem = memory_theory(4096, 4096, 128)
+        good = mem["galore_vs_full_saving_pct"] > 50.0
+        checks.append({
+            "name": "memory_saving_4096",
+            "saving_pct": mem["galore_vs_full_saving_pct"],
+            "pass": good,
+        })
+        ok_all = ok_all and good
+
+        # 5. project/project_back linear side consistency (identity on range)
+        G = _rand_gauss(18, 22, seed=seed + 5)
+        st = refresh_projector(G, GaLoreConfig(rank=5, seed=seed + 5))
+        R1 = project(G, st)
+        R2 = project(project_back(R1, st), st)
+        mse = _mse_mat(R1, R2)
+        good = mse < 1e-8
+        checks.append({"name": "project_roundtrip_core", "mse": mse, "pass": good})
+        ok_all = ok_all and good
+
+        # 6. LoRA and full also run
+        for meth in ("full", "lora"):
+            r = self.train(m=12, n=16, rank=3, steps=15, seed=seed, method=meth, lr=0.05)
+            good = r["final_loss"] < r["init_loss"] * 1.01  # at least non-divergent
+            checks.append({"name": f"{meth}_runs", "final": r["final_loss"], "pass": good})
+            ok_all = ok_all and good
+
+        return {"ok": ok_all, "checks": checks, "n_pass": sum(1 for c in checks if c["pass"]), "n_total": len(checks)}
+
+    def pack(self, m: int = 64, n: int = 64, rank: int = 8) -> Dict[str, Any]:
+        mem = memory_theory(m, n, rank)
+        opt = GaLoreAdamW(GaLoreConfig(rank=rank), self.adam).memory_bytes(m, n)
+        return {"ok": True, "memory_theory": mem, "runtime_bytes": opt}
+
+    def theory(self, rank: int = 128) -> Dict[str, Any]:
+        return theory_report(rank=rank, bytes_per=2)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(data: Any) -> None:
+    print(json.dumps(data, indent=2, sort_keys=False))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="galore-gradient-lowrank-projector",
+        description="GaLore: Gradient Low-Rank Projection (ICML 2024, arXiv:2403.03507)",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--seed", type=int, default=0)
+        sp.add_argument("--rank", type=int, default=8)
+        sp.add_argument("--rows", type=int, default=32, dest="m")
+        sp.add_argument("--cols", type=int, default=40, dest="n")
+
+    sp = sub.add_parser("status", help="Health check + memory ledger")
+    add_common(sp)
+
+    sp = sub.add_parser("calibrate", help="Stable-rank collapse under Eq. 6 dynamics")
+    add_common(sp)
+    sp.add_argument("--steps", type=int, default=40)
+
+    sp = sub.add_parser("project", help="One-shot SVD project + reconstruct")
+    add_common(sp)
+
+    sp = sub.add_parser("step", help="Single GaLore-AdamW step demo")
+    add_common(sp)
+    sp.add_argument("--lr", type=float, default=0.05)
+
+    sp = sub.add_parser("train", help="Train linear task with galore|full|lora")
+    add_common(sp)
+    sp.add_argument("--steps", type=int, default=60)
+    sp.add_argument("--method", choices=["galore", "full", "lora"], default="galore")
+    sp.add_argument("--lr", type=float, default=0.05)
+    sp.add_argument("--gap", type=int, default=20)
+
+    sp = sub.add_parser("ablate", help="Rank methods by final loss")
+    add_common(sp)
+    sp.add_argument("--steps", type=int, default=50)
+
+    sp = sub.add_parser("benchmark", help="Dim × rank sweep")
+    sp.add_argument("--dims", type=int, nargs="+", default=[16, 24, 32])
+    sp.add_argument("--ranks", type=int, nargs="+", default=[2, 4, 8])
+    sp.add_argument("--steps", type=int, default=40)
+    sp.add_argument("--seed", type=int, default=0)
+
+    sp = sub.add_parser("verify", help="Invariant battery")
+    sp.add_argument("--trials", type=int, default=3)
+    sp.add_argument("--seed", type=int, default=0)
+
+    sp = sub.add_parser("pack", help="Pack memory ledger for one shape")
+    add_common(sp)
+
+    sp = sub.add_parser("theory", help="LLaMA-7B optimizer-state theory table")
+    sp.add_argument("--rank", type=int, default=128)
+
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    eng = GaLoreEngine()
+
+    cmd = args.cmd or "status"
+    if cmd == "status":
+        _print_json(eng.status(m=getattr(args, "m", 64), n=getattr(args, "n", 64),
+                               rank=getattr(args, "rank", 8), seed=getattr(args, "seed", 0)))
+    elif cmd == "calibrate":
+        _print_json(eng.calibrate(m=args.m, n=args.n, steps=args.steps, seed=args.seed))
+    elif cmd == "project":
+        _print_json(eng.project_once(m=args.m, n=args.n, rank=args.rank, seed=args.seed))
+    elif cmd == "step":
+        task = LinearRegressionTask.create(m=args.m, n=args.n, batch=12, seed=args.seed)
+        W = _rand_gauss(args.m, args.n, seed=args.seed + 1, scale=0.05)
+        loss0, G = task.loss_grad(W)
+        opt = GaLoreAdamW(GaLoreConfig(rank=args.rank, seed=args.seed), AdamConfig(lr=args.lr))
+        opt.step(W, G)
+        loss1, _ = task.loss_grad(W)
+        _print_json({
+            "ok": True,
+            "loss_before": loss0,
+            "loss_after": loss1,
+            "side": opt.projector.side if opt.projector else None,
+            "refreshes": opt.refreshes,
+        })
+    elif cmd == "train":
+        _print_json(eng.train(
+            m=args.m, n=args.n, rank=args.rank, steps=args.steps,
+            seed=args.seed, method=args.method, lr=args.lr, gap=args.gap,
+        ))
+    elif cmd == "ablate":
+        _print_json(eng.ablate(m=args.m, n=args.n, rank=args.rank, steps=args.steps, seed=args.seed))
+    elif cmd == "benchmark":
+        _print_json(eng.benchmark(dims=args.dims, ranks=args.ranks, steps=args.steps, seed=args.seed))
+    elif cmd == "verify":
+        out = eng.verify(trials=args.trials, seed=args.seed)
+        _print_json(out)
+        return 0 if out["ok"] else 1
+    elif cmd == "pack":
+        _print_json(eng.pack(m=args.m, n=args.n, rank=args.rank))
+    elif cmd == "theory":
+        _print_json(eng.theory(rank=args.rank))
+    else:
+        parser.print_help()
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2051,5 +2051,26 @@
       "WeightOnlyPTQ",
       "Inference"
     ]
+  },
+  {
+    "id": "galore-gradient-lowrank-projector",
+    "title": "GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Full-parameter LLM training with low-rank gradient projection: subspace-iteration SVD, one-sided P/Q projectors, AdamW on rank-r cores, LoRA/full baselines, Lemma 3.1 stable-rank collapse, LLaMA-7B optimizer-state theory (Zhao et al., ICML 2024 Oral).",
+    "cli": "galore-gradient-lowrank-projector",
+    "evolved_at": "2026-11-13T01:22:09.413137+05:30",
+    "tags": [
+      "Frontier-AI",
+      "GaLore",
+      "LowRank",
+      "GradientProjection",
+      "MemoryEfficient",
+      "AdamW",
+      "LoRA",
+      "LLM-Training",
+      "ICML2024",
+      "SubspaceIteration"
+    ]
   }
 ]

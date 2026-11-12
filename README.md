@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-119-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-120-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -10,6 +10,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
+- `galore-gradient-lowrank-projector` — GaLore gradient low-rank projection training (ICML 2024 Oral, arXiv:2403.03507)
+
 - `qtip-trellis-incoherence-engine` — QTIP trellis-coded quantization + RHT incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)
 
 - `aqlm-additive-multi-codebook-engine` — AQLM multi-codebook additive VQ PTQ (NeurIPS 2024, arXiv:2401.06118)
@@ -18,10 +20,12 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 - `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
 - **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
-## 🚀 Live Capability Registry (119 Evolved Skills & Jobs)
+
+## 🚀 Live Capability Registry (120 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **GaLore Gradient Low-Rank Projection (ICML 2024 Oral, arXiv:2403.03507)** | `research` | `galore-gradient-lowrank-projector` | Full-parameter LLM training with low-rank gradient projection: subspace-iteration SVD, one-sided P/Q projectors, AdamW on rank-r cores, LoRA/full baselines, Lemma 3.1 stable-rank collapse, LLaMA-7B optimizer-state theory. | `GaLore` `LowRank` `GradientProjection` |
 | **QTIP Trellis + Incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)** | `inference` | `qtip-trellis-incoherence-engine` | Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization (Viterbi min-MSE path); SOTA-class 2–4 bpw pure-Python reference (Cornell RelaxML). | `QTIP` `Trellis` `TCQ` `Viterbi` `Incoherence` |
 | **AQLM Additive Multi-Codebook LLM Quantization (NeurIPS 2024, arXiv:2401.06118)** | `inference` | `aqlm-additive-multi-codebook-engine` | Extreme weight-only PTQ via residual multi-codebook additive VQ (w≈Σ_m C_m[i_m]): residual K-means, beam encode, RTN/VQ ablations, K^M effective codebook, 7B footprint theory. | `AQLM` `AdditiveVQ` `MultiCodebook` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
@@ -171,4 +175,4 @@ gptq-hessian-weight-quant-engine verify --trials 3
 
 ---
 
-*Last Evolved: 2026-11-12 22:02:20 +0530*
+*Last Evolved: 2026-11-13 01:22:23 +0530*

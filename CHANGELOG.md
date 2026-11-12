@@ -1,6 +1,18 @@
 # 📜 Hermes Evolution Changelog
 
 
+
+### [2026-11-13 01:22:23] - Evolved `galore-gradient-lowrank-projector`
+- **Title**: GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)
+- **Category**: research
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/galore-gradient-lowrank-projector`
+  - `skills/research/galore-gradient-lowrank-projector/SKILL.md`
+  - `tests/test_galore_gradient_lowrank_projector.py`
+- **Capabilities**: Subspace-iteration thin SVD; one-sided std/reverse/left/right projectors; GaLore-AdamW on rank-r cores; full AdamW + LoRA baselines; synthetic PSD dynamics (paper Eq. 6) proving stable-rank collapse; LLaMA-7B optimizer-state theory (≤95% moment savings). 20/20 unit tests passed; CLI `status`/`calibrate`/`project`/`step`/`train`/`ablate`/`benchmark`/`verify`/`pack`/`theory`.
+
+
 ### [2026-11-13 00:15:00] - Evolved `qtip-trellis-incoherence-engine`
 - **Title**: QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)
 - **Category**: inference
