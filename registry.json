@@ -1838,5 +1838,22 @@
       "Gated-Retention",
       "Inference"
     ]
+  },
+  {
+    "id": "mixture-of-depths-engine",
+    "title": "Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "DeepMind Mixture-of-Depths expert-choice router: each layer admits only top-capacity tokens into full attention+MLP; unselected tokens take residual identity \u2014 static FLOP budget ~C with exact capacity caps.",
+    "cli": "mixture-of-depths-engine",
+    "evolved_at": "2026-11-12T08:24:56.362912",
+    "tags": [
+      "Mixture-of-Depths",
+      "DeepMind",
+      "Dynamic-Compute",
+      "Expert-Choice",
+      "Sparse-Depth",
+      "Inference"
+    ]
   }
 ]

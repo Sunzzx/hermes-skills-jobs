@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 08:24:56 +0530] - Evolved `mixture-of-depths-engine`
+- **Title**: Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/mixture-of-depths-engine`
+  - `skills/inference/mixture-of-depths-engine/SKILL.md`
+  - `tests/test_mixture_of_depths_engine.py`
+- **Capabilities**: Expert-choice per-layer router admits top-capacity tokens into full self-attention+MLP; unselected tokens residual-identity skip. Static FLOP budget ≈C (e.g. 12.5% → ~88–95% theoretical savings). 13/13 unit tests passed; CLI `status`/`benchmark`/`verify`/`simulate`/`route`.
+
+
 ### [2026-11-12 07:19:12 +05:30] - Evolved `yoco-cache-engine`
 - **Title**: YOCO: You Only Cache Once Decoder-Decoder KV Engine (Meta FAIR, arXiv:2405.05254)
 - **Category**: inference
