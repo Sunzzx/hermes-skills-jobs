@@ -1,17 +1,18 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-105-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-106-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (105 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (106 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **Infini-Attention Compressive Infinite-Context Engine** | `inference` | `infini-attention-engine` | Google Infini-attention (arXiv:2404.07143): local sliding-window softmax + fixed-size ELU+1 linear-attention compressive memory with delta-rule updates and gated blend for O(1) unbounded context. | `Infinite-Context` `Compressive-Memory` `Linear-Attention` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |

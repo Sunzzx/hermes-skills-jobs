@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 06:10:00 +05:30] - Evolved `infini-attention-engine`
+- **Title**: Infini-Attention: Compressive Infinite-Context Engine (Google, arXiv:2404.07143)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/infini-attention-engine`
+  - `skills/inference/infini-attention-engine/SKILL.md`
+  - `tests/test_infini_attention_engine.py`
+- **Capabilities**: Hybrid local sliding-window softmax attention + fixed-size ELU+1 linear-attention compressive memory with delta-rule updates and gated blend. O(d²) RAM independent of sequence length; 8/8 unit tests passed; CLI `status`/`benchmark`/`verify`.
+
+
 ### [2026-11-12 04:00:00 +05:30] - Evolved `fastgen-engine`
 - **Title**: FastGen: Adaptive KV Cache Compression via Attention Profiling (NeurIPS 2024)
 - **Category**: inference

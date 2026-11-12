@@ -1802,5 +1802,24 @@
       "neurips-2024",
       "memory-efficiency"
     ]
+  },
+  {
+    "id": "infini-attention-engine",
+    "name": "infini-attention-engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "title": "Infini-Attention: Compressive Infinite-Context Engine (Google arXiv:2404.07143)",
+    "description": "Hybrid local sliding-window softmax + fixed-size linear-attention compressive memory with ELU+1 kernel, delta-rule updates, and gated blend for O(1) infinite context.",
+    "cli": "infini-attention-engine",
+    "evolved_at": "2026-11-12T06:15:12.961588",
+    "tags": [
+      "inference",
+      "infinite-context",
+      "compressive-memory",
+      "linear-attention",
+      "infini-attention",
+      "google-2024",
+      "long-context"
+    ]
   }
 ]
