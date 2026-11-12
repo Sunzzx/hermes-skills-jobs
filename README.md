@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-111-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-112-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (111 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (112 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -123,6 +123,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)** | `inference` | `mixture-of-depths-engine` | DeepMind Mixture-of-Depths expert-choice router: each layer admits only top-capacity tokens into full attention+MLP; unselected tokens take residual identity — static FLOP budget ~C with exact capacity caps. | `Mixture-of-Depths` `DeepMind` `Dynamic-Compute` |
 | **LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)** | `inference` | `layerskip-self-speculative-engine` | Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers. | `Frontier-AI` `LayerSkip` `EarlyExit` |
 | **QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)** | `inference` | `quarot-hadamard-quant-engine` | Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers. | `Frontier-AI` `QuaRot` `Hadamard` |
+| **GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)** | `inference` | `gptq-hessian-weight-quant-engine` | Layer-wise post-training weight quantization minimizing --WX - WqX-- via dampened Hessian OBS, Cholesky inverse, act-order column permutation, and group INT2/3/4/8 packing with RTN baselines. | `Frontier-AI` `GPTQ` `Hessian` |
 
 ---
 
@@ -137,7 +138,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ## 📦 Using Any Skill Locally
 
-All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin`):
+All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin/`):
 
 ```bash
 # Example: Inspect Mac memory, thermal pressure & zombie processes
@@ -147,14 +148,14 @@ sysdoctor status
 ports check
 ports free 3000
 
-# Example: QuaRot outlier-free INT4 via Hadamard rotation
-quarot-hadamard-quant-engine status --dim 256 --bits 4
-quarot-hadamard-quant-engine verify --trials 5
-
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
+
+# Example: GPTQ Hessian OBS weight quantization
+gptq-hessian-weight-quant-engine status --rows 64 --cols 64 --bits 4
+gptq-hessian-weight-quant-engine verify --trials 3
 ```
 
 ---
 
-*Last Evolved: 2026-11-12 10:41:08*
+*Last Evolved: 2026-11-12 11:46:30 +0530*

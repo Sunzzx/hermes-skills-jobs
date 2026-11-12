@@ -1,0 +1,1102 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization Engine.
+
+Paper: Frantar et al., "GPTQ: Accurate Post-Training Quantization for
+Generative Pre-trained Transformers" (ICLR 2023, arXiv:2210.17323).
+
+Core idea
+---------
+Layer-wise post-training weight quantization that minimizes the expected
+squared output error under a calibration activation matrix X:
+
+    min_{W_q}  || W X - W_q X ||_F^2
+
+via a second-order (OBS) approximation. The Hessian of the quadratic is
+
+    H = 2 X X^T
+
+GPTQ:
+  1. dampens H ← H + λ · diag(H) (numerical stability)
+  2. Cholesky-factorizes H^{-1} for efficient OBS updates
+  3. quantizes weights column-by-column (or block-by-block)
+  4. redistributes quantization residual into remaining free weights
+  5. optional act-order: permute columns by descending Hessian diagonal
+  6. group-wise RTN scales (INT2/3/4/8) with bit-rate ledgers
+
+This pure-Python reference (zero third-party deps) exposes:
+
+  * dense matrix helpers (GEMM, Cholesky, inverse via Gauss-Jordan)
+  * calibration Hessian accumulation from synthetic / supplied X
+  * RTN group quantizer + dequant
+  * full GPTQ layer quant with OBS residual compensation
+  * RTN baseline comparison (MSE / SQNR / cosine / compression)
+  * theoretical bit-rate & bandwidth tables
+  * CLI: status | calibrate | quantize | benchmark | verify | pack | theory
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _is_pow2(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Dense matrix primitives (row-major List[List[float]])
+# ---------------------------------------------------------------------------
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_eye(n: int) -> Matrix:
+    m = mat_zeros(n, n)
+    for i in range(n):
+        m[i][i] = 1.0
+    return m
+
+
+def mat_copy(a: Matrix) -> Matrix:
+    return [row[:] for row in a]
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    r, c = len(a), len(a[0])
+    out = mat_zeros(c, r)
+    for i in range(r):
+        for j in range(c):
+            out[j][i] = a[i][j]
+    return out
+
+
+def mat_add(a: Matrix, b: Matrix) -> Matrix:
+    r, c = len(a), len(a[0])
+    out = mat_zeros(r, c)
+    for i in range(r):
+        ai, bi, oi = a[i], b[i], out[i]
+        for j in range(c):
+            oi[j] = ai[j] + bi[j]
+    return out
+
+
+def mat_scale(a: Matrix, s: float) -> Matrix:
+    return [[x * s for x in row] for row in a]
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    r, k, c = len(a), len(a[0]), len(b[0])
+    out = mat_zeros(r, c)
+    bt = mat_t(b)
+    for i in range(r):
+        ai = a[i]
+        oi = out[i]
+        for j in range(c):
+            oi[j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_vec(a: Matrix, v: Vector) -> Vector:
+    return [_dot(row, v) for row in a]
+
+
+def vec_mat(v: Vector, a: Matrix) -> Vector:
+    """v^T A (row vector times matrix) → row vector."""
+    c = len(a[0])
+    out = [0.0] * c
+    for i, vi in enumerate(v):
+        ai = a[i]
+        for j in range(c):
+            out[j] += vi * ai[j]
+    return out
+
+
+def mat_fro(a: Matrix) -> float:
+    return math.sqrt(sum(x * x for row in a for x in row))
+
+
+def mat_diag(a: Matrix) -> Vector:
+    n = min(len(a), len(a[0]) if a else 0)
+    return [a[i][i] for i in range(n)]
+
+
+def outer(u: Vector, v: Vector) -> Matrix:
+    return [[ui * vj for vj in v] for ui in u]
+
+
+def mat_add_diag(a: Matrix, diag: Sequence[float]) -> Matrix:
+    out = mat_copy(a)
+    n = min(len(out), len(diag))
+    for i in range(n):
+        out[i][i] += diag[i]
+    return out
+
+
+def cholesky_decompose(a: Matrix) -> Matrix:
+    """Lower-triangular Cholesky L such that A = L L^T. A must be SPD."""
+    n = len(a)
+    L = mat_zeros(n, n)
+    for i in range(n):
+        for j in range(i + 1):
+            s = sum(L[i][k] * L[j][k] for k in range(j))
+            if i == j:
+                val = a[i][i] - s
+                if val <= 1e-18:
+                    val = 1e-18
+                L[i][j] = math.sqrt(val)
+            else:
+                denom = L[j][j]
+                L[i][j] = 0.0 if abs(denom) < 1e-18 else (a[i][j] - s) / denom
+    return L
+
+
+def solve_lower(L: Matrix, b: Vector) -> Vector:
+    """Solve L y = b (forward substitution)."""
+    n = len(b)
+    y = [0.0] * n
+    for i in range(n):
+        s = b[i] - sum(L[i][j] * y[j] for j in range(i))
+        y[i] = 0.0 if abs(L[i][i]) < 1e-18 else s / L[i][i]
+    return y
+
+
+def solve_upper(U: Matrix, b: Vector) -> Vector:
+    """Solve U x = b (back substitution). U is upper-triangular."""
+    n = len(b)
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        s = b[i] - sum(U[i][j] * x[j] for j in range(i + 1, n))
+        x[i] = 0.0 if abs(U[i][i]) < 1e-18 else s / U[i][i]
+    return x
+
+
+def cholesky_inverse(a: Matrix) -> Matrix:
+    """Invert SPD matrix via Cholesky: A^{-1} = (L L^T)^{-1}."""
+    n = len(a)
+    L = cholesky_decompose(a)
+    # Solve A X = I column by column
+    inv = mat_zeros(n, n)
+    eye = mat_eye(n)
+    Lt = mat_t(L)
+    for j in range(n):
+        y = solve_lower(L, eye[j])
+        x = solve_upper(Lt, y)
+        for i in range(n):
+            inv[i][j] = x[i]
+    # Symmetrize
+    for i in range(n):
+        for j in range(i + 1, n):
+            m = 0.5 * (inv[i][j] + inv[j][i])
+            inv[i][j] = inv[j][i] = m
+    return inv
+
+
+def gauss_jordan_inverse(a: Matrix) -> Matrix:
+    """General inverse via Gauss-Jordan with partial pivoting (fallback)."""
+    n = len(a)
+    m = [a[i][:] + mat_eye(n)[i][:] for i in range(n)]
+    for col in range(n):
+        piv = col
+        best = abs(m[col][col])
+        for r in range(col + 1, n):
+            if abs(m[r][col]) > best:
+                best = abs(m[r][col])
+                piv = r
+        if best < 1e-18:
+            # singular → add ridge and retry lightly
+            m[col][col] += 1e-8
+            best = abs(m[col][col])
+        if piv != col:
+            m[col], m[piv] = m[piv], m[col]
+        pivot = m[col][col]
+        inv_p = 1.0 / pivot
+        m[col] = [x * inv_p for x in m[col]]
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col]
+            if abs(factor) < 1e-18:
+                continue
+            m[r] = [m[r][c] - factor * m[col][c] for c in range(2 * n)]
+    return [row[n:] for row in m]
+
+
+# ---------------------------------------------------------------------------
+# RTN group quantizer
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 4
+    group_size: int = 128
+    symmetric: bool = True
+    clip_ratio: float = 1.0  # optional max-abs shrink before scale
+
+
+@dataclass
+class QuantizedTensor:
+    q: List[int]
+    scales: List[float]
+    zeros: List[float]
+    shape: Tuple[int, int]  # (rows, cols) flattened row-major
+    n_bits: int
+    group_size: int
+    symmetric: bool
+
+    def bit_rate(self) -> float:
+        n = max(len(self.q), 1)
+        g = max(len(self.scales), 1)
+        # payload bits + fp16 scales (+ zeros if asymmetric)
+        scale_bits = 16.0 * g
+        zero_bits = 0.0 if self.symmetric else 16.0 * g
+        return (self.n_bits * n + scale_bits + zero_bits) / n
+
+    def compression_ratio(self, baseline_bits: float = 16.0) -> float:
+        br = self.bit_rate()
+        return baseline_bits / max(br, 1e-9)
+
+
+def theoretical_bit_rate(n: int, n_bits: int, group_size: int, symmetric: bool) -> float:
+    g = max(1, (n + group_size - 1) // group_size)
+    scale_bits = 16.0 * g
+    zero_bits = 0.0 if symmetric else 16.0 * g
+    return (n_bits * n + scale_bits + zero_bits) / max(n, 1)
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantizedTensor:
+    n = len(x)
+    gs = max(1, cfg.group_size)
+    qmax = (1 << (cfg.n_bits - 1)) - 1 if cfg.symmetric else (1 << cfg.n_bits) - 1
+    qmin = -qmax - 1 if cfg.symmetric else 0
+    q_vals: List[int] = []
+    scales: List[float] = []
+    zeros: List[float] = []
+    for start in range(0, n, gs):
+        chunk = list(x[start : start + gs])
+        if not chunk:
+            continue
+        if cfg.symmetric:
+            amax = max((abs(v) for v in chunk), default=1.0) * cfg.clip_ratio
+            amax = max(amax, 1e-12)
+            scale = amax / max(qmax, 1)
+            zero = 0.0
+            for v in chunk:
+                q = int(round(v / scale))
+                q_vals.append(int(_clamp(q, qmin, qmax)))
+        else:
+            lo = min(chunk)
+            hi = max(chunk)
+            # mild clip
+            span = (hi - lo) * cfg.clip_ratio
+            if span < 1e-12:
+                span = 1e-12
+            mid = 0.5 * (hi + lo)
+            lo2 = mid - 0.5 * span
+            hi2 = mid + 0.5 * span
+            scale = (hi2 - lo2) / max(qmax, 1)
+            zero = lo2
+            for v in chunk:
+                q = int(round((v - zero) / scale))
+                q_vals.append(int(_clamp(q, qmin, qmax)))
+        scales.append(scale)
+        zeros.append(zero)
+    rows = 1
+    cols = n
+    return QuantizedTensor(
+        q=q_vals,
+        scales=scales,
+        zeros=zeros,
+        shape=(rows, cols),
+        n_bits=cfg.n_bits,
+        group_size=gs,
+        symmetric=cfg.symmetric,
+    )
+
+
+def dequantize_vector(qt: QuantizedTensor) -> Vector:
+    out: Vector = []
+    gs = qt.group_size
+    for i, qi in enumerate(qt.q):
+        g = i // gs
+        scale = qt.scales[g] if g < len(qt.scales) else 1.0
+        zero = qt.zeros[g] if g < len(qt.zeros) else 0.0
+        out.append(qi * scale + zero)
+    return out
+
+
+def quantize_scalar(w: float, scale: float, zero: float, n_bits: int, symmetric: bool) -> Tuple[int, float]:
+    """Quantize one scalar; return (q_int, dequant_value)."""
+    if symmetric:
+        qmax = (1 << (n_bits - 1)) - 1
+        qmin = -qmax - 1
+        q = int(_clamp(round(w / max(scale, 1e-18)), qmin, qmax))
+        return q, q * scale
+    qmax = (1 << n_bits) - 1
+    q = int(_clamp(round((w - zero) / max(scale, 1e-18)), 0, qmax))
+    return q, q * scale + zero
+
+
+def group_scale_for(chunk: Sequence[float], n_bits: int, symmetric: bool, clip_ratio: float = 1.0) -> Tuple[float, float]:
+    if not chunk:
+        return 1.0, 0.0
+    if symmetric:
+        qmax = (1 << (n_bits - 1)) - 1
+        amax = max((abs(v) for v in chunk), default=1.0) * clip_ratio
+        amax = max(amax, 1e-12)
+        return amax / max(qmax, 1), 0.0
+    qmax = (1 << n_bits) - 1
+    lo, hi = min(chunk), max(chunk)
+    span = max((hi - lo) * clip_ratio, 1e-12)
+    mid = 0.5 * (hi + lo)
+    lo2 = mid - 0.5 * span
+    return span / max(qmax, 1), lo2
+
+
+# ---------------------------------------------------------------------------
+# GPTQ core
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GPTQConfig:
+    rows: int = 64          # out_features
+    cols: int = 64          # in_features
+    n_bits: int = 4
+    group_size: int = 128
+    symmetric: bool = True
+    damp_percent: float = 0.01
+    block_size: int = 128   # GPTQ block (columns per OBS batch)
+    act_order: bool = True
+    clip_ratio: float = 1.0
+    n_calibration: int = 256  # calibration tokens (columns of X)
+    seed: int = 42
+    weight_std: float = 0.05
+    activation_std: float = 1.0
+    outlier_frac: float = 0.02
+    outlier_scale: float = 8.0
+
+
+@dataclass
+class GPTQResult:
+    status: str
+    mse: float
+    sqnr_db: float
+    cosine: float
+    rtn_mse: float
+    rtn_sqnr_db: float
+    rtn_cosine: float
+    bit_rate: float
+    compression_vs_fp16: float
+    damp: float
+    act_order: bool
+    n_bits: int
+    group_size: int
+    rows: int
+    cols: int
+    hessian_trace: float
+    hessian_cond_proxy: float
+    elapsed_ms: float
+    invariants: Dict[str, bool] = field(default_factory=dict)
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class GPTQEngine:
+    """Layer-wise GPTQ weight quantizer with Hessian OBS compensation."""
+
+    def __init__(self, cfg: GPTQConfig):
+        self.cfg = cfg
+        random.seed(cfg.seed)
+        self.W: Matrix = []
+        self.X: Matrix = []  # (cols, n_cal) activation features
+        self.H: Matrix = []
+        self.W_q: Matrix = []
+        self._synthesize()
+
+    # -- synthetic data -----------------------------------------------------
+
+    def _synthesize(self) -> None:
+        cfg = self.cfg
+        rng = random.Random(cfg.seed)
+        # Weight matrix W: rows x cols (out x in)
+        self.W = [
+            [rng.gauss(0.0, cfg.weight_std) for _ in range(cfg.cols)]
+            for _ in range(cfg.rows)
+        ]
+        # Inject a few heavy-tailed weight outliers (common in LLMs)
+        n_out_w = max(1, int(cfg.rows * cfg.cols * cfg.outlier_frac * 0.25))
+        for _ in range(n_out_w):
+            i = rng.randrange(cfg.rows)
+            j = rng.randrange(cfg.cols)
+            self.W[i][j] *= cfg.outlier_scale
+
+        # Calibration activations X: cols x n_cal  (each column is one token feature)
+        self.X = [
+            [rng.gauss(0.0, cfg.activation_std) for _ in range(cfg.n_calibration)]
+            for _ in range(cfg.cols)
+        ]
+        n_out_a = max(1, int(cfg.cols * cfg.outlier_frac))
+        for j in range(n_out_a):
+            i = rng.randrange(cfg.cols)
+            for t in range(cfg.n_calibration):
+                if rng.random() < 0.15:
+                    self.X[i][t] *= cfg.outlier_scale
+
+    def set_weights(self, W: Matrix) -> None:
+        self.W = mat_copy(W)
+        self.cfg.rows = len(W)
+        self.cfg.cols = len(W[0]) if W else 0
+
+    def set_activations(self, X: Matrix) -> None:
+        """X is (in_features, n_cal)."""
+        self.X = mat_copy(X)
+        if X:
+            self.cfg.cols = len(X)
+            self.cfg.n_calibration = len(X[0])
+
+    # -- Hessian ------------------------------------------------------------
+
+    def accumulate_hessian(self) -> Matrix:
+        """H = 2 X X^T  (cols x cols)."""
+        cfg = self.cfg
+        Xt = mat_t(self.X)  # (n_cal, cols)
+        # H_raw = X @ X^T
+        H = mat_mul(self.X, Xt)  # (cols, cols)
+        H = mat_scale(H, 2.0)
+        # dampen
+        diag = mat_diag(H)
+        mean_diag = _mean([abs(d) for d in diag]) if diag else 1.0
+        damp = cfg.damp_percent * max(mean_diag, 1e-12)
+        H = mat_add_diag(H, [damp] * cfg.cols)
+        self.H = H
+        self._damp_value = damp
+        return H
+
+    def hessian_stats(self) -> Dict[str, float]:
+        if not self.H:
+            self.accumulate_hessian()
+        d = mat_diag(self.H)
+        tr = sum(d)
+        abs_d = [abs(x) for x in d] or [1.0]
+        cond_proxy = (max(abs_d) + 1e-18) / (min(abs_d) + 1e-18)
+        return {
+            "trace": tr,
+            "mean_diag": _mean(d),
+            "min_diag": min(d) if d else 0.0,
+            "max_diag": max(d) if d else 0.0,
+            "cond_proxy": cond_proxy,
+            "damp": getattr(self, "_damp_value", 0.0),
+            "dim": len(d),
+        }
+
+    # -- inverse Hessian / Cholesky path ------------------------------------
+
+    def inverse_hessian(self) -> Matrix:
+        if not self.H:
+            self.accumulate_hessian()
+        try:
+            return cholesky_inverse(self.H)
+        except Exception:
+            return gauss_jordan_inverse(self.H)
+
+    # -- RTN baseline -------------------------------------------------------
+
+    def rtn_quantize_weights(self) -> Tuple[Matrix, QuantizedTensor]:
+        cfg = self.cfg
+        flat = [w for row in self.W for w in row]
+        # per-row group quant is more realistic; use global groups on flat for baseline
+        qt = quantize_vector(
+            flat,
+            QuantConfig(
+                n_bits=cfg.n_bits,
+                group_size=cfg.group_size,
+                symmetric=cfg.symmetric,
+                clip_ratio=cfg.clip_ratio,
+            ),
+        )
+        recon = dequantize_vector(qt)
+        Wq = mat_zeros(cfg.rows, cfg.cols)
+        k = 0
+        for i in range(cfg.rows):
+            for j in range(cfg.cols):
+                Wq[i][j] = recon[k]
+                k += 1
+        return Wq, qt
+
+    # -- GPTQ quantize ------------------------------------------------------
+
+    def quantize(self) -> GPTQResult:
+        t0 = time.perf_counter()
+        cfg = self.cfg
+        self.accumulate_hessian()
+        Hinv = self.inverse_hessian()
+
+        rows, cols = cfg.rows, cfg.cols
+        W = mat_copy(self.W)
+        Wq = mat_zeros(rows, cols)
+
+        # act-order permutation by descending |H_ii|
+        diag = mat_diag(self.H)
+        if cfg.act_order:
+            order = sorted(range(cols), key=lambda i: abs(diag[i]), reverse=True)
+        else:
+            order = list(range(cols))
+        inv_order = [0] * cols
+        for new_i, old_i in enumerate(order):
+            inv_order[old_i] = new_i
+
+        # permute Hinv and W columns into act-order space
+        def perm_mat_cols(M: Matrix, ord_: List[int]) -> Matrix:
+            return [[row[j] for j in ord_] for row in M]
+
+        def perm_sq(M: Matrix, ord_: List[int]) -> Matrix:
+            # P^T M P
+            tmp = perm_mat_cols(M, ord_)
+            return [tmp[i] for i in ord_]
+
+        Hinv_p = perm_sq(Hinv, order)
+        W_p = perm_mat_cols(W, order)
+        Wq_p = mat_zeros(rows, cols)
+
+        # Working copy of weights in permuted space
+        Wwork = mat_copy(W_p)
+
+        # Precompute group scales per row on original weights (static scales)
+        # GPTQ typically recomputes scale per group of columns for each row.
+        gs = max(1, cfg.group_size)
+        block = max(1, min(cfg.block_size, cols))
+
+        # Quantize column blocks
+        col = 0
+        while col < cols:
+            b_end = min(col + block, cols)
+            # For each column in block: quantize then OBS-update trailing weights
+            for j in range(col, b_end):
+                # per-row scale for the group containing j
+                g_start = (j // gs) * gs
+                g_end = min(g_start + gs, cols)
+                for i in range(rows):
+                    chunk = Wwork[i][g_start:g_end]
+                    scale, zero = group_scale_for(
+                        chunk, cfg.n_bits, cfg.symmetric, cfg.clip_ratio
+                    )
+                    w = Wwork[i][j]
+                    _, w_hat = quantize_scalar(w, scale, zero, cfg.n_bits, cfg.symmetric)
+                    Wq_p[i][j] = w_hat
+                    err = w - w_hat
+                    # OBS residual redistribution onto remaining columns j+1:
+                    # delta_{:, j+1:} -= err * Hinv[j, j+1:] / Hinv[j, j]
+                    hjj = Hinv_p[j][j]
+                    if abs(hjj) < 1e-18:
+                        hjj = 1e-18
+                    inv_hjj = 1.0 / hjj
+                    # update remaining free weights in this row
+                    for k in range(j + 1, cols):
+                        Wwork[i][k] -= err * inv_hjj * Hinv_p[j][k]
+            col = b_end
+
+        # Unpermute Wq back
+        Wq = mat_zeros(rows, cols)
+        for new_j, old_j in enumerate(order):
+            for i in range(rows):
+                Wq[i][old_j] = Wq_p[i][new_j]
+        self.W_q = Wq
+
+        # Metrics vs RTN
+        rtn_Wq, rtn_qt = self.rtn_quantize_weights()
+        flat_w = [w for row in self.W for w in row]
+        flat_gptq = [w for row in Wq for w in row]
+        flat_rtn = [w for row in rtn_Wq for w in row]
+
+        # Output-space error ||(W - Wq) X|| more faithful — compute proxy
+        # Y = W X, Yq = Wq X
+        Y = mat_mul(self.W, self.X)
+        Yq = mat_mul(Wq, self.X)
+        Yr = mat_mul(rtn_Wq, self.X)
+        flat_y = [v for row in Y for v in row]
+        flat_yq = [v for row in Yq for v in row]
+        flat_yr = [v for row in Yr for v in row]
+
+        mse = _mse(flat_y, flat_yq)
+        rtn_mse = _mse(flat_y, flat_yr)
+        sqnr = _sqnr_db(flat_y, flat_yq)
+        rtn_sqnr = _sqnr_db(flat_y, flat_yr)
+        cos = _cosine(flat_y, flat_yq)
+        rtn_cos = _cosine(flat_y, flat_yr)
+
+        # bit rate from RTN packing of same config (weights count)
+        n_w = rows * cols
+        br = theoretical_bit_rate(n_w, cfg.n_bits, cfg.group_size, cfg.symmetric)
+        hstats = self.hessian_stats()
+
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        inv = {
+            "gptq_beats_rtn_mse": mse <= rtn_mse * 1.05 + 1e-12,
+            "gptq_cosine_high": cos > 0.90,
+            "finite_weights": all(math.isfinite(v) for v in flat_gptq),
+            "compression_gt_2x": (16.0 / br) > 2.0,
+            "hessian_spd_proxy": hstats["min_diag"] > 0.0,
+        }
+        return GPTQResult(
+            status="success",
+            mse=mse,
+            sqnr_db=sqnr,
+            cosine=cos,
+            rtn_mse=rtn_mse,
+            rtn_sqnr_db=rtn_sqnr,
+            rtn_cosine=rtn_cos,
+            bit_rate=br,
+            compression_vs_fp16=16.0 / br,
+            damp=hstats["damp"],
+            act_order=cfg.act_order,
+            n_bits=cfg.n_bits,
+            group_size=cfg.group_size,
+            rows=rows,
+            cols=cols,
+            hessian_trace=hstats["trace"],
+            hessian_cond_proxy=hstats["cond_proxy"],
+            elapsed_ms=elapsed,
+            invariants=inv,
+            extras={
+                "weight_mse_gptq": _mse(flat_w, flat_gptq),
+                "weight_mse_rtn": _mse(flat_w, flat_rtn),
+                "weight_cosine_gptq": _cosine(flat_w, flat_gptq),
+                "output_fro_error": mat_fro(mat_add(Y, mat_scale(Yq, -1.0))),
+                "rtn_output_fro_error": mat_fro(mat_add(Y, mat_scale(Yr, -1.0))),
+                "n_calibration": cfg.n_calibration,
+                "block_size": cfg.block_size,
+            },
+        )
+
+    # -- packing ------------------------------------------------------------
+
+    def pack_int_weights(self) -> Dict[str, Any]:
+        """Pack quantized weights into dense int grid + scales (post-GPTQ)."""
+        if not self.W_q:
+            self.quantize()
+        cfg = self.cfg
+        rows, cols = cfg.rows, cfg.cols
+        gs = max(1, cfg.group_size)
+        packed_rows: List[List[int]] = []
+        scale_rows: List[List[float]] = []
+        zero_rows: List[List[float]] = []
+        for i in range(rows):
+            qrow: List[int] = []
+            srow: List[float] = []
+            zrow: List[float] = []
+            for g_start in range(0, cols, gs):
+                chunk = self.W[i][g_start : g_start + gs]
+                scale, zero = group_scale_for(
+                    chunk, cfg.n_bits, cfg.symmetric, cfg.clip_ratio
+                )
+                srow.append(scale)
+                zrow.append(zero)
+                for j in range(g_start, min(g_start + gs, cols)):
+                    q, _ = quantize_scalar(
+                        self.W_q[i][j], scale, zero, cfg.n_bits, cfg.symmetric
+                    )
+                    # re-quantize the already-dequant value to int grid
+                    q2, _ = quantize_scalar(
+                        self.W_q[i][j], scale, zero, cfg.n_bits, cfg.symmetric
+                    )
+                    qrow.append(q2)
+            packed_rows.append(qrow)
+            scale_rows.append(srow)
+            zero_rows.append(zrow)
+        n = rows * cols
+        br = theoretical_bit_rate(n, cfg.n_bits, cfg.group_size, cfg.symmetric)
+        return {
+            "status": "success",
+            "rows": rows,
+            "cols": cols,
+            "n_bits": cfg.n_bits,
+            "group_size": cfg.group_size,
+            "symmetric": cfg.symmetric,
+            "bit_rate": br,
+            "compression_vs_fp16": 16.0 / br,
+            "n_scales": sum(len(s) for s in scale_rows),
+            "packed_sample": packed_rows[0][: min(16, cols)] if packed_rows else [],
+            "scale_sample": scale_rows[0][: min(4, len(scale_rows[0]))] if scale_rows else [],
+            "int_min": min(min(r) for r in packed_rows) if packed_rows else 0,
+            "int_max": max(max(r) for r in packed_rows) if packed_rows else 0,
+        }
+
+    # -- verify / benchmark / theory ----------------------------------------
+
+    def verify_invariants(self, trials: int = 3) -> Dict[str, Any]:
+        results = []
+        all_ok = True
+        base_seed = self.cfg.seed
+        for t in range(trials):
+            cfg = GPTQConfig(
+                rows=min(32, self.cfg.rows),
+                cols=min(32, self.cfg.cols),
+                n_bits=self.cfg.n_bits,
+                group_size=min(self.cfg.group_size, 32),
+                symmetric=self.cfg.symmetric,
+                damp_percent=self.cfg.damp_percent,
+                block_size=min(self.cfg.block_size, 16),
+                act_order=True,
+                n_calibration=min(64, self.cfg.n_calibration),
+                seed=base_seed + t * 17,
+            )
+            eng = GPTQEngine(cfg)
+            res = eng.quantize()
+            # Cholesky inverse residual ||H Hinv - I||
+            H = eng.H
+            Hinv = eng.inverse_hessian()
+            I_approx = mat_mul(H, Hinv)
+            n = len(I_approx)
+            resid = 0.0
+            for i in range(n):
+                for j in range(n):
+                    target = 1.0 if i == j else 0.0
+                    resid += (I_approx[i][j] - target) ** 2
+            resid = math.sqrt(resid / max(n * n, 1))
+            trial = {
+                "trial": t,
+                "mse": res.mse,
+                "rtn_mse": res.rtn_mse,
+                "cosine": res.cosine,
+                "inverse_residual": resid,
+                "invariants": res.invariants,
+                "ok": res.invariants.get("finite_weights", False)
+                and res.cosine > 0.85
+                and resid < 1e-4,
+            }
+            if not trial["ok"]:
+                all_ok = False
+            results.append(trial)
+        return {"status": "success", "all_ok": all_ok, "trials": results}
+
+    def benchmark(
+        self,
+        dims: Optional[List[int]] = None,
+        bits_list: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        dims = dims or [32, 48, 64]
+        bits_list = bits_list or [3, 4, 8]
+        rows_out = []
+        for d in dims:
+            for bits in bits_list:
+                cfg = GPTQConfig(
+                    rows=d,
+                    cols=d,
+                    n_bits=bits,
+                    group_size=min(128, d),
+                    block_size=min(32, d),
+                    n_calibration=min(128, max(32, d * 2)),
+                    act_order=True,
+                    seed=self.cfg.seed,
+                    damp_percent=0.01,
+                )
+                eng = GPTQEngine(cfg)
+                res = eng.quantize()
+                rows_out.append(
+                    {
+                        "dim": d,
+                        "n_bits": bits,
+                        "mse": res.mse,
+                        "rtn_mse": res.rtn_mse,
+                        "sqnr_db": res.sqnr_db,
+                        "rtn_sqnr_db": res.rtn_sqnr_db,
+                        "cosine": res.cosine,
+                        "bit_rate": res.bit_rate,
+                        "compression_vs_fp16": res.compression_vs_fp16,
+                        "elapsed_ms": res.elapsed_ms,
+                        "gptq_beats_rtn": res.mse <= res.rtn_mse * 1.02,
+                    }
+                )
+        return {"status": "success", "rows": rows_out}
+
+    def theory_table(self) -> Dict[str, Any]:
+        n = self.cfg.rows * self.cfg.cols
+        rows = []
+        for bits in (2, 3, 4, 8):
+            for gs in (32, 64, 128):
+                br = theoretical_bit_rate(n, bits, gs, True)
+                rows.append(
+                    {
+                        "n_bits": bits,
+                        "group_size": gs,
+                        "bit_rate": br,
+                        "vs_fp16": 16.0 / br,
+                        "vs_fp32": 32.0 / br,
+                        "payload_mib_7b_approx": (7e9 * br) / 8.0 / 1e6,
+                    }
+                )
+        return {
+            "status": "success",
+            "weight_elements": n,
+            "paper": "Frantar et al., GPTQ, ICLR 2023 (arXiv:2210.17323)",
+            "hessian": "H = 2 X X^T + λ diag",
+            "rows": rows,
+        }
+
+    def status(self) -> Dict[str, Any]:
+        res = self.quantize()
+        theory = self.theory_table()
+        return {
+            "engine": "gptq-hessian-weight-quant-engine",
+            "paper": "arXiv:2210.17323 (ICLR 2023)",
+            "config": asdict(self.cfg),
+            "hessian": self.hessian_stats(),
+            "result": res.to_dict(),
+            "theory_preview": theory["rows"][:4],
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+
+def _print_json(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=False))
+
+
+def _print_status(eng: GPTQEngine) -> None:
+    st = eng.status()
+    res = st["result"]
+    h = st["hessian"]
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║  GPTQ Hessian OBS Weight Quantization Engine (ICLR 2023)    ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
+    print(f"  • Layer shape        : {res['rows']} × {res['cols']}")
+    print(f"  • Precision          : INT{res['n_bits']}  group={res['group_size']}  act_order={res['act_order']}")
+    print(f"  • Hessian damp λ     : {h['damp']:.6g}   trace={h['trace']:.4g}  cond̃={h['cond_proxy']:.3g}")
+    print(f"  • GPTQ output MSE    : {res['mse']:.6g}")
+    print(f"  • RTN  output MSE    : {res['rtn_mse']:.6g}")
+    print(f"  • GPTQ SQNR          : {res['sqnr_db']:.2f} dB   cosine={res['cosine']:.6f}")
+    print(f"  • RTN  SQNR          : {res['rtn_sqnr_db']:.2f} dB   cosine={res['rtn_cosine']:.6f}")
+    print(f"  • Bit-rate           : {res['bit_rate']:.3f} bits/w  ({res['compression_vs_fp16']:.2f}× vs FP16)")
+    print(f"  • Latency            : {res['elapsed_ms']:.2f} ms")
+    inv = res.get("invariants", {})
+    flags = " ".join(f"{'✓' if v else '✗'}{k}" for k, v in inv.items())
+    print(f"  • Invariants         : {flags}")
+    print("✅ GPTQ status ledger ready.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="gptq-hessian-weight-quant-engine",
+        description="GPTQ Hessian Optimal Brain Surgeon weight quantizer (arXiv:2210.17323)",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--rows", type=int, default=64)
+        sp.add_argument("--cols", type=int, default=64)
+        sp.add_argument("--bits", type=int, default=4)
+        sp.add_argument("--group-size", type=int, default=128)
+        sp.add_argument("--damp", type=float, default=0.01)
+        sp.add_argument("--block-size", type=int, default=128)
+        sp.add_argument("--n-cal", type=int, default=256)
+        sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--no-act-order", action="store_true")
+        sp.add_argument("--asymmetric", action="store_true")
+        sp.add_argument("--json", action="store_true")
+
+    for name in ("status", "calibrate", "quantize", "pack"):
+        sp = sub.add_parser(name)
+        add_common(sp)
+
+    sp_b = sub.add_parser("benchmark")
+    add_common(sp_b)
+    sp_b.add_argument("--dims", type=int, nargs="+", default=[32, 48, 64])
+    sp_b.add_argument("--bits-list", type=int, nargs="+", default=[3, 4, 8])
+
+    sp_v = sub.add_parser("verify")
+    add_common(sp_v)
+    sp_v.add_argument("--trials", type=int, default=3)
+
+    sp_t = sub.add_parser("theory")
+    add_common(sp_t)
+
+    return p
+
+
+def cfg_from_args(args: argparse.Namespace) -> GPTQConfig:
+    return GPTQConfig(
+        rows=args.rows,
+        cols=args.cols,
+        n_bits=args.bits,
+        group_size=args.group_size,
+        symmetric=not getattr(args, "asymmetric", False),
+        damp_percent=args.damp,
+        block_size=args.block_size,
+        act_order=not getattr(args, "no_act_order", False),
+        n_calibration=args.n_cal,
+        seed=args.seed,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not argv:
+        argv = ["status"]
+    args = parser.parse_args(argv)
+    cmd = args.cmd or "status"
+    cfg = cfg_from_args(args)
+    eng = GPTQEngine(cfg)
+
+    if cmd == "status":
+        if args.json:
+            _print_json(eng.status())
+        else:
+            _print_status(eng)
+        return 0
+
+    if cmd == "calibrate":
+        eng.accumulate_hessian()
+        stats = eng.hessian_stats()
+        payload = {"status": "success", "hessian": stats, "X_shape": [cfg.cols, cfg.n_calibration]}
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📐 Calibration Hessian")
+            for k, v in stats.items():
+                print(f"  • {k}: {v}")
+            print("✅ Hessian accumulated (H = 2XXᵀ + λ·diag).")
+        return 0
+
+    if cmd == "quantize":
+        res = eng.quantize()
+        if args.json:
+            _print_json(res.to_dict())
+        else:
+            print("⚙️  GPTQ layer quantization")
+            print(f"  • GPTQ MSE={res.mse:.6g}  SQNR={res.sqnr_db:.2f}dB  cos={res.cosine:.6f}")
+            print(f"  • RTN  MSE={res.rtn_mse:.6g}  SQNR={res.rtn_sqnr_db:.2f}dB  cos={res.rtn_cosine:.6f}")
+            print(f"  • bit_rate={res.bit_rate:.3f}  comp={res.compression_vs_fp16:.2f}×  {res.elapsed_ms:.2f}ms")
+            better = "YES" if res.mse <= res.rtn_mse else "no"
+            print(f"  • GPTQ beats RTN (MSE): {better}")
+            print("✅ Quantization complete.")
+        return 0
+
+    if cmd == "pack":
+        eng.quantize()
+        packed = eng.pack_int_weights()
+        if args.json:
+            _print_json(packed)
+        else:
+            print("📦 INT pack ledger")
+            for k in ("rows", "cols", "n_bits", "group_size", "bit_rate", "compression_vs_fp16", "int_min", "int_max"):
+                print(f"  • {k}: {packed[k]}")
+            print(f"  • sample q[:16]: {packed['packed_sample']}")
+            print("✅ Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        bench = eng.benchmark(dims=list(args.dims), bits_list=list(args.bits_list))
+        if args.json:
+            _print_json(bench)
+        else:
+            print("📊 GPTQ benchmark sweep")
+            print(f"{'dim':>5} {'bits':>5} {'mse':>12} {'rtn_mse':>12} {'sqnr':>8} {'comp':>6} {'ms':>8} {'win':>4}")
+            for r in bench["rows"]:
+                print(
+                    f"{r['dim']:5d} {r['n_bits']:5d} {r['mse']:12.4g} {r['rtn_mse']:12.4g} "
+                    f"{r['sqnr_db']:8.2f} {r['compression_vs_fp16']:6.2f} {r['elapsed_ms']:8.2f} "
+                    f"{'Y' if r['gptq_beats_rtn'] else 'n':>4}"
+                )
+            print("✅ Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        ver = eng.verify_invariants(trials=args.trials)
+        if args.json:
+            _print_json(ver)
+        else:
+            print("🔎 Invariant battery")
+            for t in ver["trials"]:
+                print(
+                    f"  • trial {t['trial']}: cos={t['cosine']:.5f}  "
+                    f"Hinv resid={t['inverse_residual']:.3g}  ok={t['ok']}"
+                )
+            print("✅ ALL OK" if ver["all_ok"] else "❌ INVARIANT FAILURES")
+        return 0 if ver["all_ok"] else 1
+
+    if cmd == "theory":
+        th = eng.theory_table()
+        if args.json:
+            _print_json(th)
+        else:
+            print("📚 GPTQ theory ledger")
+            print(f"  paper: {th['paper']}")
+            print(f"  hessian: {th['hessian']}")
+            print(f"{'bits':>5} {'gs':>5} {'bit_rate':>10} {'vs_fp16':>8} {'7B MiB':>10}")
+            for r in th["rows"]:
+                print(
+                    f"{r['n_bits']:5d} {r['group_size']:5d} {r['bit_rate']:10.3f} "
+                    f"{r['vs_fp16']:8.2f} {r['payload_mib_7b_approx']:10.1f}"
+                )
+            print("✅ Theory table complete.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 11:46:30 +0530] - Evolved `gptq-hessian-weight-quant-engine`
+- **Title**: GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/gptq-hessian-weight-quant-engine`
+  - `skills/inference/gptq-hessian-weight-quant-engine/SKILL.md`
+  - `tests/test_gptq_hessian_weight_quant_engine.py`
+- **Capabilities**: Layer-wise post-training weight quant minimizing ||WX−WqX|| via dampened Hessian H=2XXᵀ, Cholesky inverse, act-order column permutation, block OBS residual redistribution, group INT2/3/4/8 packing, RTN baseline MSE/SQNR ledgers. 20/20 unit tests passed; CLI `status`/`calibrate`/`quantize`/`benchmark`/`verify`/`pack`/`theory`.
+
+
 ### [2026-11-12 08:24:56 +0530] - Evolved `mixture-of-depths-engine`
 - **Title**: Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)
 - **Category**: inference

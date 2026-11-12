@@ -1891,5 +1891,27 @@
       "FWHT",
       "InferenceEngine"
     ]
+  },
+  {
+    "id": "gptq-hessian-weight-quant-engine",
+    "name": "gptq-hessian-weight-quant-engine",
+    "title": "GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Layer-wise post-training weight quantization minimizing ||WX - WqX|| via dampened Hessian OBS, Cholesky inverse, act-order column permutation, and group INT2/3/4/8 packing with RTN baselines.",
+    "cli": "gptq-hessian-weight-quant-engine",
+    "bin": "bin/gptq-hessian-weight-quant-engine",
+    "skill": "skills/inference/gptq-hessian-weight-quant-engine/SKILL.md",
+    "test_cmd": "pytest tests/test_gptq_hessian_weight_quant_engine.py",
+    "evolved_at": "2026-11-12T11:46:30.819715",
+    "tags": [
+      "Frontier-AI",
+      "GPTQ",
+      "Hessian",
+      "INT4",
+      "OptimalBrainSurgeon",
+      "PostTrainingQuantization",
+      "InferenceEngine"
+    ]
   }
 ]
