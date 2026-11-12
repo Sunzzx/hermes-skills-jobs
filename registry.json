@@ -1936,5 +1936,23 @@
       "InferenceEngine",
       "AlphaSearch"
     ]
+  },
+  {
+    "id": "smoothquant-activation-smoothing-engine",
+    "title": "SmoothQuant: Activation-Smoothing W8A8 PTQ Engine (ICML 2023, arXiv:2211.10438)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Migrates activation outliers into weights via per-channel diagonal smooth s_j=max(|X_j|)^\u03b1/max(|W_j|)^{1-\u03b1} so both fit INT8 RTN \u2014 enabling efficient W8A8 GEMM without fine-tuning. Alpha grid search, naive baseline, range-compression ledgers.",
+    "cli": "smoothquant-activation-smoothing-engine",
+    "evolved_at": "2026-11-12T18:33:27.630567",
+    "tags": [
+      "Inference",
+      "SmoothQuant",
+      "W8A8",
+      "ActivationSmoothing",
+      "Quantization",
+      "INT8",
+      "PostTraining"
+    ]
   }
 ]

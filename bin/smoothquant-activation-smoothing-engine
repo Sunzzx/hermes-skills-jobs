@@ -1,0 +1,1196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""SmoothQuant: Activation-Smoothing Post-Training Quantization Engine.
+
+Paper: Xiao et al., "SmoothQuant: Accurate and Efficient Post-Training
+Quantization for Large Language Models" (ICML 2023, arXiv:2211.10438).
+
+Core idea
+---------
+LLM activations carry channel-wise outliers that destroy naive INT8
+activation quantization, while weights are comparatively well-behaved.
+SmoothQuant *migrates* quantization difficulty from activations to weights
+via an mathematically equivalent per-channel diagonal smooth:
+
+    s_j = max(|X_j|)^α  /  max(|W_{:,j}|)^{1-α}
+
+    X'_j     = X_j     / s_j
+    W'_{:,j} = W_{:,j} * s_j
+
+so W' X' = W X exactly in floating point. After smoothing, both W' and X'
+fit INT8 RTN with low error — enabling efficient W8A8 GEMM (Tensor Cores,
+VNNI, neon) without fine-tuning.
+
+α ∈ [0, 1] is the migration strength:
+  α = 0  → all difficulty pushed onto weights (X fully smoothed)
+  α = 1  → no migration (activations keep full dynamic range)
+  α ≈ 0.5 → balanced (default; paper finds 0.5–0.75 works widely)
+
+Pure-Python reference (zero third-party deps):
+
+  * dense GEMM / Frobenius / SQNR helpers
+  * per-channel max / RMS / percentile activation & weight stats
+  * SmoothQuant scale formula with epsilon guards
+  * equivalent diagonal smooth transform (exact fp identity)
+  * per-tensor / per-channel / group RTN for W and A (sym + asym)
+  * alpha grid search minimizing joint W8A8 output MSE
+  * baseline: naive W8A8 RTN without smoothing
+  * outlier channel ledger + dynamic-range compression ratios
+  * theoretical W8A8 throughput / bit-rate tables
+  * CLI: status | calibrate | search | quantize | benchmark | verify | theory | pack
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if p <= 0:
+        return sorted_vals[0]
+    if p >= 100:
+        return sorted_vals[-1]
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    f = int(math.floor(k))
+    c = min(f + 1, len(sorted_vals) - 1)
+    if f == c:
+        return sorted_vals[f]
+    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+
+
+def _safe_pow(base: float, exp: float) -> float:
+    base = max(abs(base), 1e-12)
+    try:
+        return base ** exp
+    except OverflowError:
+        return 1e12
+
+
+# ---------------------------------------------------------------------------
+# Dense matrix primitives (row-major List[List[float]])
+# ---------------------------------------------------------------------------
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_copy(a: Matrix) -> Matrix:
+    return [row[:] for row in a]
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    r, c = len(a), len(a[0])
+    out = mat_zeros(c, r)
+    for i in range(r):
+        for j in range(c):
+            out[j][i] = a[i][j]
+    return out
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    """a is (r,k), b is (k,c) -> (r,c)."""
+    r, c = len(a), len(b[0])
+    out = mat_zeros(r, c)
+    bt = mat_t(b)
+    for i in range(r):
+        ai = a[i]
+        for j in range(c):
+            out[i][j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_scale_cols(w: Matrix, scales: Sequence[float]) -> Matrix:
+    """W'_{:,j} = W_{:,j} * scales[j]."""
+    rows, cols = len(w), len(w[0])
+    assert len(scales) == cols
+    out = mat_zeros(rows, cols)
+    for i in range(rows):
+        wi = w[i]
+        oi = out[i]
+        for j in range(cols):
+            oi[j] = wi[j] * scales[j]
+    return out
+
+
+def mat_scale_rows(x: Matrix, scales: Sequence[float]) -> Matrix:
+    """For X shaped (cols, n_cal): X'_j,: = X_j,: / scales[j]."""
+    rows, cols = len(x), len(x[0])
+    assert len(scales) == rows
+    out = mat_zeros(rows, cols)
+    for i in range(rows):
+        inv = 1.0 / scales[i] if abs(scales[i]) > 1e-18 else 1.0
+        xi = x[i]
+        oi = out[i]
+        for j in range(cols):
+            oi[j] = xi[j] * inv
+    return out
+
+
+def mat_fro(a: Matrix) -> float:
+    s = 0.0
+    for row in a:
+        for v in row:
+            s += v * v
+    return math.sqrt(s)
+
+
+def mat_flatten(a: Matrix) -> Vector:
+    out: Vector = []
+    for row in a:
+        out.extend(row)
+    return out
+
+
+def mat_max_abs_cols(w: Matrix) -> Vector:
+    """max_i |W_{i,j}| for each column j."""
+    rows, cols = len(w), len(w[0])
+    out = [0.0] * cols
+    for j in range(cols):
+        m = 0.0
+        for i in range(rows):
+            m = max(m, abs(w[i][j]))
+        out[j] = max(m, 1e-12)
+    return out
+
+
+def mat_max_abs_rows(x: Matrix) -> Vector:
+    """max_t |X_{j,t}| for each row j (channel)."""
+    rows = len(x)
+    out = [0.0] * rows
+    for j in range(rows):
+        m = 0.0
+        for v in x[j]:
+            m = max(m, abs(v))
+        out[j] = max(m, 1e-12)
+    return out
+
+
+def mat_rms_rows(x: Matrix) -> Vector:
+    rows = len(x)
+    out = [0.0] * rows
+    for j in range(rows):
+        out[j] = max(math.sqrt(_mean([v * v for v in x[j]])), 1e-12)
+    return out
+
+
+def mat_percentile_abs_rows(x: Matrix, p: float = 99.0) -> Vector:
+    rows = len(x)
+    out = [0.0] * rows
+    for j in range(rows):
+        vals = sorted(abs(v) for v in x[j])
+        out[j] = max(_percentile(vals, p), 1e-12)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Synthetic calibration data with realistic activation outliers
+# ---------------------------------------------------------------------------
+
+def make_weight(rows: int, cols: int, seed: int = 42) -> Matrix:
+    """Gaussian weights; mild channel scale variation."""
+    rng = random.Random(seed)
+    w = mat_zeros(rows, cols)
+    for i in range(rows):
+        for j in range(cols):
+            w[i][j] = rng.gauss(0.0, 0.30)
+    # A few channels slightly larger magnitude (not extreme — outliers live in X)
+    n_boost = max(1, cols // 12)
+    for k in range(n_boost):
+        j = (k * 11 + 5) % cols
+        boost = 1.4 + 0.15 * k
+        for i in range(rows):
+            w[i][j] *= boost
+    return w
+
+
+def make_activations(cols: int, n_cal: int, seed: int = 7,
+                     outlier_frac: float = 0.05,
+                     outlier_scale: float = 40.0) -> Matrix:
+    """X shaped (cols, n_cal) with channel-wise outliers (SmoothQuant setup).
+
+    Most channels ~ N(0, 0.7). A small set of 'outlier channels' have rare
+    but huge spikes — the pathology that breaks naive A8 quantization.
+    """
+    rng = random.Random(seed)
+    x = mat_zeros(cols, n_cal)
+    n_out = max(1, cols // 10)
+    outlier_ch = {((k * 11 + 5) % cols) for k in range(n_out)}
+    for j in range(cols):
+        base = 0.7
+        for t in range(n_cal):
+            v = rng.gauss(0.0, base)
+            if j in outlier_ch and rng.random() < outlier_frac:
+                # signed spike
+                sign = 1.0 if rng.random() < 0.5 else -1.0
+                v = sign * outlier_scale * (0.6 + 0.4 * rng.random())
+            x[j][t] = v
+    return x
+
+
+# ---------------------------------------------------------------------------
+# Quantizers: per-tensor / per-channel / group RTN
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 8
+    group_size: int = 0          # 0 => whole vector / tensor
+    symmetric: bool = True       # SmoothQuant W8A8 typically symmetric
+    per_channel: bool = False    # for activations: per-channel along rows
+    clip_ratio: float = 1.0
+
+
+@dataclass
+class QuantizedTensor:
+    q: List[Any]                 # List[int] or Matrix of ints
+    scales: List[float]
+    zeros: List[float]
+    n_bits: int
+    group_size: int
+    symmetric: bool
+    layout: str                  # "vector" | "matrix_row" | "matrix_col" | "tensor"
+
+    def bit_rate(self, n_elems: Optional[int] = None) -> float:
+        if n_elems is None:
+            if self.layout == "vector":
+                n_elems = len(self.q)  # type: ignore[arg-type]
+            elif isinstance(self.q, list) and self.q and isinstance(self.q[0], list):
+                n_elems = len(self.q) * len(self.q[0])
+            else:
+                n_elems = len(self.q)  # type: ignore[arg-type]
+        n = max(int(n_elems), 1)
+        n_g = max(len(self.scales), 1)
+        meta_bits = n_g * 16 * (1 if self.symmetric else 2)
+        return (n * self.n_bits + meta_bits) / n
+
+    def compression_ratio(self, ref_bits: float = 16.0, n_elems: Optional[int] = None) -> float:
+        br = self.bit_rate(n_elems)
+        return ref_bits / br if br > 1e-12 else 0.0
+
+
+def _group_params(vals: Sequence[float], cfg: QuantConfig) -> Tuple[float, float]:
+    """Return (scale, zero). q = round(x/scale + zero) for asym; round(x/scale)+zp for sym."""
+    qmax = (1 << cfg.n_bits) - 1
+    if not vals:
+        return 1.0, 0.0
+    lo = min(vals)
+    hi = max(vals)
+    if cfg.clip_ratio < 1.0:
+        mid = 0.5 * (lo + hi)
+        half = 0.5 * (hi - lo) * cfg.clip_ratio
+        lo, hi = mid - half, mid + half
+    if cfg.symmetric:
+        m = max(abs(lo), abs(hi), 1e-12)
+        # map [-m, m] -> [-qmax/2, qmax/2] roughly; store zero at midpoint
+        scale = (2.0 * m) / max(qmax, 1)
+        zero = (qmax + 1) / 2.0
+        return max(scale, 1e-12), zero
+    if hi - lo < 1e-12:
+        return 1e-8, float(-lo)
+    scale = (hi - lo) / max(qmax, 1)
+    scale = max(scale, 1e-12)
+    zero = _clamp(-lo / scale, 0.0, float(qmax))
+    return scale, zero
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantizedTensor:
+    n = len(x)
+    gs = cfg.group_size if cfg.group_size and cfg.group_size > 0 else n
+    q: List[int] = [0] * n
+    scales: List[float] = []
+    zeros: List[float] = []
+    qmax = (1 << cfg.n_bits) - 1
+    for start in range(0, n, gs):
+        end = min(start + gs, n)
+        chunk = list(x[start:end])
+        scale, zero = _group_params(chunk, cfg)
+        scales.append(scale)
+        zeros.append(zero)
+        for i, v in enumerate(chunk):
+            qi = int(round(v / scale + zero))
+            q[start + i] = int(_clamp(qi, 0, qmax))
+    return QuantizedTensor(
+        q=q, scales=scales, zeros=zeros, n_bits=cfg.n_bits,
+        group_size=gs, symmetric=cfg.symmetric, layout="vector",
+    )
+
+
+def dequantize_vector(qt: QuantizedTensor) -> Vector:
+    q = qt.q  # type: ignore[assignment]
+    n = len(q)
+    gs = qt.group_size if qt.group_size > 0 else n
+    out = [0.0] * n
+    for start in range(0, n, gs):
+        g = start // gs
+        end = min(start + gs, n)
+        scale = qt.scales[min(g, len(qt.scales) - 1)]
+        zero = qt.zeros[min(g, len(qt.zeros) - 1)]
+        for i in range(start, end):
+            out[i] = (q[i] - zero) * scale
+    return out
+
+
+def quantize_matrix_rowmajor(w: Matrix, cfg: QuantConfig) -> Tuple[Matrix, QuantizedTensor]:
+    """Quantize each row independently (group along row = input channels)."""
+    rows, cols = len(w), len(w[0])
+    recon = mat_zeros(rows, cols)
+    all_q: List[List[int]] = []
+    all_scales: List[float] = []
+    all_zeros: List[float] = []
+    for i in range(rows):
+        qt = quantize_vector(w[i], cfg)
+        recon[i] = dequantize_vector(qt)
+        all_q.append(qt.q)  # type: ignore[arg-type]
+        all_scales.extend(qt.scales)
+        all_zeros.extend(qt.zeros)
+    packed = QuantizedTensor(
+        q=all_q, scales=all_scales, zeros=all_zeros, n_bits=cfg.n_bits,
+        group_size=cfg.group_size if cfg.group_size > 0 else cols,
+        symmetric=cfg.symmetric, layout="matrix_row",
+    )
+    return recon, packed
+
+
+def quantize_activations_per_tensor(x: Matrix, cfg: QuantConfig) -> Tuple[Matrix, QuantizedTensor]:
+    """Flatten X, single (or grouped) scale, reshape."""
+    flat = mat_flatten(x)
+    qt = quantize_vector(flat, cfg)
+    recon_flat = dequantize_vector(qt)
+    rows, cols = len(x), len(x[0])
+    recon = mat_zeros(rows, cols)
+    k = 0
+    for i in range(rows):
+        for j in range(cols):
+            recon[i][j] = recon_flat[k]
+            k += 1
+    qt.layout = "tensor"
+    return recon, qt
+
+
+def quantize_activations_per_channel(x: Matrix, cfg: QuantConfig) -> Tuple[Matrix, QuantizedTensor]:
+    """Per-channel (per-row) quantization of X (cols x n_cal)."""
+    rows, cols = len(x), len(x[0])
+    recon = mat_zeros(rows, cols)
+    all_q: List[List[int]] = []
+    scales: List[float] = []
+    zeros: List[float] = []
+    # Force whole-row as one group for true per-channel
+    row_cfg = QuantConfig(
+        n_bits=cfg.n_bits, group_size=0, symmetric=cfg.symmetric, clip_ratio=cfg.clip_ratio,
+    )
+    for i in range(rows):
+        qt = quantize_vector(x[i], row_cfg)
+        recon[i] = dequantize_vector(qt)
+        all_q.append(qt.q)  # type: ignore[arg-type]
+        scales.extend(qt.scales)
+        zeros.extend(qt.zeros)
+    packed = QuantizedTensor(
+        q=all_q, scales=scales, zeros=zeros, n_bits=cfg.n_bits,
+        group_size=cols, symmetric=cfg.symmetric, layout="matrix_row",
+    )
+    return recon, packed
+
+
+def theoretical_bit_rate(n: int, bits: int, group_size: int, symmetric: bool) -> float:
+    gs = group_size if group_size > 0 else n
+    n_g = (n + gs - 1) // gs
+    meta = n_g * 16 * (1 if symmetric else 2)
+    return (n * bits + meta) / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# SmoothQuant core
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SmoothQuantConfig:
+    rows: int = 64                 # output features
+    cols: int = 64                 # input features / channels
+    w_bits: int = 8
+    a_bits: int = 8
+    group_size: int = 0            # 0 = per-row / per-tensor
+    symmetric_w: bool = True
+    symmetric_a: bool = True
+    act_quant: str = "per_tensor"  # per_tensor | per_channel
+    n_calibration: int = 256
+    alpha: float = 0.5             # default migration strength
+    alpha_grid: int = 21
+    alpha_min: float = 0.0
+    alpha_max: float = 1.0
+    act_stat: str = "max"          # max | rms | p99
+    weight_stat: str = "max"       # max | rms
+    outlier_frac: float = 0.05
+    outlier_scale: float = 40.0
+    clip_ratio: float = 1.0
+    seed: int = 42
+
+
+@dataclass
+class SmoothQuantResult:
+    rows: int
+    cols: int
+    w_bits: int
+    a_bits: int
+    best_alpha: float
+    mse: float
+    sqnr_db: float
+    cosine: float
+    naive_mse: float
+    naive_sqnr_db: float
+    naive_cosine: float
+    w_only_mse: float
+    a_only_mse: float
+    bit_rate_w: float
+    bit_rate_a: float
+    compression_vs_fp16: float
+    elapsed_ms: float
+    max_x_before: float
+    max_x_after: float
+    max_w_before: float
+    max_w_after: float
+    range_compress_x: float
+    range_compress_w: float
+    alpha_curve: List[Dict[str, float]] = field(default_factory=list)
+    channel_stats: Dict[str, float] = field(default_factory=dict)
+    invariants: Dict[str, bool] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class SmoothQuantEngine:
+    """Reference SmoothQuant W8A8 engine with alpha search."""
+
+    def __init__(self, cfg: SmoothQuantConfig):
+        self.cfg = cfg
+        self.W: Matrix = make_weight(cfg.rows, cfg.cols, seed=cfg.seed)
+        self.X: Matrix = make_activations(
+            cfg.cols, cfg.n_calibration, seed=cfg.seed + 1,
+            outlier_frac=cfg.outlier_frac, outlier_scale=cfg.outlier_scale,
+        )
+        self.s: Vector = []
+        self.x_stat: Vector = []
+        self.w_stat: Vector = []
+        self._last: Optional[SmoothQuantResult] = None
+        self._W_smooth: Optional[Matrix] = None
+        self._X_smooth: Optional[Matrix] = None
+        self._W_q: Optional[Matrix] = None
+        self._X_q: Optional[Matrix] = None
+
+    # ----- calibration stats -----
+
+    def _act_channel_stat(self) -> Vector:
+        mode = self.cfg.act_stat
+        if mode == "max":
+            return mat_max_abs_rows(self.X)
+        if mode == "rms":
+            return mat_rms_rows(self.X)
+        if mode == "p99":
+            return mat_percentile_abs_rows(self.X, 99.0)
+        raise ValueError(f"unknown act_stat: {mode}")
+
+    def _weight_channel_stat(self) -> Vector:
+        mode = self.cfg.weight_stat
+        if mode == "max":
+            return mat_max_abs_cols(self.W)
+        if mode == "rms":
+            rows, cols = len(self.W), len(self.W[0])
+            out = [0.0] * cols
+            for j in range(cols):
+                s = 0.0
+                for i in range(rows):
+                    s += self.W[i][j] * self.W[i][j]
+                out[j] = max(math.sqrt(s / max(rows, 1)), 1e-12)
+            return out
+        raise ValueError(f"unknown weight_stat: {mode}")
+
+    def calibrate(self, alpha: Optional[float] = None) -> Vector:
+        """Compute per-channel SmoothQuant scales s_j for given α."""
+        a = self.cfg.alpha if alpha is None else float(alpha)
+        self.x_stat = self._act_channel_stat()
+        self.w_stat = self._weight_channel_stat()
+        cols = self.cfg.cols
+        s = [1.0] * cols
+        for j in range(cols):
+            # s_j = max(|X_j|)^α / max(|W_j|)^{1-α}
+            num = _safe_pow(self.x_stat[j], a)
+            den = _safe_pow(self.w_stat[j], 1.0 - a)
+            s[j] = max(num / max(den, 1e-12), 1e-8)
+        self.s = s
+        return s
+
+    def channel_stats(self) -> Dict[str, float]:
+        if not self.x_stat:
+            self.calibrate()
+        xs = sorted(self.x_stat)
+        ws = sorted(self.w_stat)
+        ss = sorted(self.s) if self.s else [1.0]
+        return {
+            "x_min": xs[0], "x_p50": _percentile(xs, 50), "x_p90": _percentile(xs, 90),
+            "x_p99": _percentile(xs, 99), "x_max": xs[-1], "x_mean": _mean(self.x_stat),
+            "x_outlier_ratio": xs[-1] / max(_mean(self.x_stat), 1e-12),
+            "w_min": ws[0], "w_p50": _percentile(ws, 50), "w_max": ws[-1],
+            "w_mean": _mean(self.w_stat),
+            "s_min": ss[0], "s_p50": _percentile(ss, 50), "s_max": ss[-1],
+            "s_mean": _mean(self.s),
+            "n_channels": float(len(xs)),
+        }
+
+    def smooth(self, alpha: Optional[float] = None) -> Tuple[Matrix, Matrix]:
+        """Apply equivalent transform; return (W', X')."""
+        if alpha is not None or not self.s:
+            self.calibrate(alpha)
+        W_s = mat_scale_cols(self.W, self.s)
+        X_s = mat_scale_rows(self.X, self.s)
+        self._W_smooth = W_s
+        self._X_smooth = X_s
+        return W_s, X_s
+
+    def _output_fp(self) -> Matrix:
+        return mat_mul(self.W, self.X)
+
+    def _quant_pair(self, W_s: Matrix, X_s: Matrix) -> Tuple[Matrix, Matrix, float, float]:
+        cfg = self.cfg
+        w_cfg = QuantConfig(
+            n_bits=cfg.w_bits,
+            group_size=cfg.group_size if cfg.group_size > 0 else cfg.cols,
+            symmetric=cfg.symmetric_w,
+            clip_ratio=cfg.clip_ratio,
+        )
+        a_cfg = QuantConfig(
+            n_bits=cfg.a_bits,
+            group_size=0,
+            symmetric=cfg.symmetric_a,
+            clip_ratio=cfg.clip_ratio,
+        )
+        W_q, w_pack = quantize_matrix_rowmajor(W_s, w_cfg)
+        if cfg.act_quant == "per_channel":
+            X_q, a_pack = quantize_activations_per_channel(X_s, a_cfg)
+        else:
+            X_q, a_pack = quantize_activations_per_tensor(X_s, a_cfg)
+        br_w = w_pack.bit_rate(cfg.rows * cfg.cols)
+        br_a = a_pack.bit_rate(cfg.cols * cfg.n_calibration)
+        return W_q, X_q, br_w, br_a
+
+    def _reconstruct_at_alpha(self, alpha: float) -> Tuple[Matrix, float, float, Matrix, Matrix]:
+        W_s, X_s = self.smooth(alpha)
+        W_q, X_q, br_w, br_a = self._quant_pair(W_s, X_s)
+        Y_hat = mat_mul(W_q, X_q)
+        return Y_hat, br_w, br_a, W_q, X_q
+
+    def search_alpha(self) -> Tuple[float, List[Dict[str, float]]]:
+        cfg = self.cfg
+        Y = self._output_fp()
+        y_flat = mat_flatten(Y)
+        n = max(cfg.alpha_grid, 2)
+        curve: List[Dict[str, float]] = []
+        best_a, best_mse = cfg.alpha, float("inf")
+        for k in range(n):
+            a = cfg.alpha_min + (cfg.alpha_max - cfg.alpha_min) * (k / (n - 1))
+            Y_hat, br_w, br_a, _, _ = self._reconstruct_at_alpha(a)
+            yh = mat_flatten(Y_hat)
+            mse = _mse(y_flat, yh)
+            sq = _sqnr_db(y_flat, yh)
+            cos = _cosine(y_flat, yh)
+            curve.append({
+                "alpha": a, "mse": mse, "sqnr_db": sq, "cosine": cos,
+                "bit_rate_w": br_w, "bit_rate_a": br_a,
+            })
+            if mse < best_mse:
+                best_mse = mse
+                best_a = a
+        return best_a, curve
+
+    def quantize(self, alpha: Optional[float] = None) -> SmoothQuantResult:
+        t0 = time.perf_counter()
+        cfg = self.cfg
+        if alpha is None:
+            best_a, curve = self.search_alpha()
+        else:
+            best_a = float(alpha)
+            # still produce a curve for diagnostics
+            _, curve = self.search_alpha()
+
+        Y = self._output_fp()
+        y_flat = mat_flatten(Y)
+
+        Y_sq, br_w, br_a, W_q, X_q = self._reconstruct_at_alpha(best_a)
+        self._W_q, self._X_q = W_q, X_q
+        yh = mat_flatten(Y_sq)
+        mse = _mse(y_flat, yh)
+        sq = _sqnr_db(y_flat, yh)
+        cos = _cosine(y_flat, yh)
+
+        # Naive W8A8: no smoothing (α effectively ignored; s=1)
+        ones = [1.0] * cfg.cols
+        W_n = mat_scale_cols(self.W, ones)
+        X_n = mat_scale_rows(self.X, ones)
+        W_nq, X_nq, _, _ = self._quant_pair(W_n, X_n)
+        Y_naive = mat_mul(W_nq, X_nq)
+        yn = mat_flatten(Y_naive)
+        naive_mse = _mse(y_flat, yn)
+        naive_sq = _sqnr_db(y_flat, yn)
+        naive_cos = _cosine(y_flat, yn)
+
+        # Ablations: W-only and A-only quant at best alpha (other stays fp)
+        W_s, X_s = self.smooth(best_a)
+        w_cfg = QuantConfig(
+            n_bits=cfg.w_bits,
+            group_size=cfg.group_size if cfg.group_size > 0 else cfg.cols,
+            symmetric=cfg.symmetric_w, clip_ratio=cfg.clip_ratio,
+        )
+        a_cfg = QuantConfig(
+            n_bits=cfg.a_bits, group_size=0,
+            symmetric=cfg.symmetric_a, clip_ratio=cfg.clip_ratio,
+        )
+        W_only, _ = quantize_matrix_rowmajor(W_s, w_cfg)
+        if cfg.act_quant == "per_channel":
+            X_only, _ = quantize_activations_per_channel(X_s, a_cfg)
+        else:
+            X_only, _ = quantize_activations_per_tensor(X_s, a_cfg)
+        y_w = mat_flatten(mat_mul(W_only, X_s))
+        y_a = mat_flatten(mat_mul(W_s, X_only))
+        w_only_mse = _mse(y_flat, y_w)
+        a_only_mse = _mse(y_flat, y_a)
+
+        max_x_before = max(mat_max_abs_rows(self.X))
+        max_x_after = max(mat_max_abs_rows(X_s))
+        max_w_before = max(mat_max_abs_cols(self.W))
+        max_w_after = max(mat_max_abs_cols(W_s))
+        range_x = max_x_before / max(max_x_after, 1e-12)
+        range_w = max_w_after / max(max_w_before, 1e-12)
+
+        # effective bit rate: average of W and A contributions on matmul traffic
+        # report mean of W bit-rate and A bit-rate vs fp16 pair (32 bits total)
+        mean_br = 0.5 * (br_w + br_a)
+        comp = 16.0 / mean_br if mean_br > 1e-12 else 0.0
+
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        ch = self.channel_stats()
+
+        inv = {
+            "finite_mse": math.isfinite(mse) and mse >= 0.0,
+            "beats_naive": mse <= naive_mse + 1e-12,
+            "alpha_in_range": 0.0 <= best_a <= 1.0,
+            "cosine_high": cos > 0.9,
+            "x_range_compressed": range_x >= 1.0 - 1e-9,
+            "equiv_transform_ok": True,  # checked in verify
+        }
+
+        res = SmoothQuantResult(
+            rows=cfg.rows, cols=cfg.cols, w_bits=cfg.w_bits, a_bits=cfg.a_bits,
+            best_alpha=best_a, mse=mse, sqnr_db=sq, cosine=cos,
+            naive_mse=naive_mse, naive_sqnr_db=naive_sq, naive_cosine=naive_cos,
+            w_only_mse=w_only_mse, a_only_mse=a_only_mse,
+            bit_rate_w=br_w, bit_rate_a=br_a, compression_vs_fp16=comp,
+            elapsed_ms=elapsed,
+            max_x_before=max_x_before, max_x_after=max_x_after,
+            max_w_before=max_w_before, max_w_after=max_w_after,
+            range_compress_x=range_x, range_compress_w=range_w,
+            alpha_curve=curve, channel_stats=ch, invariants=inv,
+        )
+        self._last = res
+        return res
+
+    def pack_int_weights(self) -> Dict[str, Any]:
+        if self._W_q is None:
+            self.quantize()
+        assert self._W_q is not None
+        cfg = self.cfg
+        # Re-quantize smoothed W to expose integer grid
+        W_s, _ = self.smooth(self._last.best_alpha if self._last else cfg.alpha)
+        w_cfg = QuantConfig(
+            n_bits=cfg.w_bits,
+            group_size=cfg.group_size if cfg.group_size > 0 else cfg.cols,
+            symmetric=cfg.symmetric_w, clip_ratio=cfg.clip_ratio,
+        )
+        _, packed = quantize_matrix_rowmajor(W_s, w_cfg)
+        sample_row = packed.q[0] if packed.q else []  # type: ignore[index]
+        flat_sample = list(sample_row[:16]) if isinstance(sample_row, list) else []
+        ints = []
+        for row in packed.q:  # type: ignore[assignment]
+            if isinstance(row, list):
+                ints.extend(row)
+        return {
+            "rows": cfg.rows,
+            "cols": cfg.cols,
+            "w_bits": cfg.w_bits,
+            "a_bits": cfg.a_bits,
+            "group_size": w_cfg.group_size,
+            "bit_rate_w": packed.bit_rate(cfg.rows * cfg.cols),
+            "compression_vs_fp16": packed.compression_ratio(16.0, cfg.rows * cfg.cols),
+            "int_min": min(ints) if ints else 0,
+            "int_max": max(ints) if ints else 0,
+            "best_alpha": self._last.best_alpha if self._last else cfg.alpha,
+            "packed_sample": flat_sample,
+            "channel_scales_sample": (self.s or [])[:16],
+            "n_scales": len(packed.scales),
+        }
+
+    def benchmark(self, dims: Sequence[int], bits_list: Sequence[int]) -> Dict[str, Any]:
+        rows_out: List[Dict[str, Any]] = []
+        base = self.cfg
+        for d in dims:
+            for bits in bits_list:
+                cfg = SmoothQuantConfig(
+                    rows=d, cols=d, w_bits=bits, a_bits=bits,
+                    group_size=base.group_size, symmetric_w=base.symmetric_w,
+                    symmetric_a=base.symmetric_a, act_quant=base.act_quant,
+                    n_calibration=min(base.n_calibration, max(64, d * 2)),
+                    alpha_grid=max(5, base.alpha_grid // 2),
+                    act_stat=base.act_stat, weight_stat=base.weight_stat,
+                    outlier_frac=base.outlier_frac, outlier_scale=base.outlier_scale,
+                    seed=base.seed,
+                )
+                eng = SmoothQuantEngine(cfg)
+                res = eng.quantize()
+                rows_out.append({
+                    "dim": d, "bits": bits, "best_alpha": res.best_alpha,
+                    "mse": res.mse, "naive_mse": res.naive_mse,
+                    "sqnr_db": res.sqnr_db, "cosine": res.cosine,
+                    "compression": res.compression_vs_fp16,
+                    "elapsed_ms": res.elapsed_ms,
+                    "beats_naive": res.mse <= res.naive_mse + 1e-12,
+                    "range_compress_x": res.range_compress_x,
+                })
+        return {"rows": rows_out, "paper": "SmoothQuant (ICML 2023, arXiv:2211.10438)"}
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        trial_rows: List[Dict[str, Any]] = []
+        all_ok = True
+        base = self.cfg
+        for t in range(trials):
+            cfg = SmoothQuantConfig(
+                rows=max(16, base.rows // 2 + t * 4),
+                cols=max(16, base.cols // 2 + t * 4),
+                w_bits=base.w_bits, a_bits=base.a_bits,
+                group_size=base.group_size, symmetric_w=base.symmetric_w,
+                symmetric_a=base.symmetric_a, act_quant=base.act_quant,
+                n_calibration=max(32, base.n_calibration // 2),
+                alpha_grid=max(7, base.alpha_grid // 2),
+                act_stat=base.act_stat, weight_stat=base.weight_stat,
+                outlier_frac=base.outlier_frac, outlier_scale=base.outlier_scale,
+                seed=base.seed + 17 * (t + 1),
+            )
+            eng = SmoothQuantEngine(cfg)
+            # Exact fp equivalence of smooth transform
+            W_s, X_s = eng.smooth(0.5)
+            y0 = mat_flatten(eng._output_fp())
+            y1 = mat_flatten(mat_mul(W_s, X_s))
+            equiv_ok = _mse(y0, y1) < 1e-16 and _cosine(y0, y1) > 0.999999
+
+            res = eng.quantize()
+            inv = dict(res.invariants)
+            inv["equiv_transform_ok"] = equiv_ok
+            inv["finite_mse"] = math.isfinite(res.mse)
+            inv["beats_naive"] = res.mse <= res.naive_mse + 1e-9
+            inv["alpha_in_range"] = 0.0 <= res.best_alpha <= 1.0
+            inv["cosine_high"] = res.cosine > 0.85
+            ok = all(inv.values())
+            all_ok = all_ok and ok
+            trial_rows.append({
+                "trial": t,
+                "best_alpha": res.best_alpha,
+                "mse": res.mse,
+                "naive_mse": res.naive_mse,
+                "cosine": res.cosine,
+                "invariants": inv,
+                "ok": ok,
+            })
+        return {
+            "status": "pass" if all_ok else "fail",
+            "trials": trial_rows,
+            "n_trials": trials,
+            "paper": "SmoothQuant arXiv:2211.10438",
+        }
+
+    def theory(self) -> Dict[str, Any]:
+        """Compression / serving theory ledger for W8A8 SmoothQuant."""
+        rows = []
+        # 7B ≈ 7e9 params; fp16 = 14 GB; W8 alone ≈ 7 GB; W8A8 compute win is bandwidth
+        n_params_7b = 7_000_000_000
+        for bits in (4, 6, 8):
+            for gs in (0, 64, 128):
+                br_w = theoretical_bit_rate(4096, bits, gs if gs > 0 else 4096, True)
+                br_a = float(bits)  # per-tensor act scale negligible
+                mean_br = 0.5 * (br_w + br_a)
+                comp = 16.0 / mean_br
+                # Weight-only storage for 7B
+                bytes_7b = n_params_7b * br_w / 8.0
+                gib = bytes_7b / (1024 ** 3)
+                rows.append({
+                    "bits": bits,
+                    "group_size": gs if gs > 0 else "tensor",
+                    "bit_rate_w": br_w,
+                    "bit_rate_a": br_a,
+                    "mean_br": mean_br,
+                    "comp_vs_fp16": comp,
+                    "est_7b_weight_gib": gib,
+                    # Rough INT8 Tensor-Core speedup vs FP16 (hardware-dependent)
+                    "peak_tc_speedup_hint": 2.0 if bits == 8 else (2.0 if bits >= 6 else 1.5),
+                })
+        return {
+            "paper": "Xiao et al., SmoothQuant (ICML 2023, arXiv:2211.10438)",
+            "transform": "s_j = max(|X_j|)^α / max(|W_j|)^{1-α};  X'=X/s, W'=W*s",
+            "notes": [
+                "Migrates activation outliers into weights so both fit INT8 RTN.",
+                "α≈0.5–0.75 is robust across OPT/BLOOM/LLaMA; search optional.",
+                "Enables W8A8 GEMM on VNNI/Tensor Core without fine-tuning.",
+                "Complements AWQ/GPTQ (weight-only low-bit) and QuaRot (Hadamard).",
+                "Per-tensor A8 is enough post-smoothing; per-channel A8 is optional.",
+                "Online cost: one calibration pass for max(|X_j|) + static s_j fold into LN.",
+            ],
+            "rows": rows,
+        }
+
+    def status(self) -> Dict[str, Any]:
+        res = self.quantize()
+        return {
+            "engine": "smoothquant-activation-smoothing-engine",
+            "paper": "arXiv:2211.10438 (ICML 2023)",
+            "config": asdict(self.cfg),
+            "result": res.to_dict(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+
+def _print_json(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True, default=str))
+
+
+def _print_status(eng: SmoothQuantEngine) -> None:
+    res = eng.quantize()
+    cfg = eng.cfg
+    print("🌊 SmoothQuant Activation-Smoothing Engine")
+    print(f"  • paper: ICML 2023 / arXiv:2211.10438")
+    print(f"  • layer: W[{cfg.rows}×{cfg.cols}]  X[{cfg.cols}×{cfg.n_calibration}]")
+    print(f"  • precision: W{cfg.w_bits}A{cfg.a_bits}  act={cfg.act_quant}  α-grid={cfg.alpha_grid}")
+    print(f"  • α* = {res.best_alpha:.4f}")
+    print(
+        f"  • SmoothQuant  MSE={res.mse:.6g}  SQNR={res.sqnr_db:.2f}dB  cos={res.cosine:.6f}"
+    )
+    print(
+        f"  • Naive W8A8   MSE={res.naive_mse:.6g}  SQNR={res.naive_sqnr_db:.2f}dB  "
+        f"cos={res.naive_cosine:.6f}"
+    )
+    print(
+        f"  • ablation     W-only MSE={res.w_only_mse:.6g}  A-only MSE={res.a_only_mse:.6g}"
+    )
+    print(
+        f"  • range        X {res.max_x_before:.3g}→{res.max_x_after:.3g} "
+        f"({res.range_compress_x:.2f}×)  "
+        f"W {res.max_w_before:.3g}→{res.max_w_after:.3g} ({res.range_compress_w:.2f}×)"
+    )
+    print(
+        f"  • bit_rate     W={res.bit_rate_w:.3f}  A={res.bit_rate_a:.3f}  "
+        f"comp={res.compression_vs_fp16:.2f}×  {res.elapsed_ms:.2f}ms"
+    )
+    better = "YES" if res.mse <= res.naive_mse else "no"
+    print(f"  • beats naive W8A8 (MSE): {better}")
+    print("✅ SmoothQuant status ready.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="smoothquant-activation-smoothing-engine",
+        description="SmoothQuant W8A8 activation-smoothing PTQ engine (ICML 2023)",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--rows", type=int, default=64)
+        sp.add_argument("--cols", type=int, default=64)
+        sp.add_argument("--w-bits", type=int, default=8)
+        sp.add_argument("--a-bits", type=int, default=8)
+        sp.add_argument("--bits", type=int, default=None, help="Set both w-bits and a-bits")
+        sp.add_argument("--group-size", type=int, default=0)
+        sp.add_argument("--n-cal", type=int, default=256)
+        sp.add_argument("--alpha", type=float, default=None, help="Fix alpha; skip free search for quantize")
+        sp.add_argument("--alpha-grid", type=int, default=21)
+        sp.add_argument("--act-quant", choices=["per_tensor", "per_channel"], default="per_tensor")
+        sp.add_argument("--act-stat", choices=["max", "rms", "p99"], default="max")
+        sp.add_argument("--weight-stat", choices=["max", "rms"], default="max")
+        sp.add_argument("--outlier-frac", type=float, default=0.05)
+        sp.add_argument("--outlier-scale", type=float, default=40.0)
+        sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--asymmetric", action="store_true", help="Use asymmetric quant (default symmetric)")
+        sp.add_argument("--json", action="store_true")
+
+    for name in ("status", "calibrate", "search", "quantize", "pack"):
+        sp = sub.add_parser(name)
+        add_common(sp)
+
+    sp_b = sub.add_parser("benchmark")
+    add_common(sp_b)
+    sp_b.add_argument("--dims", type=int, nargs="+", default=[32, 48, 64])
+    sp_b.add_argument("--bits-list", type=int, nargs="+", default=[4, 8])
+
+    sp_v = sub.add_parser("verify")
+    add_common(sp_v)
+    sp_v.add_argument("--trials", type=int, default=3)
+
+    sp_t = sub.add_parser("theory")
+    add_common(sp_t)
+
+    return p
+
+
+def cfg_from_args(args: argparse.Namespace) -> SmoothQuantConfig:
+    w_bits = args.w_bits
+    a_bits = args.a_bits
+    if getattr(args, "bits", None) is not None:
+        w_bits = a_bits = int(args.bits)
+    sym = not bool(getattr(args, "asymmetric", False))
+    return SmoothQuantConfig(
+        rows=args.rows,
+        cols=args.cols,
+        w_bits=w_bits,
+        a_bits=a_bits,
+        group_size=args.group_size,
+        symmetric_w=sym,
+        symmetric_a=sym,
+        act_quant=getattr(args, "act_quant", "per_tensor"),
+        n_calibration=args.n_cal,
+        alpha=0.5 if getattr(args, "alpha", None) is None else float(args.alpha),
+        alpha_grid=getattr(args, "alpha_grid", 21),
+        act_stat=getattr(args, "act_stat", "max"),
+        weight_stat=getattr(args, "weight_stat", "max"),
+        outlier_frac=getattr(args, "outlier_frac", 0.05),
+        outlier_scale=getattr(args, "outlier_scale", 40.0),
+        seed=args.seed,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not argv:
+        argv = ["status"]
+    args = parser.parse_args(argv)
+    cmd = args.cmd or "status"
+    cfg = cfg_from_args(args)
+    eng = SmoothQuantEngine(cfg)
+
+    if cmd == "status":
+        if args.json:
+            _print_json(eng.status())
+        else:
+            _print_status(eng)
+        return 0
+
+    if cmd == "calibrate":
+        alpha = getattr(args, "alpha", None)
+        s = eng.calibrate(alpha=alpha)
+        stats = eng.channel_stats()
+        payload = {
+            "status": "success",
+            "alpha": cfg.alpha if alpha is None else alpha,
+            "act_stat": cfg.act_stat,
+            "weight_stat": cfg.weight_stat,
+            "stats": stats,
+            "sample_s": s[: min(16, len(s))],
+            "X_shape": [cfg.cols, cfg.n_calibration],
+            "W_shape": [cfg.rows, cfg.cols],
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📐 SmoothQuant channel calibration")
+            print(f"  • α={payload['alpha']}  act_stat={cfg.act_stat}  weight_stat={cfg.weight_stat}")
+            for k, v in stats.items():
+                print(f"  • {k}: {v}")
+            print("✅ s_j = max(|X_j|)^α / max(|W_j|)^{1-α} computed.")
+        return 0
+
+    if cmd == "search":
+        best, curve = eng.search_alpha()
+        if args.json:
+            _print_json({"best_alpha": best, "curve": curve})
+        else:
+            print("🔍 SmoothQuant alpha grid search")
+            print(f"  • grid size: {len(curve)}")
+            step = max(1, len(curve) // 5)
+            for pt in curve[::step]:
+                print(
+                    f"  • α={pt['alpha']:.3f}  MSE={pt['mse']:.6g}  "
+                    f"SQNR={pt['sqnr_db']:.2f}dB  cos={pt['cosine']:.4f}"
+                )
+            print(f"  • best α* = {best:.4f}")
+            print("✅ Alpha search complete.")
+        return 0
+
+    if cmd == "quantize":
+        alpha = getattr(args, "alpha", None)
+        res = eng.quantize(alpha=alpha)
+        if args.json:
+            _print_json(res.to_dict())
+        else:
+            print("⚙️  SmoothQuant W8A8 layer quantization")
+            print(f"  • α*={res.best_alpha:.4f}")
+            print(
+                f"  • SQ   MSE={res.mse:.6g}  SQNR={res.sqnr_db:.2f}dB  cos={res.cosine:.6f}"
+            )
+            print(
+                f"  • Naive MSE={res.naive_mse:.6g}  SQNR={res.naive_sqnr_db:.2f}dB  "
+                f"cos={res.naive_cosine:.6f}"
+            )
+            print(
+                f"  • range X×{res.range_compress_x:.2f}  W×{res.range_compress_w:.2f}  "
+                f"comp={res.compression_vs_fp16:.2f}×  {res.elapsed_ms:.2f}ms"
+            )
+            better = "YES" if res.mse <= res.naive_mse else "no"
+            print(f"  • SmoothQuant beats naive W8A8: {better}")
+            print("✅ Quantization complete.")
+        return 0
+
+    if cmd == "pack":
+        eng.quantize(alpha=getattr(args, "alpha", None))
+        packed = eng.pack_int_weights()
+        if args.json:
+            _print_json(packed)
+        else:
+            print("📦 INT pack ledger")
+            for k in (
+                "rows", "cols", "w_bits", "a_bits", "group_size", "bit_rate_w",
+                "compression_vs_fp16", "int_min", "int_max", "best_alpha", "n_scales",
+            ):
+                print(f"  • {k}: {packed[k]}")
+            print(f"  • sample q[:16]: {packed['packed_sample']}")
+            print(f"  • channel scales sample: {packed['channel_scales_sample']}")
+            print("✅ Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(args.dims, args.bits_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📊 SmoothQuant benchmark sweep")
+            print(
+                f"  {'dim':>5} {'bits':>5} {'α*':>7} {'MSE':>12} {'Naive':>12} "
+                f"{'SQNR':>8} {'comp':>6} {'Xrng':>6} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['bits']:5d} {r['best_alpha']:7.3f} "
+                    f"{r['mse']:12.4g} {r['naive_mse']:12.4g} {r['sqnr_db']:8.2f} "
+                    f"{r['compression']:6.2f} {r['range_compress_x']:6.2f} "
+                    f"{r['elapsed_ms']:8.2f} {'Y' if r['beats_naive'] else 'n':>5}"
+                )
+            print("✅ Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("🧪 SmoothQuant invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'✓' if v else '✗'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: α*={t['best_alpha']:.3f}  "
+                    f"mse={t['mse']:.4g}  naive={t['naive_mse']:.4g}  {flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "✅ Verify complete."
+                if payload["status"] == "pass"
+                else "❌ Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📚 SmoothQuant theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(
+                f"  {'bits':>5} {'gs':>8} {'br_w':>8} {'br_a':>6} "
+                f"{'comp':>8} {'7B GiB':>10} {'TC×':>5}"
+            )
+            for r in payload["rows"]:
+                gs = r["group_size"]
+                print(
+                    f"  {r['bits']:5d} {str(gs):>8} {r['bit_rate_w']:8.3f} "
+                    f"{r['bit_rate_a']:6.1f} {r['comp_vs_fp16']:8.2f} "
+                    f"{r['est_7b_weight_gib']:10.2f} {r['peak_tc_speedup_hint']:5.1f}"
+                )
+            print("✅ Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

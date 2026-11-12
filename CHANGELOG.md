@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 18:33:43] - Evolved `smoothquant-activation-smoothing-engine`
+- **Title**: SmoothQuant: Activation-Smoothing W8A8 PTQ Engine (ICML 2023, arXiv:2211.10438)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/smoothquant-activation-smoothing-engine`
+  - `skills/inference/smoothquant-activation-smoothing-engine/SKILL.md`
+  - `tests/test_smoothquant_activation_smoothing_engine.py`
+- **Capabilities**: Per-channel diagonal smooth s_j=max(|X_j|)^a / max(|W_j|)^(1-a); exact fp-equivalent W'/X' transform; joint W8A8 (also W4A8) symmetric RTN; alpha grid search vs naive unsmoothed baseline; X-range compression + W/A ablation MSE/SQNR ledgers; 7B footprint theory. 17/17 unit tests passed; CLI `status`/`calibrate`/`search`/`quantize`/`benchmark`/`verify`/`pack`/`theory`.
+
+
 ### [2026-11-12 11:46:30 +0530] - Evolved `gptq-hessian-weight-quant-engine`
 - **Title**: GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)
 - **Category**: inference

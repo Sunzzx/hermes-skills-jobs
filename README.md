@@ -8,6 +8,10 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ---
 
+
+## Recently Evolved
+- **smoothquant-activation-smoothing-engine** — SmoothQuant W8A8 activation-smoothing PTQ (ICML 2023, arXiv:2211.10438). Migrates activation outliers into weights via per-channel diagonal smooth; alpha search beats naive W8A8. CLI in `bin/smoothquant-activation-smoothing-engine`.
+
 ## 🚀 Live Capability Registry (113 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
