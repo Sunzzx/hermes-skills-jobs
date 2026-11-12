@@ -931,3 +931,8 @@
 - **Title**: LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)
 - **Category**: inference
 - **Description**: Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers.
+
+### [2026-11-12 10:41:08] - Evolved `quarot-hadamard-quant-engine`
+- **Title**: QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)
+- **Category**: inference
+- **Description**: Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers.

@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-110-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-111-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (110 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (111 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -122,6 +122,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **YOCO: You Only Cache Once Decoder-Decoder KV Engine (Meta FAIR, arXiv:2405.05254)** | `inference` | `yoco-cache-engine` | Meta FAIR YOCO decoder-decoder architecture: self-decoder emits a single shared global KV once; cross-decoder layers cross-attend with zero private KV — ~2x-Lx memory reduction vs standard causal stacks. | `YOCO` `Meta-FAIR` `KV-Cache` |
 | **Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)** | `inference` | `mixture-of-depths-engine` | DeepMind Mixture-of-Depths expert-choice router: each layer admits only top-capacity tokens into full attention+MLP; unselected tokens take residual identity — static FLOP budget ~C with exact capacity caps. | `Mixture-of-Depths` `DeepMind` `Dynamic-Compute` |
 | **LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)** | `inference` | `layerskip-self-speculative-engine` | Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers. | `Frontier-AI` `LayerSkip` `EarlyExit` |
+| **QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)** | `inference` | `quarot-hadamard-quant-engine` | Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers. | `Frontier-AI` `QuaRot` `Hadamard` |
 
 ---
 
@@ -146,14 +147,14 @@ sysdoctor status
 ports check
 ports free 3000
 
+# Example: QuaRot outlier-free INT4 via Hadamard rotation
+quarot-hadamard-quant-engine status --dim 256 --bits 4
+quarot-hadamard-quant-engine verify --trials 5
+
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
-
-# Example: LayerSkip early-exit + self-speculative decoding
-layerskip-self-speculative-engine verify
-layerskip-self-speculative-engine speculate --gen-tokens 8 --force-alpha 0.8
 ```
 
 ---
 
-*Last Evolved: 2026-11-12 09:33:19*
+*Last Evolved: 2026-11-12 10:41:08*
