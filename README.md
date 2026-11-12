@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-120-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-121-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -10,24 +10,18 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
-- `galore-gradient-lowrank-projector` — GaLore gradient low-rank projection training (ICML 2024 Oral, arXiv:2403.03507)
-
-- `qtip-trellis-incoherence-engine` — QTIP trellis-coded quantization + RHT incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)
-
-- `aqlm-additive-multi-codebook-engine` — AQLM multi-codebook additive VQ PTQ (NeurIPS 2024, arXiv:2401.06118)
-
-- **omniquant-lwc-let-engine** — OmniQuant LWC+LET omnidirectional PTQ (ICLR 2024, arXiv:2308.13137): learnable weight clipping + absorbable channel scales/shifts; CLI `omniquant-lwc-let-engine`.
-- `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
-- **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
+- `dora-weight-decomposed-adapter` — DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)
+- `galore-gradient-lowrank-projector` — GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)
+- `qtip-trellis-incoherence-engine` — QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)
+- `omniquant-lwc-let-engine` — OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)
+- `aqlm-additive-multi-codebook-engine` — AQLM: Additive Multi-Codebook LLM Quantization Engine (NeurIPS 2024, arXiv:2401.06118)
+- `quip-sharp-incoherence-lattice-engine` — QuIP#: Hadamard Incoherence + E8 Lattice PTQ Engine (ICML 2024, arXiv:2402.04396)
 
 
-## 🚀 Live Capability Registry (120 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (121 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
-| **GaLore Gradient Low-Rank Projection (ICML 2024 Oral, arXiv:2403.03507)** | `research` | `galore-gradient-lowrank-projector` | Full-parameter LLM training with low-rank gradient projection: subspace-iteration SVD, one-sided P/Q projectors, AdamW on rank-r cores, LoRA/full baselines, Lemma 3.1 stable-rank collapse, LLaMA-7B optimizer-state theory. | `GaLore` `LowRank` `GradientProjection` |
-| **QTIP Trellis + Incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)** | `inference` | `qtip-trellis-incoherence-engine` | Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization (Viterbi min-MSE path); SOTA-class 2–4 bpw pure-Python reference (Cornell RelaxML). | `QTIP` `Trellis` `TCQ` `Viterbi` `Incoherence` |
-| **AQLM Additive Multi-Codebook LLM Quantization (NeurIPS 2024, arXiv:2401.06118)** | `inference` | `aqlm-additive-multi-codebook-engine` | Extreme weight-only PTQ via residual multi-codebook additive VQ (w≈Σ_m C_m[i_m]): residual K-means, beam encode, RTN/VQ ablations, K^M effective codebook, 7B footprint theory. | `AQLM` `AdditiveVQ` `MultiCodebook` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -140,7 +134,15 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)** | `inference` | `layerskip-self-speculative-engine` | Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers. | `Frontier-AI` `LayerSkip` `EarlyExit` |
 | **QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)** | `inference` | `quarot-hadamard-quant-engine` | Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers. | `Frontier-AI` `QuaRot` `Hadamard` |
 | **GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)** | `inference` | `gptq-hessian-weight-quant-engine` | Layer-wise post-training weight quantization minimizing --WX - WqX-- via dampened Hessian OBS, Cholesky inverse, act-order column permutation, and group INT2/3/4/8 packing with RTN baselines. | `Frontier-AI` `GPTQ` `Hessian` |
-| **AWQ Activation-aware Weight Quant Engine (MLSys 2024)** | `inference` | `awq-activation-aware-weight-quant-engine` | Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline — pure-Python INT4 reference (vLLM/AutoAWQ path). | `AWQ` `INT4` `ActivationAware` |
+| **AWQ: Activation-aware Weight Quantization Engine (MLSys 2024, arXiv:2306.00978)** | `inference` | `awq-activation-aware-weight-quant-engine` | Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline — pure-Python INT4 reference (vLLM/AutoAWQ path). | `Frontier-AI` `AWQ` `ActivationAware` |
+| **SmoothQuant: Activation-Smoothing W8A8 PTQ Engine (ICML 2023, arXiv:2211.10438)** | `inference` | `smoothquant-activation-smoothing-engine` | Migrates activation outliers into weights via per-channel diagonal smooth s_j=max(-X_j-)^α/max(-W_j-)^{1-α} so both fit INT8 RTN — enabling efficient W8A8 GEMM without fine-tuning. Alpha grid search, naive baseline, range-compression ledgers. | `Inference` `SmoothQuant` `W8A8` |
+| **SpinQuant: LLM Quantization with Learned Orthogonal Rotations (Meta FAIR, arXiv:2405.16406)** | `inference` | `spinquant-learned-rotation-engine` | Learns Stiefel-manifold orthogonal rotations via Cayley parameterization so W'=WR, X'=R^T X become quantization-friendly — beats identity and rivals random Hadamard (QuaRot) for W4A8 PTQ with zero deploy overhead. | `Frontier-AI` `SpinQuant` `LearnedRotation` |
+| **QuIP#: Hadamard Incoherence + E8 Lattice PTQ Engine (ICML 2024, arXiv:2402.04396)** | `inference` | `quip-sharp-incoherence-lattice-engine` | Weight-only extreme PTQ via Randomized Hadamard Transform incoherence, E8-family lattice vector quantization, and BlockLDLQ Hessian adaptive rounding — SOTA-class 2–4 bpw compression reference (Tseng et al., Cornell RelaxML). | `Inference` `QuIP#` `Incoherence` |
+| **AQLM: Additive Multi-Codebook LLM Quantization Engine (NeurIPS 2024, arXiv:2401.06118)** | `inference` | `aqlm-additive-multi-codebook-engine` | Extreme weight-only PTQ via residual multi-codebook additive VQ: w≈Σ_m C_m[i_m]; residual K-means training, beam-search encoding, RTN/VQ ablations, K^M effective codebook vs M·log2(K) index bits, 7B footprint theory. | `Frontier-AI` `AQLM` `AdditiveQuantization` |
+| **OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)** | `inference` | `omniquant-lwc-let-engine` | Omnidirectional PTQ via Learnable Weight Clipping (γ,β golden-section) and Learnable Equivalent Transformation (absorbable channel scales s + shifts δ); block recon MSE ledgers vs RTN/SmoothQuant; zero deploy overhead after fuse. | `Frontier-AI` `OmniQuant` `LWC` |
+| **QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)** | `inference` | `qtip-trellis-incoherence-engine` | Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization with Viterbi min-MSE path encoding — SOTA-class 2–4 bpw reference (Tseng, Chang, De Sa, Cornell RelaxML). | `Frontier-AI` `QTIP` `Trellis` |
+| **GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)** | `research` | `galore-gradient-lowrank-projector` | Full-parameter LLM training with low-rank gradient projection: subspace-iteration SVD, one-sided P/Q projectors, AdamW on rank-r cores, LoRA/full baselines, Lemma 3.1 stable-rank collapse, LLaMA-7B optimizer-state theory (Zhao et al., ICML 2024 Oral). | `Frontier-AI` `GaLore` `LowRank` |
+| **DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)** | `research` | `dora-weight-decomposed-adapter` | Weight magnitude/direction decomposition with LoRA on the directional component only: W'=m⊙normalize_cols(W0+BA); analytic sphere-projected grads; DoRA/LoRA/full-FT AdamW ablations; PEFT param ledger + LLaMA-7B adapter footprint theory (NVIDIA DoRA). | `Frontier-AI` `DoRA` `LoRA` |
 
 ---
 
@@ -155,7 +157,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ## 📦 Using Any Skill Locally
 
-All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin/`):
+All CLI tools are symlinked directly into your `$PATH` (`~/.local/bin`):
 
 ```bash
 # Example: Inspect Mac memory, thermal pressure & zombie processes
@@ -168,11 +170,11 @@ ports free 3000
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
 
-# Example: GPTQ Hessian OBS weight quantization
-gptq-hessian-weight-quant-engine status --rows 64 --cols 64 --bits 4
-gptq-hessian-weight-quant-engine verify --trials 3
+# Example: DoRA weight-decomposed PEFT reference
+dora-weight-decomposed-adapter verify --trials 3
+dora-weight-decomposed-adapter theory --rank 16
 ```
 
 ---
 
-*Last Evolved: 2026-11-13 01:22:23 +0530*
+*Last Evolved: 2026-11-13 02:29:45*

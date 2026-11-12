@@ -2,6 +2,17 @@
 
 
 
+
+
+### [2026-11-13 02:29:45] - Evolved `dora-weight-decomposed-adapter`
+- **Title**: DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)
+- **Category**: research
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/dora-weight-decomposed-adapter`
+  - `skills/research/dora-weight-decomposed-adapter/SKILL.md`
+  - `tests/test_dora_weight_decomposed_adapter.py`
+- **Capabilities**: Column-wise magnitude/direction decomposition; analytic sphere-projected DoRA grads; LoRA/DoRA/full-FT AdamW trainers; gradient energy split; PEFT ledger; LLaMA-7B adapter footprint theory (~0.63% of full FT @ rank 16). 20/20 unit tests passed; CLI `status`/`decompose`/`analyze`/`step`/`train`/`ablate`/`benchmark`/`verify`/`pack`/`theory`.
 ### [2026-11-13 01:22:23] - Evolved `galore-gradient-lowrank-projector`
 - **Title**: GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)
 - **Category**: research

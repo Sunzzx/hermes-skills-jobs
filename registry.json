@@ -2072,5 +2072,26 @@
       "ICML2024",
       "SubspaceIteration"
     ]
+  },
+  {
+    "id": "dora-weight-decomposed-adapter",
+    "title": "DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Weight magnitude/direction decomposition with LoRA on the directional component only: W'=m\u2299normalize_cols(W0+BA); analytic sphere-projected grads; DoRA/LoRA/full-FT AdamW ablations; PEFT param ledger + LLaMA-7B adapter footprint theory (NVIDIA DoRA).",
+    "cli": "dora-weight-decomposed-adapter",
+    "evolved_at": "2026-11-13T02:29:45.075653+05:30",
+    "tags": [
+      "Frontier-AI",
+      "DoRA",
+      "LoRA",
+      "PEFT",
+      "WeightDecomposition",
+      "MagnitudeDirection",
+      "FineTuning",
+      "LowRank",
+      "ICML2024",
+      "NVIDIA"
+    ]
   }
 ]
