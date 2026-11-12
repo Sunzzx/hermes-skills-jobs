@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-113-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-115-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -10,9 +10,9 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
-- **smoothquant-activation-smoothing-engine** — SmoothQuant W8A8 activation-smoothing PTQ (ICML 2023, arXiv:2211.10438). Migrates activation outliers into weights via per-channel diagonal smooth; alpha search beats naive W8A8. CLI in `bin/smoothquant-activation-smoothing-engine`.
+- **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
-## 🚀 Live Capability Registry (113 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (115 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |

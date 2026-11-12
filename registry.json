@@ -1954,5 +1954,23 @@
       "INT8",
       "PostTraining"
     ]
+  },
+  {
+    "id": "spinquant-learned-rotation-engine",
+    "title": "SpinQuant: LLM Quantization with Learned Orthogonal Rotations (Meta FAIR, arXiv:2405.16406)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Learns Stiefel-manifold orthogonal rotations via Cayley parameterization so W'=WR, X'=R^T X become quantization-friendly \u2014 beats identity and rivals random Hadamard (QuaRot) for W4A8 PTQ with zero deploy overhead.",
+    "cli": "spinquant-learned-rotation-engine",
+    "evolved_at": "2026-11-12T19:42:07.109093+05:30",
+    "tags": [
+      "Frontier-AI",
+      "SpinQuant",
+      "LearnedRotation",
+      "Cayley",
+      "Quantization",
+      "W4A8",
+      "Inference"
+    ]
   }
 ]

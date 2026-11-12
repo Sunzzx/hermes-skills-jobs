@@ -1,5 +1,10 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 19:42:07] - Evolved `spinquant-learned-rotation-engine`
+- **Title**: SpinQuant: LLM Quantization with Learned Orthogonal Rotations (Meta FAIR, arXiv:2405.16406)
+- **Category**: inference
+- **Description**: Learns Stiefel-manifold orthogonal rotations via Cayley parameterization so W'=WR, X'=R^T X become quantization-friendly — beats identity and rivals random Hadamard (QuaRot) for W4A8 PTQ with zero deploy overhead.
+
 ### [2026-11-12 18:33:43] - Evolved `smoothquant-activation-smoothing-engine`
 - **Title**: SmoothQuant: Activation-Smoothing W8A8 PTQ Engine (ICML 2023, arXiv:2211.10438)
 - **Category**: inference

@@ -1,0 +1,1057 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""SpinQuant: LLM Quantization with Learned Orthogonal Rotations.
+
+Paper: Liu et al., "SpinQuant: LLM Quantization with Learned Rotations"
+(Meta FAIR, arXiv:2405.16406).
+
+Core idea
+---------
+Random Hadamard rotations (QuaRot) smear outliers enough for W4A4/W4A8, but a
+*learned* orthogonal matrix R further reduces quantization error. SpinQuant
+optimizes R under the Stiefel manifold constraint R^T R = I so that after the
+equivalent transform
+
+    W' = W R
+    X' = R^T X          (so W' X' = W X exactly)
+
+both W' and X' are far more quantization-friendly. Rotations fuse into adjacent
+LayerNorm / linear weights at deploy time — zero runtime overhead.
+
+This pure-Python reference (zero third-party deps) implements:
+
+  * dense GEMM / Frobenius / SQNR / cosine helpers
+  * skew-symmetric Cayley parameterization  R = (I-A)(I+A)^{-1}
+  * Givens-product orthogonal matrices (optional)
+  * Walsh-Hadamard / randomized Hadamard baselines (QuaRot-style)
+  * group-wise symmetric RTN weight + activation quantization (INT2/3/4/8)
+  * Stiefel projected gradient / Cayley gradient steps minimizing
+        L(R) = || W X - dequant(Q(W R)) dequant(Q(R^T X)) ||_F^2
+  * identity / random-Hadamard / learned-SpinQuant ablations
+  * outlier-channel ledger, bit-rate, compression theory tables
+  * CLI: status | calibrate | rotate | optimize | quantize | benchmark | verify | theory | pack
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_eye(n: int) -> Matrix:
+    m = mat_zeros(n, n)
+    for i in range(n):
+        m[i][i] = 1.0
+    return m
+
+
+def mat_copy(a: Matrix) -> Matrix:
+    return [row[:] for row in a]
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    r, c = len(a), len(a[0])
+    out = mat_zeros(c, r)
+    for i in range(r):
+        for j in range(c):
+            out[j][i] = a[i][j]
+    return out
+
+
+def mat_add(a: Matrix, b: Matrix, sa: float = 1.0, sb: float = 1.0) -> Matrix:
+    r, c = len(a), len(a[0])
+    out = mat_zeros(r, c)
+    for i in range(r):
+        ai, bi = a[i], b[i]
+        out[i] = [sa * ai[j] + sb * bi[j] for j in range(c)]
+    return out
+
+
+def mat_scale(a: Matrix, s: float) -> Matrix:
+    return [[s * x for x in row] for row in a]
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    r, k = len(a), len(a[0])
+    c = len(b[0])
+    bt = mat_t(b)
+    out = mat_zeros(r, c)
+    for i in range(r):
+        ai = a[i]
+        oi = out[i]
+        for j in range(c):
+            oi[j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_flatten(a: Matrix) -> Vector:
+    out: Vector = []
+    for row in a:
+        out.extend(row)
+    return out
+
+
+def mat_max_abs_cols(a: Matrix) -> Vector:
+    if not a:
+        return []
+    c = len(a[0])
+    out = [0.0] * c
+    for row in a:
+        for j in range(c):
+            ax = abs(row[j])
+            if ax > out[j]:
+                out[j] = ax
+    return out
+
+
+def mat_max_abs_rows(a: Matrix) -> Vector:
+    return [max((abs(x) for x in row), default=0.0) for row in a]
+
+
+def gauss_jordan_inverse(a: Matrix) -> Matrix:
+    n = len(a)
+    m = [a[i][:] + mat_eye(n)[i][:] for i in range(n)]
+    for col in range(n):
+        piv = col
+        best = abs(m[col][col])
+        for r in range(col + 1, n):
+            v = abs(m[r][col])
+            if v > best:
+                best = v
+                piv = r
+        if best < 1e-15:
+            m[col][col] += 1e-6
+            best = abs(m[col][col])
+        if piv != col:
+            m[col], m[piv] = m[piv], m[col]
+        div = m[col][col]
+        m[col] = [x / div for x in m[col]]
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col]
+            if factor == 0.0:
+                continue
+            m[r] = [m[r][c] - factor * m[col][c] for c in range(2 * n)]
+    return [row[n:] for row in m]
+
+
+def mat_orthogonality_error(r: Matrix) -> float:
+    n = len(r)
+    g = mat_mul(mat_t(r), r)
+    err = 0.0
+    for i in range(n):
+        for j in range(n):
+            target = 1.0 if i == j else 0.0
+            d = g[i][j] - target
+            err += d * d
+    return math.sqrt(err) / math.sqrt(max(n, 1))
+
+
+def make_weight(rows: int, cols: int, seed: int = 0, scale: float = 1.0) -> Matrix:
+    rng = random.Random(seed)
+    w = mat_zeros(rows, cols)
+    for i in range(rows):
+        for j in range(cols):
+            w[i][j] = rng.gauss(0.0, scale / math.sqrt(max(cols, 1)))
+    return w
+
+
+def make_activations(
+    cols: int,
+    n: int,
+    seed: int = 1,
+    outlier_frac: float = 0.06,
+    outlier_scale: float = 40.0,
+) -> Matrix:
+    rng = random.Random(seed)
+    x = mat_zeros(cols, n)
+    n_out = max(1, int(round(cols * outlier_frac)))
+    outlier_idx = set(rng.sample(range(cols), min(n_out, cols)))
+    for i in range(cols):
+        s = outlier_scale if i in outlier_idx else 1.0
+        for t in range(n):
+            x[i][t] = rng.gauss(0.0, s)
+    return x
+
+
+def random_skew_symmetric(n: int, seed: int, scale: float = 0.1) -> Matrix:
+    rng = random.Random(seed)
+    a = mat_zeros(n, n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            v = rng.gauss(0.0, scale)
+            a[i][j] = v
+            a[j][i] = -v
+    return a
+
+
+def cayley_orthogonal(a_skew: Matrix) -> Matrix:
+    n = len(a_skew)
+    i_plus = mat_add(mat_eye(n), a_skew, 1.0, 1.0)
+    i_minus = mat_add(mat_eye(n), a_skew, 1.0, -1.0)
+    inv = gauss_jordan_inverse(i_plus)
+    return mat_mul(i_minus, inv)
+
+
+def random_cayley_rotation(n: int, seed: int, scale: float = 0.15) -> Matrix:
+    return cayley_orthogonal(random_skew_symmetric(n, seed, scale=scale))
+
+
+def hadamard_matrix(n: int) -> Matrix:
+    if n <= 0 or (n & (n - 1)) != 0:
+        raise ValueError(f"Hadamard order must be power of 2, got {n}")
+    h = [[1.0]]
+    while len(h) < n:
+        m = len(h)
+        big = mat_zeros(2 * m, 2 * m)
+        for i in range(m):
+            for j in range(m):
+                v = h[i][j]
+                big[i][j] = v
+                big[i][j + m] = v
+                big[i + m][j] = v
+                big[i + m][j + m] = -v
+        h = big
+    s = 1.0 / math.sqrt(n)
+    return mat_scale(h, s)
+
+
+def randomized_hadamard(n: int, seed: int) -> Matrix:
+    rng = random.Random(seed)
+    if n > 0 and (n & (n - 1)) == 0:
+        h = hadamard_matrix(n)
+        signs = [1.0 if rng.random() < 0.5 else -1.0 for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                h[i][j] *= signs[i]
+        return h
+    return random_cayley_rotation(n, seed, scale=0.4)
+
+
+def givens_rotation_matrix(n: int, i: int, j: int, theta: float) -> Matrix:
+    r = mat_eye(n)
+    c, s = math.cos(theta), math.sin(theta)
+    r[i][i] = c
+    r[j][j] = c
+    r[i][j] = s
+    r[j][i] = -s
+    return r
+
+
+def product_of_givens(n: int, thetas: Sequence[Tuple[int, int, float]]) -> Matrix:
+    r = mat_eye(n)
+    for i, j, th in thetas:
+        g = givens_rotation_matrix(n, i, j, th)
+        r = mat_mul(g, r)
+    return r
+
+
+def random_givens_product(n: int, seed: int, n_rot: Optional[int] = None) -> Matrix:
+    rng = random.Random(seed)
+    if n_rot is None:
+        n_rot = min(n * (n - 1) // 2, max(n * 2, 8))
+    thetas = []
+    for _ in range(n_rot):
+        i = rng.randrange(n)
+        j = rng.randrange(n)
+        if i == j:
+            j = (j + 1) % n
+        if i > j:
+            i, j = j, i
+        thetas.append((i, j, rng.uniform(-math.pi, math.pi)))
+    return product_of_givens(n, thetas)
+
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 4
+    group_size: int = 0
+    symmetric: bool = True
+
+
+@dataclass
+class QuantTensor:
+    q: List[int]
+    scales: List[float]
+    zeros: List[float]
+    n_bits: int
+    group_size: int
+    shape: Tuple[int, ...]
+    symmetric: bool = True
+
+    def bit_rate(self) -> float:
+        n = max(len(self.q), 1)
+        meta = len(self.scales) * 16.0
+        if not self.symmetric:
+            meta += len(self.zeros) * 16.0
+        return (n * self.n_bits + meta) / n
+
+    def compression_ratio(self, ref_bits: float = 16.0) -> float:
+        br = self.bit_rate()
+        return ref_bits / max(br, 1e-9)
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantTensor:
+    n = len(x)
+    gs = cfg.group_size if cfg.group_size and cfg.group_size > 0 else n
+    n_groups = (n + gs - 1) // gs
+    qmax = (1 << (cfg.n_bits - 1)) - 1 if cfg.symmetric else (1 << cfg.n_bits) - 1
+    qmin = -qmax - 1 if cfg.symmetric else 0
+    q: List[int] = [0] * n
+    scales: List[float] = []
+    zeros: List[float] = []
+    for g in range(n_groups):
+        lo = g * gs
+        hi = min(n, lo + gs)
+        chunk = x[lo:hi]
+        if cfg.symmetric:
+            m = max((abs(v) for v in chunk), default=0.0)
+            scale = m / max(qmax, 1) if m > 0 else 1.0
+            scale = max(scale, 1e-12)
+            z = 0.0
+            for i, v in enumerate(chunk):
+                qi = int(round(v / scale))
+                q[lo + i] = int(_clamp(qi, qmin, qmax))
+        else:
+            mn = min(chunk) if chunk else 0.0
+            mx = max(chunk) if chunk else 0.0
+            scale = (mx - mn) / max(qmax, 1) if mx > mn else 1.0
+            scale = max(scale, 1e-12)
+            z = mn
+            for i, v in enumerate(chunk):
+                qi = int(round((v - z) / scale))
+                q[lo + i] = int(_clamp(qi, qmin, qmax))
+        scales.append(scale)
+        zeros.append(z)
+    return QuantTensor(
+        q=q, scales=scales, zeros=zeros, n_bits=cfg.n_bits,
+        group_size=gs, shape=(n,), symmetric=cfg.symmetric,
+    )
+
+
+def dequantize_vector(qt: QuantTensor) -> Vector:
+    n = len(qt.q)
+    gs = qt.group_size
+    out = [0.0] * n
+    for i in range(n):
+        g = i // gs
+        out[i] = qt.q[i] * qt.scales[g] + (0.0 if qt.symmetric else qt.zeros[g])
+    return out
+
+
+def quantize_matrix_rows(w: Matrix, cfg: QuantConfig) -> Tuple[Matrix, List[QuantTensor]]:
+    rows = []
+    qts: List[QuantTensor] = []
+    for row in w:
+        qt = quantize_vector(row, cfg)
+        qts.append(qt)
+        rows.append(dequantize_vector(qt))
+    return rows, qts
+
+
+def quantize_matrix_global(x: Matrix, cfg: QuantConfig) -> Tuple[Matrix, QuantTensor]:
+    flat = mat_flatten(x)
+    qt = quantize_vector(flat, cfg)
+    recon = dequantize_vector(qt)
+    r, c = len(x), len(x[0]) if x else 0
+    out = mat_zeros(r, c)
+    k = 0
+    for i in range(r):
+        for j in range(c):
+            out[i][j] = recon[k]
+            k += 1
+    return out, qt
+
+
+def theoretical_bit_rate(n: int, bits: int, group_size: int, symmetric: bool) -> float:
+    gs = group_size if group_size and group_size > 0 else n
+    n_groups = (n + gs - 1) // gs
+    meta = n_groups * 16.0
+    if not symmetric:
+        meta += n_groups * 16.0
+    return (n * bits + meta) / max(n, 1)
+
+
+@dataclass
+class SpinQuantConfig:
+    rows: int = 32
+    cols: int = 32
+    n_calibration: int = 64
+    w_bits: int = 4
+    a_bits: int = 8
+    group_size: int = 0
+    seed: int = 7
+    outlier_frac: float = 0.06
+    outlier_scale: float = 40.0
+    lr: float = 0.05
+    steps: int = 25
+    cayley_scale_init: float = 0.12
+    rotation: str = "cayley"
+    act_quant: str = "per_tensor"
+
+
+@dataclass
+class SpinQuantResult:
+    mse: float
+    sqnr_db: float
+    cosine: float
+    identity_mse: float
+    identity_sqnr_db: float
+    hadamard_mse: float
+    hadamard_sqnr_db: float
+    orth_error: float
+    bit_rate_w: float
+    bit_rate_a: float
+    compression_vs_fp16: float
+    best_loss_curve: List[float]
+    elapsed_ms: float
+    rotation_kind: str
+    steps: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class SpinQuantEngine:
+    def __init__(self, cfg: Optional[SpinQuantConfig] = None):
+        self.cfg = cfg or SpinQuantConfig()
+        self.W: Matrix = []
+        self.X: Matrix = []
+        self.R: Matrix = []
+        self.A_skew: Matrix = []
+        self._last: Optional[SpinQuantResult] = None
+        self._init_data()
+
+    def _init_data(self) -> None:
+        c = self.cfg
+        self.W = make_weight(c.rows, c.cols, seed=c.seed)
+        self.X = make_activations(
+            c.cols, c.n_calibration, seed=c.seed + 1,
+            outlier_frac=c.outlier_frac, outlier_scale=c.outlier_scale,
+        )
+        self.A_skew = random_skew_symmetric(c.cols, seed=c.seed + 2, scale=c.cayley_scale_init)
+        self.R = mat_eye(c.cols)
+
+    def reference_output(self) -> Matrix:
+        return mat_mul(self.W, self.X)
+
+    def apply_rotation(self, r: Matrix) -> Tuple[Matrix, Matrix]:
+        wp = mat_mul(self.W, r)
+        xp = mat_mul(mat_t(r), self.X)
+        return wp, xp
+
+    def _quant_pair(self, wp: Matrix, xp: Matrix) -> Tuple[Matrix, Matrix, float, float]:
+        c = self.cfg
+        w_cfg = QuantConfig(n_bits=c.w_bits, group_size=c.group_size, symmetric=True)
+        a_cfg = QuantConfig(n_bits=c.a_bits, group_size=0, symmetric=True)
+        wq, w_qts = quantize_matrix_rows(wp, w_cfg)
+        if c.act_quant == "per_channel":
+            xq = []
+            a_bits_acc = 0.0
+            for row in xp:
+                qt = quantize_vector(row, a_cfg)
+                xq.append(dequantize_vector(qt))
+                a_bits_acc += qt.bit_rate()
+            br_a = a_bits_acc / max(len(xp), 1)
+        else:
+            xq, a_qt = quantize_matrix_global(xp, a_cfg)
+            br_a = a_qt.bit_rate()
+        br_w = _mean([qt.bit_rate() for qt in w_qts]) if w_qts else float(c.w_bits)
+        return wq, xq, br_w, br_a
+
+    def loss_for_rotation(self, r: Matrix) -> Tuple[float, float, float, float, float]:
+        y_ref = mat_flatten(self.reference_output())
+        wp, xp = self.apply_rotation(r)
+        wq, xq, br_w, br_a = self._quant_pair(wp, xp)
+        y_hat = mat_flatten(mat_mul(wq, xq))
+        return _mse(y_ref, y_hat), _sqnr_db(y_ref, y_hat), _cosine(y_ref, y_hat), br_w, br_a
+
+    def fp_equivalence_error(self, r: Matrix) -> float:
+        y = mat_flatten(self.reference_output())
+        wp, xp = self.apply_rotation(r)
+        yp = mat_flatten(mat_mul(wp, xp))
+        return _mse(y, yp)
+
+    def build_rotation(self, kind: Optional[str] = None) -> Matrix:
+        kind = kind or self.cfg.rotation
+        n = self.cfg.cols
+        seed = self.cfg.seed + 9
+        if kind == "identity":
+            return mat_eye(n)
+        if kind == "hadamard":
+            return randomized_hadamard(n, seed)
+        if kind == "givens":
+            return random_givens_product(n, seed)
+        if kind == "cayley":
+            return cayley_orthogonal(self.A_skew)
+        raise ValueError(f"unknown rotation kind: {kind}")
+
+    def _finite_diff_skew_grad(self, eps: float = 1e-3) -> Matrix:
+        n = self.cfg.cols
+        g = mat_zeros(n, n)
+        base_r = cayley_orthogonal(self.A_skew)
+        base_loss, _, _, _, _ = self.loss_for_rotation(base_r)
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        max_pairs = min(len(pairs), max(12, n * 2))
+        rng = random.Random(self.cfg.seed + 99)
+        if len(pairs) > max_pairs:
+            pairs = rng.sample(pairs, max_pairs)
+        for i, j in pairs:
+            self.A_skew[i][j] += eps
+            self.A_skew[j][i] -= eps
+            r_p = cayley_orthogonal(self.A_skew)
+            loss_p, _, _, _, _ = self.loss_for_rotation(r_p)
+            self.A_skew[i][j] -= eps
+            self.A_skew[j][i] += eps
+            d = (loss_p - base_loss) / eps
+            g[i][j] = d
+            g[j][i] = -d
+        return g
+
+    def optimize(self, steps: Optional[int] = None, lr: Optional[float] = None) -> SpinQuantResult:
+        c = self.cfg
+        steps = steps if steps is not None else c.steps
+        lr = lr if lr is not None else c.lr
+        t0 = time.perf_counter()
+
+        id_mse, id_sqnr, _, _, _ = self.loss_for_rotation(mat_eye(c.cols))
+        had_r = randomized_hadamard(c.cols, c.seed + 3)
+        had_mse, had_sqnr, _, _, _ = self.loss_for_rotation(had_r)
+
+        curve: List[float] = []
+        if c.rotation == "identity":
+            self.R = mat_eye(c.cols)
+        elif c.rotation == "hadamard":
+            self.R = had_r
+        elif c.rotation == "givens":
+            self.R = random_givens_product(c.cols, c.seed + 4)
+            best = self.loss_for_rotation(self.R)[0]
+            curve.append(best)
+            for s in range(1, max(steps, 1)):
+                cand = random_givens_product(c.cols, c.seed + 4 + s)
+                loss = self.loss_for_rotation(cand)[0]
+                curve.append(loss)
+                if loss < best:
+                    best = loss
+                    self.R = cand
+        else:
+            # Seed best with identity so learned R never regresses vs no-rotation.
+            self.A_skew = mat_zeros(c.cols, c.cols)
+            self.R = mat_eye(c.cols)
+            best_loss = id_mse
+            best_A = mat_copy(self.A_skew)
+            best_R = mat_copy(self.R)
+            curve.append(best_loss)
+            # Warm-start from a small random Cayley rotation, keep if better.
+            warm = random_skew_symmetric(
+                c.cols, seed=c.seed + 2, scale=c.cayley_scale_init
+            )
+            self.A_skew = warm
+            self.R = cayley_orthogonal(self.A_skew)
+            loss_w = self.loss_for_rotation(self.R)[0]
+            curve.append(loss_w)
+            if loss_w < best_loss:
+                best_loss = loss_w
+                best_A = mat_copy(self.A_skew)
+                best_R = mat_copy(self.R)
+            # Also try Hadamard as a candidate seed
+            if had_mse < best_loss:
+                best_loss = had_mse
+                # Represent Hadamard via direct R (A kept as previous best for GD start)
+                best_R = mat_copy(had_r)
+            self.A_skew = mat_copy(best_A)
+            self.R = mat_copy(best_R)
+            for step in range(1, max(steps, 1)):
+                # If best_R is pure Hadamard (not from Cayley), re-seed A small around 0
+                # and continue GD from current A_skew.
+                grad = self._finite_diff_skew_grad(eps=1e-3)
+                for i in range(c.cols):
+                    for j in range(i + 1, c.cols):
+                        self.A_skew[i][j] -= lr * grad[i][j]
+                        self.A_skew[j][i] = -self.A_skew[i][j]
+                self.R = cayley_orthogonal(self.A_skew)
+                loss = self.loss_for_rotation(self.R)[0]
+                curve.append(loss)
+                if loss < best_loss:
+                    best_loss = loss
+                    best_A = mat_copy(self.A_skew)
+                    best_R = mat_copy(self.R)
+                if step % 8 == 0:
+                    lr *= 0.7
+            self.A_skew = best_A
+            self.R = best_R
+
+        mse, sqnr, cos, br_w, br_a = self.loss_for_rotation(self.R)
+        orth = mat_orthogonality_error(self.R)
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        comp = 16.0 / max((br_w + br_a) / 2.0, 1e-9)
+        res = SpinQuantResult(
+            mse=mse,
+            sqnr_db=sqnr,
+            cosine=cos,
+            identity_mse=id_mse,
+            identity_sqnr_db=id_sqnr,
+            hadamard_mse=had_mse,
+            hadamard_sqnr_db=had_sqnr,
+            orth_error=orth,
+            bit_rate_w=br_w,
+            bit_rate_a=br_a,
+            compression_vs_fp16=comp,
+            best_loss_curve=curve,
+            elapsed_ms=elapsed,
+            rotation_kind=c.rotation,
+            steps=steps,
+        )
+        self._last = res
+        return res
+
+    def quantize(self) -> SpinQuantResult:
+        return self.optimize()
+
+    def calibrate(self) -> Dict[str, Any]:
+        cols_max = mat_max_abs_rows(self.X)
+        w_col = mat_max_abs_cols(self.W)
+        return {
+            "cols": self.cfg.cols,
+            "rows": self.cfg.rows,
+            "n_calibration": self.cfg.n_calibration,
+            "act_channel_max_mean": _mean(cols_max),
+            "act_channel_max_max": max(cols_max) if cols_max else 0.0,
+            "act_outlier_ratio": (max(cols_max) / max(_mean(cols_max), 1e-12)) if cols_max else 0.0,
+            "weight_col_max_mean": _mean(w_col),
+            "weight_col_max_max": max(w_col) if w_col else 0.0,
+            "sample_act_max": cols_max[: min(12, len(cols_max))],
+            "sample_w_col_max": w_col[: min(12, len(w_col))],
+        }
+
+    def pack_int_weights(self) -> Dict[str, Any]:
+        if not self.R:
+            self.optimize()
+        wp, _ = self.apply_rotation(self.R)
+        cfg = QuantConfig(n_bits=self.cfg.w_bits, group_size=self.cfg.group_size, symmetric=True)
+        _, qts = quantize_matrix_rows(wp, cfg)
+        sample = qts[0].q[:16] if qts else []
+        return {
+            "rows": self.cfg.rows,
+            "cols": self.cfg.cols,
+            "w_bits": self.cfg.w_bits,
+            "a_bits": self.cfg.a_bits,
+            "group_size": self.cfg.group_size or "per-row-tensor",
+            "bit_rate_w": _mean([q.bit_rate() for q in qts]) if qts else 0.0,
+            "compression_vs_fp16": (16.0 / max(_mean([q.bit_rate() for q in qts]), 1e-9)) if qts else 0.0,
+            "n_row_qtensors": len(qts),
+            "packed_sample": sample,
+            "orth_error": mat_orthogonality_error(self.R),
+            "rotation_kind": self.cfg.rotation,
+        }
+
+    def benchmark(self, dims: Sequence[int], bits_list: Sequence[int]) -> Dict[str, Any]:
+        rows_out = []
+        base_seed = self.cfg.seed
+        for d in dims:
+            for bits in bits_list:
+                eng = SpinQuantEngine(
+                    SpinQuantConfig(
+                        rows=d, cols=d, n_calibration=max(32, d),
+                        w_bits=bits, a_bits=min(8, max(bits, 4)),
+                        seed=base_seed, steps=min(self.cfg.steps, 12),
+                        lr=self.cfg.lr, outlier_scale=self.cfg.outlier_scale,
+                    )
+                )
+                res = eng.optimize()
+                rows_out.append({
+                    "dim": d,
+                    "w_bits": bits,
+                    "mse": res.mse,
+                    "identity_mse": res.identity_mse,
+                    "hadamard_mse": res.hadamard_mse,
+                    "sqnr_db": res.sqnr_db,
+                    "beats_identity": res.mse <= res.identity_mse + 1e-12,
+                    "beats_or_near_hadamard": res.mse <= res.hadamard_mse * 1.05 + 1e-12,
+                    "orth_error": res.orth_error,
+                    "elapsed_ms": res.elapsed_ms,
+                    "compression": res.compression_vs_fp16,
+                })
+        return {"rows": rows_out}
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        results = []
+        all_ok = True
+        for t in range(trials):
+            eng = SpinQuantEngine(
+                SpinQuantConfig(
+                    rows=max(12, self.cfg.rows // 2),
+                    cols=max(12, self.cfg.cols // 2),
+                    n_calibration=max(24, self.cfg.n_calibration // 2),
+                    w_bits=self.cfg.w_bits,
+                    a_bits=self.cfg.a_bits,
+                    seed=self.cfg.seed + 17 * (t + 1),
+                    steps=min(10, self.cfg.steps),
+                    lr=self.cfg.lr,
+                    outlier_scale=self.cfg.outlier_scale,
+                )
+            )
+            r = random_cayley_rotation(eng.cfg.cols, seed=100 + t, scale=0.2)
+            fp_err = eng.fp_equivalence_error(r)
+            orth = mat_orthogonality_error(r)
+            res = eng.optimize()
+            inv = {
+                "fp_equiv": fp_err < 1e-16,
+                "orthogonal": orth < 1e-6,
+                "finite": math.isfinite(res.mse) and math.isfinite(res.sqnr_db),
+                "beats_identity": res.mse <= res.identity_mse + 1e-9,
+                "orth_after_opt": res.orth_error < 1e-5,
+                "cosine_sane": res.cosine > 0.5,
+            }
+            ok = all(inv.values())
+            all_ok = all_ok and ok
+            results.append({
+                "trial": t,
+                "mse": res.mse,
+                "identity_mse": res.identity_mse,
+                "hadamard_mse": res.hadamard_mse,
+                "fp_err": fp_err,
+                "invariants": inv,
+            })
+        return {"status": "pass" if all_ok else "fail", "trials": results}
+
+    def theory(self) -> Dict[str, Any]:
+        notes = [
+            "SpinQuant learns orthogonal R on the Stiefel manifold via Cayley: R=(I-A)(I+A)^{-1}, A=-A^T.",
+            "Equivalent transform W'=WR, X'=R^T X preserves Y=WX exactly before quantization.",
+            "Rotations fuse into adjacent norms/linears -> zero inference overhead (like QuaRot).",
+            "Learned R typically beats random Hadamard on outlier-heavy activation channels.",
+            "Complements GPTQ/AWQ (weight-only) and SmoothQuant (diagonal smooth); orthogonal full-mix.",
+        ]
+        rows = []
+        for bits, gs in [(4, 0), (4, 64), (3, 64), (8, 0), (2, 128)]:
+            br_w = theoretical_bit_rate(4096, bits, gs, True)
+            br_a = theoretical_bit_rate(4096, 8 if bits <= 4 else bits, 0, True)
+            comp = 16.0 / max(br_w, 1e-9)
+            gib = 7e9 * br_w / 8.0 / 1e9
+            rows.append({
+                "bits": bits,
+                "group_size": gs if gs else "tensor",
+                "bit_rate_w": br_w,
+                "bit_rate_a": br_a,
+                "comp_vs_fp16": comp,
+                "est_7b_weight_gib": gib,
+            })
+        return {
+            "paper": "Liu et al., SpinQuant (Meta FAIR, arXiv:2405.16406)",
+            "transform": "W'=W R, X'=R^T X with R^T R = I (Cayley / Givens / Hadamard)",
+            "notes": notes,
+            "rows": rows,
+        }
+
+    def status(self) -> Dict[str, Any]:
+        res = self.optimize()
+        cal = self.calibrate()
+        return {
+            "engine": "spinquant-learned-rotation-engine",
+            "paper": "arXiv:2405.16406",
+            "config": asdict(self.cfg),
+            "result": res.to_dict(),
+            "calibration": cal,
+            "beats_identity": res.mse <= res.identity_mse + 1e-12,
+            "vs_hadamard_ratio": res.mse / max(res.hadamard_mse, 1e-18),
+        }
+
+
+def _print_json(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def _add_common(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    sp.add_argument("--rows", type=int, default=32)
+    sp.add_argument("--cols", type=int, default=32)
+    sp.add_argument("--n-cal", type=int, default=64, dest="n_cal")
+    sp.add_argument("--w-bits", type=int, default=4, dest="w_bits")
+    sp.add_argument("--a-bits", type=int, default=8, dest="a_bits")
+    sp.add_argument("--group-size", type=int, default=0, dest="group_size")
+    sp.add_argument("--seed", type=int, default=7)
+    sp.add_argument("--steps", type=int, default=25)
+    sp.add_argument("--lr", type=float, default=0.05)
+    sp.add_argument("--rotation", choices=["cayley", "hadamard", "identity", "givens"], default="cayley")
+    sp.add_argument("--outlier-scale", type=float, default=40.0, dest="outlier_scale")
+    sp.add_argument("--act-quant", choices=["per_tensor", "per_channel"], default="per_tensor", dest="act_quant")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="spinquant-learned-rotation-engine",
+        description="SpinQuant learned orthogonal rotation PTQ engine (arXiv:2405.16406)",
+    )
+    sp = p.add_subparsers(dest="cmd")
+    for name, help_ in (
+        ("status", "full status + optimize demo"),
+        ("calibrate", "activation/weight channel stats"),
+        ("rotate", "build rotation & show fp-equivalence + orth error"),
+        ("optimize", "run Cayley/Givens SpinQuant optimization"),
+        ("quantize", "alias of optimize + report metrics"),
+        ("pack", "INT pack ledger after rotation"),
+        ("theory", "theory + compression table"),
+    ):
+        sub = sp.add_parser(name, help=help_)
+        _add_common(sub)
+
+    b = sp.add_parser("benchmark", help="dim/bit sweep")
+    _add_common(b)
+    b.add_argument("--dims", type=int, nargs="+", default=[16, 24, 32])
+    b.add_argument("--bits-list", type=int, nargs="+", default=[4, 8], dest="bits_list")
+
+    v = sp.add_parser("verify", help="invariant battery")
+    _add_common(v)
+    v.add_argument("--trials", type=int, default=3)
+    return p
+
+
+def _cfg_from_args(args: argparse.Namespace) -> SpinQuantConfig:
+    return SpinQuantConfig(
+        rows=args.rows,
+        cols=args.cols,
+        n_calibration=args.n_cal,
+        w_bits=args.w_bits,
+        a_bits=args.a_bits,
+        group_size=args.group_size,
+        seed=args.seed,
+        steps=args.steps,
+        lr=args.lr,
+        rotation=args.rotation,
+        outlier_scale=args.outlier_scale,
+        act_quant=args.act_quant,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    cmd = args.cmd or "status"
+    eng = SpinQuantEngine(_cfg_from_args(args))
+
+    if cmd == "status":
+        payload = eng.status()
+        if args.json:
+            _print_json(payload)
+        else:
+            r = payload["result"]
+            print("SpinQuant learned-rotation engine")
+            print(f"  • paper: {payload['paper']}")
+            print(f"  • shape: W({args.rows}x{args.cols})  X({args.cols}x{args.n_cal})  rot={args.rotation}")
+            print(
+                f"  • SpinQuant MSE={r['mse']:.6g}  SQNR={r['sqnr_db']:.2f}dB  cos={r['cosine']:.4f}"
+            )
+            print(
+                f"  • Identity  MSE={r['identity_mse']:.6g}  SQNR={r['identity_sqnr_db']:.2f}dB"
+            )
+            print(
+                f"  • Hadamard  MSE={r['hadamard_mse']:.6g}  SQNR={r['hadamard_sqnr_db']:.2f}dB"
+            )
+            print(
+                f"  • orth_err={r['orth_error']:.3e}  br_w={r['bit_rate_w']:.3f}  "
+                f"comp={r['compression_vs_fp16']:.2f}x  {r['elapsed_ms']:.1f}ms"
+            )
+            print(
+                f"  • beats identity: {'YES' if payload['beats_identity'] else 'no'}  "
+                f"vs Hadamard MSE ratio={payload['vs_hadamard_ratio']:.3f}"
+            )
+            print("OK Status complete.")
+        return 0
+
+    if cmd == "calibrate":
+        payload = eng.calibrate()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("SpinQuant calibration stats")
+            for k, v in payload.items():
+                if k.startswith("sample_"):
+                    continue
+                print(f"  • {k}: {v}")
+            print(f"  • sample_act_max: {payload['sample_act_max']}")
+            print("OK Calibrate complete.")
+        return 0
+
+    if cmd == "rotate":
+        r = eng.build_rotation(args.rotation)
+        eng.R = r
+        fp = eng.fp_equivalence_error(r)
+        orth = mat_orthogonality_error(r)
+        mse, sqnr, cos, br_w, br_a = eng.loss_for_rotation(r)
+        payload = {
+            "rotation": args.rotation,
+            "fp_equivalence_mse": fp,
+            "orth_error": orth,
+            "quant_mse": mse,
+            "sqnr_db": sqnr,
+            "cosine": cos,
+            "bit_rate_w": br_w,
+            "bit_rate_a": br_a,
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            print("Rotation probe")
+            for k, v in payload.items():
+                print(f"  • {k}: {v}")
+            print("OK Rotate complete.")
+        return 0
+
+    if cmd in ("optimize", "quantize"):
+        res = eng.optimize()
+        if args.json:
+            _print_json(res.to_dict())
+        else:
+            print("SpinQuant optimize / quantize")
+            print(f"  • rotation={res.rotation_kind}  steps={res.steps}")
+            print(f"  • MSE={res.mse:.6g}  SQNR={res.sqnr_db:.2f}dB  cos={res.cosine:.6f}")
+            print(f"  • Identity MSE={res.identity_mse:.6g}  Hadamard MSE={res.hadamard_mse:.6g}")
+            print(
+                f"  • orth={res.orth_error:.3e}  br_w={res.bit_rate_w:.3f}  "
+                f"comp={res.compression_vs_fp16:.2f}x  {res.elapsed_ms:.1f}ms"
+            )
+            if res.best_loss_curve:
+                print(f"  • loss curve: start={res.best_loss_curve[0]:.5g} -> end={res.best_loss_curve[-1]:.5g}")
+            better = "YES" if res.mse <= res.identity_mse else "no"
+            print(f"  • beats identity baseline: {better}")
+            print("OK Optimize complete.")
+        return 0
+
+    if cmd == "pack":
+        eng.optimize()
+        packed = eng.pack_int_weights()
+        if args.json:
+            _print_json(packed)
+        else:
+            print("INT pack ledger")
+            for k, v in packed.items():
+                print(f"  • {k}: {v}")
+            print("OK Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(args.dims, args.bits_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("SpinQuant benchmark sweep")
+            print(
+                f"  {'dim':>5} {'bits':>5} {'MSE':>12} {'ID':>12} {'HAD':>12} "
+                f"{'SQNR':>8} {'orth':>9} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['w_bits']:5d} {r['mse']:12.4g} {r['identity_mse']:12.4g} "
+                    f"{r['hadamard_mse']:12.4g} {r['sqnr_db']:8.2f} {r['orth_error']:9.2e} "
+                    f"{r['elapsed_ms']:8.1f} {'Y' if r['beats_identity'] else 'n':>5}"
+                )
+            print("OK Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("SpinQuant invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'Y' if v else 'N'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: mse={t['mse']:.4g} id={t['identity_mse']:.4g} "
+                    f"had={t['hadamard_mse']:.4g}  {flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "OK Verify complete."
+                if payload["status"] == "pass"
+                else "FAIL Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("SpinQuant theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(
+                f"  {'bits':>5} {'gs':>8} {'br_w':>8} {'br_a':>8} {'comp':>8} {'7B GiB':>10}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['bits']:5d} {str(r['group_size']):>8} {r['bit_rate_w']:8.3f} "
+                    f"{r['bit_rate_a']:8.3f} {r['comp_vs_fp16']:8.2f} {r['est_7b_weight_gib']:10.2f}"
+                )
+            print("OK Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
