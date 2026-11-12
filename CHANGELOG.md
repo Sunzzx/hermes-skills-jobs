@@ -1,5 +1,10 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 23:07:17] - Evolved `omniquant-lwc-let-engine`
+- **Title**: OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)
+- **Category**: inference
+- **Description**: Omnidirectional PTQ via Learnable Weight Clipping (γ,β golden-section) and Learnable Equivalent Transformation (absorbable channel scales s + shifts δ); block recon MSE ledgers vs RTN/SmoothQuant; zero deploy overhead after fuse.
+
 ### [2026-11-12 22:02:20] - Evolved `aqlm-additive-multi-codebook-engine`
 - **Title**: AQLM: Additive Quantization of Language Models — multi-codebook residual VQ (NeurIPS 2024, arXiv:2401.06118)
 - **Category**: inference

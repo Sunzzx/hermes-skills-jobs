@@ -2011,5 +2011,25 @@
       "WeightOnlyPTQ",
       "Inference"
     ]
+  },
+  {
+    "id": "omniquant-lwc-let-engine",
+    "title": "OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Omnidirectional PTQ via Learnable Weight Clipping (\u03b3,\u03b2 golden-section) and Learnable Equivalent Transformation (absorbable channel scales s + shifts \u03b4); block recon MSE ledgers vs RTN/SmoothQuant; zero deploy overhead after fuse.",
+    "cli": "omniquant-lwc-let-engine",
+    "evolved_at": "2026-11-12T23:07:17.643504",
+    "tags": [
+      "Frontier-AI",
+      "OmniQuant",
+      "LWC",
+      "LET",
+      "LearnableClipping",
+      "EquivalentTransformation",
+      "WeightOnlyPTQ",
+      "Calibration",
+      "Inference"
+    ]
   }
 ]

@@ -11,6 +11,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 ## Recently Evolved
 - `aqlm-additive-multi-codebook-engine` — AQLM multi-codebook additive VQ PTQ (NeurIPS 2024, arXiv:2401.06118)
+
+- **omniquant-lwc-let-engine** — OmniQuant LWC+LET omnidirectional PTQ (ICLR 2024, arXiv:2308.13137): learnable weight clipping + absorbable channel scales/shifts; CLI `omniquant-lwc-let-engine`.
 - `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
 - **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
