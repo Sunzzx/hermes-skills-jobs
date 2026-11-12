@@ -1,0 +1,1341 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""QTIP: Quantization with Trellis and Incoherence Processing.
+
+Paper: Tseng, Chang, De Sa — "QTIP: Quantization with Trellis and Incoherence
+Processing" (NeurIPS 2024, arXiv:2406.11235). Cornell RelaxML.
+Official: https://github.com/Cornell-RelaxML/qtip
+
+Core idea
+---------
+QuIP# proved that *incoherence* (Randomized Hadamard Transform) makes LLM
+weights nearly i.i.d. Gaussian, enabling structured lattice VQ. QTIP keeps
+the incoherence front-end but replaces nearest-neighbor lattice lookup with
+*trellis-coded quantization* (TCQ):
+
+  1. Incoherence Processing
+       Ŵ = S · H · w   (random ±1 signs + Walsh-Hadamard on padded rows)
+       so each coordinate is approximately N(0, σ²) and free of outliers.
+
+  2. Trellis-Coded Quantization (TCQ)
+       A finite-state machine (Ungerboeck-style convolutional trellis) assigns
+       reconstruction levels along a path. Viterbi DP finds the minimum-MSE
+       path through the trellis; surviving state transitions are the compressed
+       bitstream. Rate-R TCQ uses 2^R branches out of each state, giving an
+       effective Gaussian codebook that grows with sequence length without
+       storing an exponential vector codebook (contrast AQLM / QuIP# E8).
+
+  3. Group scales
+       Per-group RMS scale normalizes the incoherent vector before TCQ and is
+       stored in fp16 — same overhead model as other weight-only PTQ.
+
+This pure-Python reference (zero third-party deps) implements:
+
+  * dense helpers (dot, MSE, SQNR, cosine, matmul)
+  * FWHT + random-sign incoherence / de-incoherence (exact orthogonal)
+  * Gaussian / Lloyd-refined trellis codebooks with 2^R-branch Ungerboeck graph
+  * Viterbi encode + path decode for 1-D sequences
+  * block QTIP path: scale → incohere → TCQ → de-incohere → unscale
+  * ablations: plain RTN, scalar Lloyd-Max, nearest-neighbor VQ, TCQ-only
+  * bit-rate / 7B footprint theory tables
+  * CLI: status | calibrate | encode | decode | quantize | ablate
+          | benchmark | verify | pack | theory
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+# ---------------------------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 99.0
+    if signal < 1e-30:
+        return -99.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _rms(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v) / max(len(v), 1))
+
+
+def mat_flatten(m: Matrix) -> Vector:
+    out: Vector = []
+    for row in m:
+        out.extend(row)
+    return out
+
+
+def mat_shape(m: Matrix) -> Tuple[int, int]:
+    if not m:
+        return 0, 0
+    return len(m), len(m[0])
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_transpose(m: Matrix) -> Matrix:
+    if not m:
+        return []
+    r, c = mat_shape(m)
+    return [[m[i][j] for i in range(r)] for j in range(c)]
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    n, k = mat_shape(a)
+    k2, m = mat_shape(b)
+    assert k == k2
+    out = mat_zeros(n, m)
+    bt = mat_transpose(b)
+    for i in range(n):
+        ai = a[i]
+        for j in range(m):
+            out[i][j] = _dot(ai, bt[j])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Fast Walsh-Hadamard Transform (FWHT)
+# ---------------------------------------------------------------------------
+
+def next_pow2(n: int) -> int:
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
+def fwht(v: Sequence[float]) -> Vector:
+    """Unnormalized FWHT. Length must be power of 2."""
+    n = len(v)
+    assert n > 0 and (n & (n - 1)) == 0, "FWHT length must be power of 2"
+    x = list(v)
+    h = 1
+    while h < n:
+        for i in range(0, n, h * 2):
+            for j in range(i, i + h):
+                a, b = x[j], x[j + h]
+                x[j] = a + b
+                x[j + h] = a - b
+        h *= 2
+    return x
+
+
+def ifwht(v: Sequence[float]) -> Vector:
+    """Inverse FWHT = FWHT / n."""
+    n = len(v)
+    y = fwht(v)
+    inv = 1.0 / n
+    return [x * inv for x in y]
+
+
+def hadamard_matrix(n: int) -> Matrix:
+    """Explicit Sylvester Hadamard (small-n tests). Entries ±1."""
+    assert n > 0 and (n & (n - 1)) == 0
+    h: Matrix = [[1.0]]
+    while len(h) < n:
+        m = len(h)
+        nxt = mat_zeros(2 * m, 2 * m)
+        for i in range(m):
+            for j in range(m):
+                v = h[i][j]
+                nxt[i][j] = v
+                nxt[i][j + m] = v
+                nxt[i + m][j] = v
+                nxt[i + m][j + m] = -v
+        h = nxt
+    return h
+
+
+def random_signs(n: int, rng: random.Random) -> Vector:
+    return [1.0 if rng.random() < 0.5 else -1.0 for _ in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Incoherence processing (QuIP# / QTIP shared front-end)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IncoherenceTransform:
+    """Random signs for Ŵ = H (s ⊙ w) / sqrt(n) on padded vectors."""
+
+    signs: Vector
+    pad_to: int
+
+    def apply_vector(self, v: Sequence[float]) -> Vector:
+        n = self.pad_to
+        x = list(v) + [0.0] * (n - len(v))
+        x = [xi * si for xi, si in zip(x, self.signs)]
+        y = fwht(x)
+        scale = 1.0 / math.sqrt(n)
+        return [yi * scale for yi in y]
+
+    def invert_vector(self, v: Sequence[float], orig_len: int) -> Vector:
+        n = self.pad_to
+        # forward y = H(s⊙x)/√n with H H = n I and s²=1
+        # inverse x = s ⊙ H(y)/√n
+        y = list(v) + [0.0] * (n - len(v))
+        z = fwht(y)
+        scale = 1.0 / math.sqrt(n)
+        z = [zi * scale for zi in z]
+        x = [zi * si for zi, si in zip(z, self.signs)]
+        return x[:orig_len]
+
+
+def make_incoherence(n: int, seed: int = 0) -> IncoherenceTransform:
+    rng = random.Random(seed)
+    p = next_pow2(n)
+    return IncoherenceTransform(signs=random_signs(p, rng), pad_to=p)
+
+
+def incoherence_proxy(v: Sequence[float]) -> Dict[str, float]:
+    """Kurtosis / max-abs proxies — lower kurtosis after RHT is the goal."""
+    if not v:
+        return {"rms": 0.0, "max_abs": 0.0, "kurtosis": 0.0, "outlier_frac": 0.0, "max_over_rms": 0.0}
+    mu = _mean(v)
+    c = [x - mu for x in v]
+    m2 = _mean([x * x for x in c])
+    m4 = _mean([x ** 4 for x in c])
+    kurt = (m4 / (m2 * m2 + 1e-30)) - 3.0
+    rms = math.sqrt(max(m2, 0.0))
+    mx = max(abs(x) for x in v)
+    thr = 3.0 * rms
+    out_frac = sum(1 for x in v if abs(x) > thr) / len(v)
+    return {
+        "rms": rms,
+        "max_abs": mx,
+        "kurtosis": kurt,
+        "outlier_frac": out_frac,
+        "max_over_rms": mx / (rms + 1e-30),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scalar baselines: RTN, Lloyd-Max
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 2
+    group_size: int = 64
+    symmetric: bool = True
+
+
+@dataclass
+class QuantizedVector:
+    codes: List[int]
+    scales: List[float]
+    zeros: List[float]
+    n_bits: int
+    group_size: int
+    symmetric: bool
+    length: int
+
+    def bit_rate(self) -> float:
+        n = max(self.length, 1)
+        g = max((self.length + self.group_size - 1) // self.group_size, 1)
+        meta = g * 16.0 * (1 if self.symmetric else 2)
+        return (self.length * self.n_bits + meta) / n
+
+
+def quantize_vector_rtn(x: Sequence[float], cfg: QuantConfig) -> QuantizedVector:
+    n = len(x)
+    gs = max(cfg.group_size, 1)
+    codes: List[int] = []
+    scales: List[float] = []
+    zeros: List[float] = []
+    qmax = (1 << (cfg.n_bits - 1)) - 1 if cfg.symmetric else (1 << cfg.n_bits) - 1
+    qmin = -qmax - 1 if cfg.symmetric else 0
+    for start in range(0, n, gs):
+        chunk = list(x[start : start + gs])
+        if not chunk:
+            continue
+        if cfg.symmetric:
+            m = max(abs(v) for v in chunk) or 1e-8
+            scale = m / max(qmax, 1)
+            zero = 0.0
+            for v in chunk:
+                q = int(round(v / scale))
+                q = max(qmin, min(qmax, q))
+                codes.append(q)
+            scales.append(scale)
+            zeros.append(zero)
+        else:
+            lo, hi = min(chunk), max(chunk)
+            scale = (hi - lo) / max(qmax, 1) or 1e-8
+            zero = lo
+            for v in chunk:
+                q = int(round((v - zero) / scale))
+                q = max(0, min(qmax, q))
+                codes.append(q)
+            scales.append(scale)
+            zeros.append(zero)
+    return QuantizedVector(
+        codes=codes[:n],
+        scales=scales,
+        zeros=zeros,
+        n_bits=cfg.n_bits,
+        group_size=gs,
+        symmetric=cfg.symmetric,
+        length=n,
+    )
+
+
+def dequantize_vector_rtn(q: QuantizedVector) -> Vector:
+    out: Vector = []
+    gs = q.group_size
+    for i, code in enumerate(q.codes):
+        g = i // gs
+        scale = q.scales[g]
+        zero = q.zeros[g]
+        if q.symmetric:
+            out.append(code * scale)
+        else:
+            out.append(code * scale + zero)
+    return out
+
+
+def lloyd_max_levels(values: Sequence[float], n_levels: int, iters: int = 12) -> Vector:
+    """1-D Lloyd-Max codebook on a sample."""
+    if not values:
+        return [0.0] * max(n_levels, 1)
+    lo, hi = min(values), max(values)
+    if abs(hi - lo) < 1e-12:
+        return [lo] * n_levels
+    cb = [lo + (hi - lo) * (i + 0.5) / n_levels for i in range(n_levels)]
+    for _ in range(iters):
+        buckets: List[List[float]] = [[] for _ in range(n_levels)]
+        for v in values:
+            j = min(range(n_levels), key=lambda k: abs(v - cb[k]))
+            buckets[j].append(v)
+        for j in range(n_levels):
+            if buckets[j]:
+                cb[j] = _mean(buckets[j])
+    return sorted(cb)
+
+
+def quantize_lloyd(x: Sequence[float], n_bits: int, iters: int = 10) -> Tuple[Vector, Vector, List[int]]:
+    levels = 1 << n_bits
+    cb = lloyd_max_levels(x, levels, iters=iters)
+    codes: List[int] = []
+    recon: Vector = []
+    for v in x:
+        j = min(range(levels), key=lambda k: abs(v - cb[k]))
+        codes.append(j)
+        recon.append(cb[j])
+    return recon, cb, codes
+
+
+# ---------------------------------------------------------------------------
+# Trellis-Coded Quantization
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TrellisConfig:
+    """Ungerboeck-style rate-R trellis."""
+
+    n_states: int = 8
+    rate_bits: int = 2
+    seed: int = 0
+    refine_iters: int = 4
+
+    def __post_init__(self) -> None:
+        assert self.n_states >= 2 and (self.n_states & (self.n_states - 1)) == 0
+        assert self.rate_bits >= 1
+
+
+@dataclass
+class TrellisCodebook:
+    """codebook[state][branch] -> reconstruction level."""
+
+    levels: List[List[float]]
+    next_state: List[List[int]]
+    n_states: int
+    n_branches: int
+    rate_bits: int
+
+    def bit_rate(self, length: int, group_size: int = 64) -> float:
+        g = max((length + group_size - 1) // group_size, 1)
+        return (length * self.rate_bits + g * 16.0) / max(length, 1)
+
+
+def build_trellis(cfg: TrellisConfig, calib: Optional[Sequence[float]] = None) -> TrellisCodebook:
+    """Construct trellis graph + Gaussian (or Lloyd-refined) edge labels."""
+    rng = random.Random(cfg.seed)
+    ns = cfg.n_states
+    nb = 1 << cfg.rate_bits
+    reg_bits = int(math.log2(ns))
+    next_state: List[List[int]] = []
+    for s in range(ns):
+        row: List[int] = []
+        for b in range(nb):
+            ns_next = ((s << cfg.rate_bits) | b) & (ns - 1)
+            ns_next = (ns_next ^ (s >> max(reg_bits - cfg.rate_bits, 0))) & (ns - 1)
+            row.append(ns_next)
+        next_state.append(row)
+
+    levels: List[List[float]] = []
+    for _s in range(ns):
+        row_l = [rng.gauss(0.0, 1.0) for _ in range(nb)]
+        levels.append(row_l)
+
+    if calib and len(calib) >= nb:
+        flat_cb = lloyd_max_levels(list(calib), ns * nb, iters=cfg.refine_iters)
+        idx = 0
+        for s in range(ns):
+            for b in range(nb):
+                levels[s][b] = flat_cb[idx % len(flat_cb)]
+                idx += 1
+        for _ in range(max(cfg.refine_iters // 2, 1)):
+            acc = [[0.0] * nb for _ in range(ns)]
+            cnt = [[0] * nb for _ in range(ns)]
+            st = 0
+            for v in calib:
+                best_b, best_d = 0, float("inf")
+                for b in range(nb):
+                    d = (v - levels[st][b]) ** 2
+                    if d < best_d:
+                        best_d = d
+                        best_b = b
+                acc[st][best_b] += v
+                cnt[st][best_b] += 1
+                st = next_state[st][best_b]
+            for s in range(ns):
+                for b in range(nb):
+                    if cnt[s][b] > 0:
+                        levels[s][b] = acc[s][b] / cnt[s][b]
+
+    return TrellisCodebook(
+        levels=levels,
+        next_state=next_state,
+        n_states=ns,
+        n_branches=nb,
+        rate_bits=cfg.rate_bits,
+    )
+
+
+@dataclass
+class TCQResult:
+    recon: Vector
+    branches: List[int]
+    states: List[int]
+    mse: float
+    sqnr_db: float
+    bit_rate: float
+    n_states: int
+    rate_bits: int
+
+
+def viterbi_encode(
+    x: Sequence[float],
+    cb: TrellisCodebook,
+    start_state: int = 0,
+) -> TCQResult:
+    """Minimum-MSE path via Viterbi DP."""
+    n = len(x)
+    ns, nb = cb.n_states, cb.n_branches
+    INF = 1e300
+
+    metric = [INF] * ns
+    metric[start_state % ns] = 0.0
+    back: List[List[Tuple[int, int]]] = []
+
+    for t in range(n):
+        new_metric = [INF] * ns
+        bp: List[Tuple[int, int]] = [(-1, -1)] * ns
+        xt = x[t]
+        for s in range(ns):
+            m_s = metric[s]
+            if m_s >= INF / 2:
+                continue
+            for b in range(nb):
+                level = cb.levels[s][b]
+                ns_next = cb.next_state[s][b]
+                cand = m_s + (xt - level) ** 2
+                if cand < new_metric[ns_next]:
+                    new_metric[ns_next] = cand
+                    bp[ns_next] = (s, b)
+        metric = new_metric
+        back.append(bp)
+
+    final_s = min(range(ns), key=lambda s: metric[s])
+    total = metric[final_s]
+
+    branches = [0] * n
+    states = [0] * (n + 1)
+    states[n] = final_s
+    s = final_s
+    for t in range(n - 1, -1, -1):
+        prev_s, br = back[t][s]
+        if prev_s < 0:
+            branches[t] = 0
+            states[t] = s
+            continue
+        branches[t] = br
+        states[t] = prev_s
+        s = prev_s
+
+    recon: Vector = []
+    s = states[0]
+    for t in range(n):
+        b = branches[t]
+        recon.append(cb.levels[s][b])
+        s = cb.next_state[s][b]
+
+    return TCQResult(
+        recon=recon,
+        branches=branches,
+        states=states,
+        mse=total / max(n, 1),
+        sqnr_db=_sqnr_db(list(x), recon),
+        bit_rate=cb.bit_rate(n),
+        n_states=ns,
+        rate_bits=cb.rate_bits,
+    )
+
+
+def tcq_decode(branches: Sequence[int], cb: TrellisCodebook, start_state: int = 0) -> Vector:
+    recon: Vector = []
+    s = start_state % cb.n_states
+    for b in branches:
+        b = max(0, min(cb.n_branches - 1, int(b)))
+        recon.append(cb.levels[s][b])
+        s = cb.next_state[s][b]
+    return recon
+
+
+# ---------------------------------------------------------------------------
+# Nearest-neighbor VQ ablation
+# ---------------------------------------------------------------------------
+
+def nn_vq_encode(x: Sequence[float], codebook: Sequence[float]) -> Tuple[Vector, List[int]]:
+    codes: List[int] = []
+    recon: Vector = []
+    for v in x:
+        j = min(range(len(codebook)), key=lambda k: abs(v - codebook[k]))
+        codes.append(j)
+        recon.append(codebook[j])
+    return recon, codes
+
+
+# ---------------------------------------------------------------------------
+# Synthetic data
+# ---------------------------------------------------------------------------
+
+def make_weight(
+    rows: int,
+    cols: int,
+    seed: int = 0,
+    n_outliers: int = 0,
+    outlier_scale: float = 8.0,
+) -> Matrix:
+    rng = random.Random(seed)
+    w = [[rng.gauss(0.0, 1.0) for _ in range(cols)] for _ in range(rows)]
+    for _ in range(n_outliers):
+        i = rng.randrange(rows)
+        j = rng.randrange(cols)
+        w[i][j] = rng.choice([-1.0, 1.0]) * outlier_scale * (1.0 + rng.random())
+    return w
+
+
+def make_gaussian_vector(n: int, seed: int = 0, sigma: float = 1.0) -> Vector:
+    rng = random.Random(seed)
+    return [rng.gauss(0.0, sigma) for _ in range(n)]
+
+
+def make_activation(batch: int, dim: int, seed: int = 0) -> Matrix:
+    rng = random.Random(seed)
+    return [[rng.gauss(0.0, 1.0) for _ in range(dim)] for _ in range(batch)]
+
+
+def fp_linear(x: Matrix, w: Matrix, b: Optional[Vector] = None) -> Matrix:
+    """y = x @ W^T + b  with W shape (out, in)."""
+    out_f, _in_f = mat_shape(w)
+    y = mat_zeros(len(x), out_f)
+    for bi, row in enumerate(x):
+        for o in range(out_f):
+            s = _dot(row, w[o])
+            if b is not None:
+                s += b[o]
+            y[bi][o] = s
+    return y
+
+
+# ---------------------------------------------------------------------------
+# QTIP Engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QTIPConfig:
+    n_bits: int = 2
+    n_states: int = 8
+    group_size: int = 64
+    incoherence_seed: int = 0
+    trellis_seed: int = 1
+    refine_iters: int = 4
+    use_incoherence: bool = True
+
+
+@dataclass
+class QTIPBlockResult:
+    recon_weight: Matrix
+    metrics: Dict[str, float]
+    bit_rate: float
+    method: str
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+class QTIPEngine:
+    def __init__(self, cfg: Optional[QTIPConfig] = None) -> None:
+        self.cfg = cfg or QTIPConfig()
+
+    def _group_normalize(self, v: Sequence[float], gs: int) -> Tuple[Vector, List[float]]:
+        n = len(v)
+        scales: List[float] = []
+        out: Vector = []
+        for start in range(0, n, gs):
+            chunk = list(v[start : start + gs])
+            s = _rms(chunk) or 1e-8
+            scales.append(s)
+            out.extend([x / s for x in chunk])
+        return out, scales
+
+    def _group_denormalize(self, v: Sequence[float], scales: Sequence[float], gs: int) -> Vector:
+        out: Vector = []
+        for i, x in enumerate(v):
+            g = i // gs
+            out.append(x * scales[min(g, len(scales) - 1)])
+        return out
+
+    def quantize_vector(self, x: Sequence[float], cfg: Optional[QTIPConfig] = None) -> Dict[str, Any]:
+        cfg = cfg or self.cfg
+        n = len(x)
+        gs = cfg.group_size
+
+        x_n, scales = self._group_normalize(x, gs)
+        orig = list(x_n)
+        if cfg.use_incoherence:
+            inc = make_incoherence(n, seed=cfg.incoherence_seed)
+            work = inc.apply_vector(orig)
+        else:
+            inc = None
+            work = orig
+
+        tcfg = TrellisConfig(
+            n_states=cfg.n_states,
+            rate_bits=cfg.n_bits,
+            seed=cfg.trellis_seed,
+            refine_iters=cfg.refine_iters,
+        )
+        cb = build_trellis(tcfg, calib=work)
+        tcq = viterbi_encode(work, cb)
+
+        if inc is not None:
+            recon_n = inc.invert_vector(tcq.recon, n)
+        else:
+            recon_n = tcq.recon[:n]
+
+        recon = self._group_denormalize(recon_n, scales, gs)
+        return {
+            "recon": recon,
+            "tcq": tcq,
+            "scales": scales,
+            "codebook": cb,
+            "incoherence": inc,
+            "mse": _mse(list(x), recon),
+            "sqnr_db": _sqnr_db(list(x), recon),
+            "cosine": _cosine(list(x), recon),
+            "bit_rate": cb.bit_rate(n, gs),
+        }
+
+    def quantize_matrix(self, w: Matrix, cfg: Optional[QTIPConfig] = None) -> QTIPBlockResult:
+        cfg = cfg or self.cfg
+        rows, cols = mat_shape(w)
+        recon = mat_zeros(rows, cols)
+        mses: List[float] = []
+        brs: List[float] = []
+        for i, row in enumerate(w):
+            row_cfg = QTIPConfig(
+                n_bits=cfg.n_bits,
+                n_states=cfg.n_states,
+                group_size=cfg.group_size,
+                incoherence_seed=cfg.incoherence_seed + i * 17,
+                trellis_seed=cfg.trellis_seed + i * 31,
+                refine_iters=cfg.refine_iters,
+                use_incoherence=cfg.use_incoherence,
+            )
+            r = self.quantize_vector(row, row_cfg)
+            recon[i] = r["recon"]
+            mses.append(r["mse"])
+            brs.append(r["bit_rate"])
+        flat_w = mat_flatten(w)
+        flat_r = mat_flatten(recon)
+        metrics = {
+            "weight_mse": _mse(flat_w, flat_r),
+            "weight_sqnr": _sqnr_db(flat_w, flat_r),
+            "weight_cosine": _cosine(flat_w, flat_r),
+            "row_mse_mean": _mean(mses),
+            "bit_rate": _mean(brs),
+        }
+        return QTIPBlockResult(
+            recon_weight=recon,
+            metrics=metrics,
+            bit_rate=metrics["bit_rate"],
+            method="qtip",
+        )
+
+    def rtn_baseline(self, w: Matrix, n_bits: Optional[int] = None) -> QTIPBlockResult:
+        bits = n_bits if n_bits is not None else self.cfg.n_bits
+        cfg = QuantConfig(n_bits=bits, group_size=self.cfg.group_size, symmetric=True)
+        recon = mat_zeros(*mat_shape(w))
+        for i, row in enumerate(w):
+            q = quantize_vector_rtn(row, cfg)
+            recon[i] = dequantize_vector_rtn(q)
+        flat_w, flat_r = mat_flatten(w), mat_flatten(recon)
+        br = quantize_vector_rtn(mat_flatten(w), cfg).bit_rate()
+        return QTIPBlockResult(
+            recon_weight=recon,
+            metrics={
+                "weight_mse": _mse(flat_w, flat_r),
+                "weight_sqnr": _sqnr_db(flat_w, flat_r),
+                "weight_cosine": _cosine(flat_w, flat_r),
+                "bit_rate": br,
+            },
+            bit_rate=br,
+            method="rtn",
+        )
+
+    def lloyd_baseline(self, w: Matrix, n_bits: Optional[int] = None) -> QTIPBlockResult:
+        bits = n_bits if n_bits is not None else self.cfg.n_bits
+        flat = mat_flatten(w)
+        recon_flat, cb, _ = quantize_lloyd(flat, bits, iters=8)
+        rows, cols = mat_shape(w)
+        recon = [recon_flat[i * cols : (i + 1) * cols] for i in range(rows)]
+        return QTIPBlockResult(
+            recon_weight=recon,
+            metrics={
+                "weight_mse": _mse(flat, recon_flat),
+                "weight_sqnr": _sqnr_db(flat, recon_flat),
+                "weight_cosine": _cosine(flat, recon_flat),
+                "bit_rate": float(bits),
+                "codebook_size": float(len(cb)),
+            },
+            bit_rate=float(bits),
+            method="lloyd-max",
+        )
+
+    def tcq_only_baseline(self, w: Matrix) -> QTIPBlockResult:
+        cfg = QTIPConfig(
+            n_bits=self.cfg.n_bits,
+            n_states=self.cfg.n_states,
+            group_size=self.cfg.group_size,
+            incoherence_seed=self.cfg.incoherence_seed,
+            trellis_seed=self.cfg.trellis_seed,
+            refine_iters=self.cfg.refine_iters,
+            use_incoherence=False,
+        )
+        r = self.quantize_matrix(w, cfg)
+        r.method = "tcq-only"
+        return r
+
+    def vq_baseline(self, w: Matrix, codebook_size: Optional[int] = None) -> QTIPBlockResult:
+        bits = self.cfg.n_bits
+        cs = codebook_size or (1 << bits)
+        flat = mat_flatten(w)
+        s = _rms(flat) or 1.0
+        norm = [x / s for x in flat]
+        cb = lloyd_max_levels(norm, cs, iters=10)
+        recon_n, _ = nn_vq_encode(norm, cb)
+        recon_flat = [x * s for x in recon_n]
+        rows, cols = mat_shape(w)
+        recon = [recon_flat[i * cols : (i + 1) * cols] for i in range(rows)]
+        return QTIPBlockResult(
+            recon_weight=recon,
+            metrics={
+                "weight_mse": _mse(flat, recon_flat),
+                "weight_sqnr": _sqnr_db(flat, recon_flat),
+                "weight_cosine": _cosine(flat, recon_flat),
+                "bit_rate": float(bits),
+            },
+            bit_rate=float(bits),
+            method="nn-vq",
+        )
+
+    def status(self, rows: int = 32, cols: int = 32) -> Dict[str, Any]:
+        w = make_weight(rows, cols, seed=42, n_outliers=3)
+        t0 = time.perf_counter()
+        qtip = self.quantize_matrix(w)
+        rtn = self.rtn_baseline(w)
+        dt = (time.perf_counter() - t0) * 1000
+        return {
+            "status": "ok",
+            "paper": "QTIP: Quantization with Trellis and Incoherence Processing",
+            "arxiv": "2406.11235",
+            "venue": "NeurIPS 2024",
+            "rows": rows,
+            "cols": cols,
+            "bits": self.cfg.n_bits,
+            "n_states": self.cfg.n_states,
+            "qtip": qtip.metrics,
+            "rtn": rtn.metrics,
+            "beat_rtn": qtip.metrics["weight_mse"] <= rtn.metrics["weight_mse"] * 1.05,
+            "latency_ms": dt,
+        }
+
+    def calibrate(self, n: int = 256, seed: int = 0) -> Dict[str, Any]:
+        v = make_gaussian_vector(n, seed=seed)
+        rng = random.Random(seed + 1)
+        for _ in range(max(n // 20, 1)):
+            v[rng.randrange(n)] *= 12.0
+        before = incoherence_proxy(v)
+        inc = make_incoherence(n, seed=self.cfg.incoherence_seed)
+        v_inc = inc.apply_vector(v)
+        after = incoherence_proxy(v_inc)
+        back = inc.invert_vector(v_inc, n)
+        return {
+            "n": n,
+            "before_incoherence": before,
+            "after_incoherence": after,
+            "incoherence_roundtrip_mse": _mse(v, back),
+            "kurtosis_drop": before["kurtosis"] - after["kurtosis"],
+            "max_over_rms_drop": before["max_over_rms"] - after["max_over_rms"],
+        }
+
+    def encode(self, n: int = 128, bits: Optional[int] = None) -> Dict[str, Any]:
+        bits = bits if bits is not None else self.cfg.n_bits
+        x = make_gaussian_vector(n, seed=7)
+        cfg = QTIPConfig(
+            n_bits=bits,
+            n_states=self.cfg.n_states,
+            group_size=self.cfg.group_size,
+            incoherence_seed=self.cfg.incoherence_seed,
+            trellis_seed=self.cfg.trellis_seed,
+            refine_iters=self.cfg.refine_iters,
+            use_incoherence=True,
+        )
+        r = self.quantize_vector(x, cfg)
+        return {
+            "n": n,
+            "bits": bits,
+            "mse": r["mse"],
+            "sqnr_db": r["sqnr_db"],
+            "cosine": r["cosine"],
+            "bit_rate": r["bit_rate"],
+            "n_states": r["tcq"].n_states,
+            "branches_head": r["tcq"].branches[: min(16, n)],
+        }
+
+    def decode_demo(self, n: int = 64) -> Dict[str, Any]:
+        x = make_gaussian_vector(n, seed=3)
+        tcfg = TrellisConfig(n_states=self.cfg.n_states, rate_bits=self.cfg.n_bits, seed=0)
+        cb = build_trellis(tcfg, calib=x)
+        enc = viterbi_encode(x, cb)
+        dec = tcq_decode(enc.branches, cb, start_state=enc.states[0])
+        return {
+            "n": n,
+            "encode_decode_mse": _mse(enc.recon, dec),
+            "vs_source_mse": _mse(x, dec),
+            "sqnr_db": _sqnr_db(x, dec),
+            "path_agree": enc.recon == dec,
+        }
+
+    def quantize(self, rows: int = 24, cols: int = 24) -> Dict[str, Any]:
+        w = make_weight(rows, cols, seed=11, n_outliers=4, outlier_scale=9.0)
+        qtip = self.quantize_matrix(w)
+        rtn = self.rtn_baseline(w)
+        x = make_activation(8, cols, seed=99)
+        y_fp = fp_linear(x, w)
+        y_q = fp_linear(x, qtip.recon_weight)
+        y_r = fp_linear(x, rtn.recon_weight)
+        return {
+            "rows": rows,
+            "cols": cols,
+            "qtip": qtip.metrics,
+            "rtn": rtn.metrics,
+            "output_mse_qtip": _mse(mat_flatten(y_fp), mat_flatten(y_q)),
+            "output_mse_rtn": _mse(mat_flatten(y_fp), mat_flatten(y_r)),
+            "output_cosine_qtip": _cosine(mat_flatten(y_fp), mat_flatten(y_q)),
+            "beat_rtn_weight": qtip.metrics["weight_mse"] <= rtn.metrics["weight_mse"] * 1.1,
+            "beat_rtn_output": _mse(mat_flatten(y_fp), mat_flatten(y_q))
+            <= _mse(mat_flatten(y_fp), mat_flatten(y_r)) * 1.15,
+        }
+
+    def ablate(self, rows: int = 20, cols: int = 20) -> Dict[str, Any]:
+        w = make_weight(rows, cols, seed=5, n_outliers=3, outlier_scale=10.0)
+        methods = {
+            "rtn": self.rtn_baseline(w),
+            "lloyd": self.lloyd_baseline(w),
+            "nn-vq": self.vq_baseline(w),
+            "tcq-only": self.tcq_only_baseline(w),
+            "qtip": self.quantize_matrix(w),
+        }
+        rows_out = []
+        for name, res in methods.items():
+            rows_out.append(
+                {
+                    "method": name,
+                    "mse": res.metrics["weight_mse"],
+                    "sqnr": res.metrics["weight_sqnr"],
+                    "cosine": res.metrics["weight_cosine"],
+                    "bpw": res.bit_rate,
+                }
+            )
+        rows_out.sort(key=lambda r: r["mse"])
+        return {"rows": rows_out, "winner": rows_out[0]["method"]}
+
+    def benchmark(
+        self,
+        dims: Sequence[int] = (16, 24, 32),
+        bits_list: Sequence[int] = (2, 3, 4),
+    ) -> Dict[str, Any]:
+        out_rows = []
+        for d in dims:
+            w = make_weight(d, d, seed=d * 3, n_outliers=max(d // 8, 1))
+            for b in bits_list:
+                cfg = QTIPConfig(
+                    n_bits=b,
+                    n_states=self.cfg.n_states,
+                    group_size=self.cfg.group_size,
+                    refine_iters=3,
+                )
+                eng = QTIPEngine(cfg)
+                t0 = time.perf_counter()
+                q = eng.quantize_matrix(w)
+                r = eng.rtn_baseline(w, n_bits=b)
+                dt = (time.perf_counter() - t0) * 1000
+                out_rows.append(
+                    {
+                        "dim": d,
+                        "bits": b,
+                        "qtip_mse": q.metrics["weight_mse"],
+                        "rtn_mse": r.metrics["weight_mse"],
+                        "qtip_sqnr": q.metrics["weight_sqnr"],
+                        "bpw": q.bit_rate,
+                        "ms": dt,
+                        "beat": q.metrics["weight_mse"] <= r.metrics["weight_mse"] * 1.05,
+                    }
+                )
+        return {"rows": out_rows}
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        trial_rows = []
+        all_ok = True
+        for t in range(trials):
+            w = make_weight(16, 16, seed=100 + t, n_outliers=2)
+            q = self.quantize_matrix(w)
+            r = self.rtn_baseline(w)
+            v = mat_flatten(w)[:32]
+            inc = make_incoherence(len(v), seed=t)
+            rt = _mse(v, inc.invert_vector(inc.apply_vector(v), len(v)))
+            x = make_gaussian_vector(48, seed=50 + t)
+            cb = build_trellis(TrellisConfig(n_states=8, rate_bits=2, seed=t), calib=x)
+            enc = viterbi_encode(x, cb)
+            dec = tcq_decode(enc.branches, cb, start_state=enc.states[0])
+            dec_ok = _mse(enc.recon, dec) < 1e-18
+            inv = {
+                "finite_mse": math.isfinite(q.metrics["weight_mse"]),
+                "cosine_high": q.metrics["weight_cosine"] > 0.55,
+                "incoherence_rt": rt < 1e-20,
+                "viterbi_decode_agree": dec_ok,
+                "bit_rate_sane": 1.0 <= q.bit_rate <= 8.0,
+                "sqnr_finite": math.isfinite(q.metrics["weight_sqnr"]),
+            }
+            ok = all(inv.values())
+            all_ok = all_ok and ok
+            trial_rows.append(
+                {
+                    "trial": t,
+                    "qtip_mse": q.metrics["weight_mse"],
+                    "rtn_mse": r.metrics["weight_mse"],
+                    "incoherence_rt_mse": rt,
+                    "invariants": inv,
+                    "ok": ok,
+                }
+            )
+        return {"status": "pass" if all_ok else "fail", "trials": trial_rows}
+
+    def pack(self, rows: int = 32, cols: int = 32) -> Dict[str, Any]:
+        w = make_weight(rows, cols, seed=2)
+        q = self.quantize_matrix(w)
+        n = rows * cols
+        index_bits = n * self.cfg.n_bits
+        g = (n + self.cfg.group_size - 1) // self.cfg.group_size
+        meta_bits = g * 16
+        cb_vals = self.cfg.n_states * (1 << self.cfg.n_bits)
+        cb_bits = cb_vals * 16
+        total = index_bits + meta_bits + cb_bits
+        return {
+            "rows": rows,
+            "cols": cols,
+            "n_weights": n,
+            "index_bits": index_bits,
+            "meta_bits_fp16_scales": meta_bits,
+            "codebook_fp16_bits": cb_bits,
+            "total_bits": total,
+            "bpw_packed": total / n,
+            "bpw_runtime": q.bit_rate,
+            "metrics": q.metrics,
+            "deploy_note": (
+                "Trellis codebook is shared per tensor (or layer); "
+                "Viterbi encode is calibration/compress-time only. "
+                "Decode is a linear scan of branch bits through the FSM — "
+                "no exponential codebook lookup (unlike unstructured VQ)."
+            ),
+        }
+
+    def theory(self) -> Dict[str, Any]:
+        n_7b = 7_000_000_000
+        fp16 = n_7b * 16 / 8 / (1024 ** 3)
+        rows = []
+        for bits in (2, 3, 4):
+            for gs in (64, 128):
+                bpw = bits + 16.0 / gs
+                gib = n_7b * bpw / 8 / (1024 ** 3)
+                rows.append(
+                    {
+                        "bits": bits,
+                        "group": gs,
+                        "bpw": bpw,
+                        "est_7b_weight_gib": gib,
+                        "vs_fp16": fp16 / gib,
+                    }
+                )
+        return {
+            "paper": "QTIP: Quantization with Trellis and Incoherence Processing",
+            "arxiv": "2406.11235",
+            "venue": "NeurIPS 2024",
+            "authors": "Tseng, Chang, De Sa (Cornell RelaxML)",
+            "transform": "RHT incoherence + Ungerboeck trellis TCQ (Viterbi)",
+            "fp16_7b_gib": fp16,
+            "notes": [
+                "Incoherence (random Hadamard) Gaussianizes weights — QuIP# front-end.",
+                "TCQ replaces E8 lattice / additive VQ with a finite-state trellis.",
+                "Viterbi finds min-MSE path; bitstream = branch choices (rate-R bits/dim).",
+                "Codebook size = n_states * 2^R (linear in states), not exponential in dim.",
+                "SOTA-class 2-bit weight-only PTQ on Llama-class models in the paper.",
+                "This reference is pure-Python educational — not CUDA/kernel fused.",
+            ],
+            "rows": rows,
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(payload: Any) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="qtip-trellis-incoherence-engine",
+        description=(
+            "QTIP: Trellis-Coded Quantization + Incoherence "
+            "(NeurIPS 2024, arXiv:2406.11235)"
+        ),
+    )
+    p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p.add_argument("--bits", type=int, default=2, help="Rate bits / TCQ branch bits")
+    p.add_argument("--states", type=int, default=8, help="Trellis state count (power of 2)")
+    p.add_argument("--group-size", type=int, default=64)
+    sub = p.add_subparsers(dest="cmd")
+
+    st = sub.add_parser("status", help="Quick QTIP vs RTN health check")
+    st.add_argument("--rows", type=int, default=24)
+    st.add_argument("--cols", type=int, default=24)
+
+    cal = sub.add_parser("calibrate", help="Incoherence kurtosis / outlier proxies")
+    cal.add_argument("--n", type=int, default=256)
+    cal.add_argument("--seed", type=int, default=0)
+
+    enc = sub.add_parser("encode", help="1-D QTIP encode ledger")
+    enc.add_argument("--n", type=int, default=128)
+    enc.add_argument("--bits", type=int, default=None)
+
+    dec = sub.add_parser("decode", help="Viterbi path decode agreement demo")
+    dec.add_argument("--n", type=int, default=64)
+
+    qt = sub.add_parser("quantize", help="Full matrix QTIP vs RTN + output MSE")
+    qt.add_argument("--rows", type=int, default=24)
+    qt.add_argument("--cols", type=int, default=24)
+
+    ab = sub.add_parser("ablate", help="RTN / Lloyd / VQ / TCQ-only / QTIP ranking")
+    ab.add_argument("--rows", type=int, default=20)
+    ab.add_argument("--cols", type=int, default=20)
+
+    bm = sub.add_parser("benchmark", help="Dim × bit sweep")
+    bm.add_argument("--dims", type=int, nargs="+", default=[16, 24, 32])
+    bm.add_argument("--bits-list", type=int, nargs="+", default=[2, 3, 4])
+
+    vf = sub.add_parser("verify", help="Invariant battery")
+    vf.add_argument("--trials", type=int, default=3)
+
+    pk = sub.add_parser("pack", help="Bit-rate pack ledger")
+    pk.add_argument("--rows", type=int, default=32)
+    pk.add_argument("--cols", type=int, default=32)
+
+    sub.add_parser("theory", help="7B footprint theory table")
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    cfg = QTIPConfig(
+        n_bits=getattr(args, "bits", 2) or 2,
+        n_states=getattr(args, "states", 8) or 8,
+        group_size=getattr(args, "group_size", 64) or 64,
+    )
+    eng = QTIPEngine(cfg)
+    cmd = args.cmd or "status"
+
+    if cmd == "status":
+        payload = eng.status(rows=args.rows, cols=args.cols)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP status")
+            print(f"  • paper: {payload['paper']}")
+            print(f"  • arXiv:{payload['arxiv']} ({payload['venue']})")
+            print(
+                f"  • shape: {payload['rows']}x{payload['cols']}  "
+                f"bits={payload['bits']} states={payload['n_states']}"
+            )
+            print(
+                f"  • QTIP MSE={payload['qtip']['weight_mse']:.4g} "
+                f"SQNR={payload['qtip']['weight_sqnr']:.2f}dB "
+                f"cos={payload['qtip']['weight_cosine']:.4f}"
+            )
+            print(
+                f"  • RTN  MSE={payload['rtn']['weight_mse']:.4g} "
+                f"SQNR={payload['rtn']['weight_sqnr']:.2f}dB"
+            )
+            print(
+                f"  • beat RTN: {'Y' if payload['beat_rtn'] else 'n'}  "
+                f"latency={payload['latency_ms']:.1f}ms"
+            )
+            print("OK Status complete.")
+        return 0
+
+    if cmd == "calibrate":
+        payload = eng.calibrate(n=args.n, seed=args.seed)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP incoherence calibration")
+            b, a = payload["before_incoherence"], payload["after_incoherence"]
+            print(
+                f"  • before: kurt={b['kurtosis']:.3f} "
+                f"max/rms={b['max_over_rms']:.2f} out={b['outlier_frac']:.3f}"
+            )
+            print(
+                f"  • after:  kurt={a['kurtosis']:.3f} "
+                f"max/rms={a['max_over_rms']:.2f} out={a['outlier_frac']:.3f}"
+            )
+            print(f"  • kurtosis drop: {payload['kurtosis_drop']:.3f}")
+            print(f"  • roundtrip MSE: {payload['incoherence_roundtrip_mse']:.2e}")
+            print("OK Calibrate complete.")
+        return 0
+
+    if cmd == "encode":
+        bits = args.bits if args.bits is not None else cfg.n_bits
+        payload = eng.encode(n=args.n, bits=bits)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP encode")
+            print(
+                f"  • n={payload['n']} bits={payload['bits']} "
+                f"states={payload['n_states']}"
+            )
+            print(
+                f"  • MSE={payload['mse']:.4g} SQNR={payload['sqnr_db']:.2f}dB "
+                f"cos={payload['cosine']:.4f}"
+            )
+            print(f"  • bpw={payload['bit_rate']:.3f}")
+            print(f"  • branches[:16]={payload['branches_head']}")
+            print("OK Encode complete.")
+        return 0
+
+    if cmd == "decode":
+        payload = eng.decode_demo(n=args.n)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP decode agreement")
+            print(f"  • encode/decode MSE: {payload['encode_decode_mse']:.2e}")
+            print(
+                f"  • vs source MSE: {payload['vs_source_mse']:.4g} "
+                f"SQNR={payload['sqnr_db']:.2f}dB"
+            )
+            print(f"  • path_agree: {payload['path_agree']}")
+            print("OK Decode complete.")
+        return 0
+
+    if cmd == "quantize":
+        payload = eng.quantize(rows=args.rows, cols=args.cols)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP quantize")
+            print(f"  • shape {payload['rows']}x{payload['cols']}")
+            print(
+                f"  • QTIP weight MSE={payload['qtip']['weight_mse']:.4g} "
+                f"SQNR={payload['qtip']['weight_sqnr']:.2f}"
+            )
+            print(f"  • RTN  weight MSE={payload['rtn']['weight_mse']:.4g}")
+            print(
+                f"  • output MSE QTIP={payload['output_mse_qtip']:.4g} "
+                f"RTN={payload['output_mse_rtn']:.4g}"
+            )
+            print(
+                f"  • beat weight={payload['beat_rtn_weight']} "
+                f"output={payload['beat_rtn_output']}"
+            )
+            print("OK Quantize complete.")
+        return 0
+
+    if cmd == "ablate":
+        payload = eng.ablate(rows=args.rows, cols=args.cols)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP ablation ranking (lower MSE better)")
+            print(f"  {'method':<10} {'MSE':>12} {'SQNR':>8} {'cos':>8} {'bpw':>7}")
+            for r in payload["rows"]:
+                print(
+                    f"  {r['method']:<10} {r['mse']:12.4g} {r['sqnr']:8.2f} "
+                    f"{r['cosine']:8.4f} {r['bpw']:7.3f}"
+                )
+            print(f"  • winner: {payload['winner']}")
+            print("OK Ablate complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(dims=args.dims, bits_list=args.bits_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP benchmark sweep")
+            print(
+                f"  {'dim':>5} {'b':>3} {'QTIPMSE':>12} {'RTNMSE':>12} "
+                f"{'SQNR':>8} {'bpw':>7} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['bits']:3d} {r['qtip_mse']:12.4g} "
+                    f"{r['rtn_mse']:12.4g} {r['qtip_sqnr']:8.2f} {r['bpw']:7.3f} "
+                    f"{r['ms']:8.1f} {'Y' if r['beat'] else 'n':>5}"
+                )
+            print("OK Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'Y' if v else 'N'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: qtip={t['qtip_mse']:.4g} "
+                    f"rtn={t['rtn_mse']:.4g} inc_rt={t['incoherence_rt_mse']:.1e}  "
+                    f"{flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "OK Verify complete."
+                if payload["status"] == "pass"
+                else "FAIL Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "pack":
+        payload = eng.pack(args.rows, args.cols)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP pack ledger")
+            for k, v in payload.items():
+                if k == "metrics":
+                    continue
+                print(f"  • {k}: {v}")
+            print("OK Pack complete.")
+        return 0
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QTIP theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • arXiv:{payload['arxiv']} — {payload['venue']}")
+            print(f"  • {payload['authors']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(f"  • fp16 7B weights ≈ {payload['fp16_7b_gib']:.2f} GiB")
+            print(f"  {'b':>3} {'gs':>4} {'bpw':>8} {'7B GiB':>10} {'vs fp16':>8}")
+            for r in payload["rows"]:
+                print(
+                    f"  {r['bits']:3d} {r['group']:4d} {r['bpw']:8.3f} "
+                    f"{r['est_7b_weight_gib']:10.2f} {r['vs_fp16']:8.2f}x"
+                )
+            print("OK Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

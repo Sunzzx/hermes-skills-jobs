@@ -2031,5 +2031,25 @@
       "Calibration",
       "Inference"
     ]
+  },
+  {
+    "id": "qtip-trellis-incoherence-engine",
+    "title": "QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization with Viterbi min-MSE path encoding \u2014 SOTA-class 2\u20134 bpw reference (Tseng, Chang, De Sa, Cornell RelaxML).",
+    "cli": "qtip-trellis-incoherence-engine",
+    "evolved_at": "2026-11-13T00:15:00.964980+05:30",
+    "tags": [
+      "Frontier-AI",
+      "QTIP",
+      "Trellis",
+      "TCQ",
+      "Viterbi",
+      "Incoherence",
+      "Hadamard",
+      "WeightOnlyPTQ",
+      "Inference"
+    ]
   }
 ]

@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-117-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-119-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -10,16 +10,19 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
+- `qtip-trellis-incoherence-engine` — QTIP trellis-coded quantization + RHT incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)
+
 - `aqlm-additive-multi-codebook-engine` — AQLM multi-codebook additive VQ PTQ (NeurIPS 2024, arXiv:2401.06118)
 
 - **omniquant-lwc-let-engine** — OmniQuant LWC+LET omnidirectional PTQ (ICLR 2024, arXiv:2308.13137): learnable weight clipping + absorbable channel scales/shifts; CLI `omniquant-lwc-let-engine`.
 - `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
 - **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
-## 🚀 Live Capability Registry (117 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (119 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **QTIP Trellis + Incoherence PTQ (NeurIPS 2024, arXiv:2406.11235)** | `inference` | `qtip-trellis-incoherence-engine` | Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization (Viterbi min-MSE path); SOTA-class 2–4 bpw pure-Python reference (Cornell RelaxML). | `QTIP` `Trellis` `TCQ` `Viterbi` `Incoherence` |
 | **AQLM Additive Multi-Codebook LLM Quantization (NeurIPS 2024, arXiv:2401.06118)** | `inference` | `aqlm-additive-multi-codebook-engine` | Extreme weight-only PTQ via residual multi-codebook additive VQ (w≈Σ_m C_m[i_m]): residual K-means, beam encode, RTN/VQ ablations, K^M effective codebook, 7B footprint theory. | `AQLM` `AdditiveVQ` `MultiCodebook` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |

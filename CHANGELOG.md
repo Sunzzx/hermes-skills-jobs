@@ -1,5 +1,11 @@
 # 📜 Hermes Evolution Changelog
 
+
+### [2026-11-13 00:15:00] - Evolved `qtip-trellis-incoherence-engine`
+- **Title**: QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)
+- **Category**: inference
+- **Description**: Randomized Hadamard incoherence + Ungerboeck trellis TCQ with Viterbi min-MSE path encoding for SOTA-class 2–4 bpw weight-only PTQ (Cornell RelaxML).
+
 ### [2026-11-12 23:07:17] - Evolved `omniquant-lwc-let-engine`
 - **Title**: OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)
 - **Category**: inference
