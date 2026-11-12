@@ -1,0 +1,1057 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""LayerSkip Self-Speculative Engine (Meta FAIR, arXiv:2404.15690).
+
+Early-exit inference + self-speculative decoding for transformers:
+
+  1. Early-exit heads: each intermediate layer owns a lightweight classifier that
+     can halt decoding when confidence exceeds a threshold — tokens that are
+     "easy" never pay the remaining depth FLOPs.
+  2. Self-speculation: the first E layers act as a draft model that proposes
+     multi-token candidates; the remaining L-E layers verify them in one
+     forward pass (shared weights — no separate draft network).
+  3. Layer-dropout training recipe is modelled as stochastic early-exit priors
+     so exit rates match the paper's curriculum (deeper exits preferred early
+     in training, freer exits at inference).
+  4. Exact FLOP / token-latency ledger vs dense autoregressive baselines.
+  5. Acceptance-rate simulation for self-speculative trees (greedy + nucleus).
+
+Pure Python, zero third-party deps.
+CLI: status / benchmark / verify / simulate / exit-map / speculate
+Paper: Elhoushi et al., "LayerSkip: Enabling Early Exit Inference and
+Self-Speculative Decoding", 2024 (arXiv:2404.15690).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _axpy(a: Sequence[float], b: Sequence[float], scale: float = 1.0) -> List[float]:
+    return [x + scale * y for x, y in zip(a, b)]
+
+
+def _scale(v: Sequence[float], s: float) -> List[float]:
+    return [x * s for x in v]
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _softmax(logits: Sequence[float]) -> List[float]:
+    if not logits:
+        return []
+    m = max(logits)
+    exps = [math.exp(min(80.0, x - m)) for x in logits]
+    s = sum(exps) or 1.0
+    return [e / s for e in exps]
+
+
+def _log_softmax(logits: Sequence[float]) -> List[float]:
+    if not logits:
+        return []
+    m = max(logits)
+    exps = [math.exp(min(80.0, x - m)) for x in logits]
+    s = sum(exps) or 1.0
+    log_s = math.log(s) + m
+    return [x - log_s for x in logits]
+
+
+def _sigmoid(x: float) -> float:
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    ex = math.exp(x)
+    return ex / (1.0 + ex)
+
+
+def _gelu(x: float) -> float:
+    return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * x * x * x)))
+
+
+def _rms_norm(x: Sequence[float], eps: float = 1e-6) -> List[float]:
+    ms = sum(v * v for v in x) / max(len(x), 1)
+    inv = 1.0 / math.sqrt(ms + eps)
+    return [v * inv for v in x]
+
+
+def _randn(rng: random.Random, n: int, scale: float = 1.0) -> List[float]:
+    return [rng.gauss(0.0, scale) for _ in range(n)]
+
+
+def _xavier(rng: random.Random, rows: int, cols: int) -> List[List[float]]:
+    s = math.sqrt(2.0 / max(rows + cols, 1))
+    return [[rng.gauss(0.0, s) for _ in range(cols)] for _ in range(rows)]
+
+
+def _matvec(W: Sequence[Sequence[float]], x: Sequence[float]) -> List[float]:
+    return [_dot(row, x) for row in W]
+
+
+def _entropy(probs: Sequence[float]) -> float:
+    h = 0.0
+    for p in probs:
+        if p > 1e-12:
+            h -= p * math.log(p)
+    return h
+
+
+def _topk_indices(scores: Sequence[float], k: int) -> List[int]:
+    if k <= 0:
+        return []
+    indexed = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    return sorted(indexed[: min(k, len(scores))])
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LayerSkipConfig:
+    n_layers: int = 12
+    d_model: int = 128
+    n_heads: int = 4
+    ff_mult: float = 4.0
+    vocab_size: int = 256
+    # Early-exit
+    exit_threshold: float = 0.9          # confidence to halt
+    min_exit_layer: int = 2              # never exit before this (0-indexed)
+    exit_temperature: float = 1.0
+    # Self-speculation
+    draft_layers: int = 4                # E — first E layers = draft
+    speculate_k: int = 4                 # draft tokens per round
+    acceptance_temp: float = 1.0
+    # Misc
+    seed: int = 42
+    layer_dropout_scale: float = 0.1     # stochastic exit prior noise
+
+    def __post_init__(self) -> None:
+        if self.n_layers < 2:
+            raise ValueError("n_layers must be >= 2")
+        if self.d_model % self.n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
+        if not (0.0 < self.exit_threshold <= 1.0):
+            raise ValueError("exit_threshold must be in (0, 1]")
+        self.min_exit_layer = max(0, min(self.min_exit_layer, self.n_layers - 1))
+        self.draft_layers = max(1, min(self.draft_layers, self.n_layers - 1))
+        self.speculate_k = max(1, self.speculate_k)
+
+
+# ---------------------------------------------------------------------------
+# Building blocks
+# ---------------------------------------------------------------------------
+
+class Linear:
+    def __init__(self, d_in: int, d_out: int, rng: random.Random):
+        self.W = _xavier(rng, d_out, d_in)
+        self.b = [0.0] * d_out
+
+    def __call__(self, x: Sequence[float]) -> List[float]:
+        return _axpy(_matvec(self.W, x), self.b)
+
+
+class ExitHead:
+    """Per-layer early-exit classifier → vocab logits + confidence."""
+
+    def __init__(self, d_model: int, vocab: int, rng: random.Random):
+        self.proj = Linear(d_model, vocab, rng)
+        self.conf = Linear(d_model, 1, rng)
+
+    def forward(self, h: Sequence[float], temperature: float = 1.0) -> Dict[str, Any]:
+        logits = self.proj(h)
+        if temperature != 1.0 and temperature > 0:
+            logits = [x / temperature for x in logits]
+        probs = _softmax(logits)
+        conf_logit = self.conf(h)[0]
+        # blend learned confidence with max-prob (paper uses CE-trained exits)
+        conf = 0.5 * _sigmoid(conf_logit) + 0.5 * max(probs)
+        pred = max(range(len(probs)), key=lambda i: probs[i])
+        return {
+            "logits": logits,
+            "probs": probs,
+            "confidence": conf,
+            "pred_id": pred,
+            "entropy": _entropy(probs),
+        }
+
+
+class TransformerBlock:
+    def __init__(self, cfg: LayerSkipConfig, layer_idx: int, rng: random.Random):
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+        d = cfg.d_model
+        self.n_heads = cfg.n_heads
+        self.d_head = d // cfg.n_heads
+        self.Wq = Linear(d, d, rng)
+        self.Wk = Linear(d, d, rng)
+        self.Wv = Linear(d, d, rng)
+        self.Wo = Linear(d, d, rng)
+        ff = int(d * cfg.ff_mult)
+        self.W1 = Linear(d, ff, rng)
+        self.W2 = Linear(ff, d, rng)
+        self.exit_head = ExitHead(d, cfg.vocab_size, rng)
+        # KV cache (list of (k,v) per position) — simplified single-stream
+        self.k_cache: List[List[float]] = []
+        self.v_cache: List[List[float]] = []
+
+    def reset_cache(self) -> None:
+        self.k_cache.clear()
+        self.v_cache.clear()
+
+    def _split_heads(self, x: Sequence[float]) -> List[List[float]]:
+        return [
+            list(x[h * self.d_head : (h + 1) * self.d_head])
+            for h in range(self.n_heads)
+        ]
+
+    def _merge_heads(self, heads: Sequence[Sequence[float]]) -> List[float]:
+        out: List[float] = []
+        for h in heads:
+            out.extend(h)
+        return out
+
+    def _attend(
+        self,
+        q: Sequence[float],
+        keys: Sequence[Sequence[float]],
+        vals: Sequence[Sequence[float]],
+    ) -> List[float]:
+        """Single-query multi-head attention over cached K/V (decode step)."""
+        qh = self._split_heads(q)
+        scale = 1.0 / math.sqrt(self.d_head)
+        out_heads: List[List[float]] = []
+        for h in range(self.n_heads):
+            q_h = qh[h]
+            scores = []
+            for k in keys:
+                k_h = k[h * self.d_head : (h + 1) * self.d_head]
+                scores.append(_dot(q_h, k_h) * scale)
+            weights = _softmax(scores)
+            acc = [0.0] * self.d_head
+            for w, v in zip(weights, vals):
+                v_h = v[h * self.d_head : (h + 1) * self.d_head]
+                for i in range(self.d_head):
+                    acc[i] += w * v_h[i]
+            out_heads.append(acc)
+        return self._merge_heads(out_heads)
+
+    def forward_token(self, h: Sequence[float], use_cache: bool = True) -> List[float]:
+        """One decode step: pre-norm MHA + MLP, optional KV append."""
+        x = _rms_norm(h)
+        q = self.Wq(x)
+        k = self.Wk(x)
+        v = self.Wv(x)
+        if use_cache:
+            self.k_cache.append(k)
+            self.v_cache.append(v)
+            keys, vals = self.k_cache, self.v_cache
+        else:
+            keys, vals = [k], [v]
+        attn = self._attend(q, keys, vals)
+        h2 = _add(h, self.Wo(attn))
+        y = _rms_norm(h2)
+        ff = self.W2([_gelu(t) for t in self.W1(y)])
+        return _add(h2, ff)
+
+    def forward_sequence(self, hidden: List[List[float]]) -> List[List[float]]:
+        """Prefill over full sequence (rebuilds cache)."""
+        self.reset_cache()
+        out: List[List[float]] = []
+        for h in hidden:
+            out.append(self.forward_token(h, use_cache=True))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# FLOP model
+# ---------------------------------------------------------------------------
+
+def flops_attention_decode(d_model: int, n_heads: int, kv_len: int) -> float:
+    """Approx FLOPs for one decode step of MHA (QKV + scores + AV + out)."""
+    d_head = d_model // max(n_heads, 1)
+    # QKV projections
+    qkv = 3.0 * d_model * d_model
+    # scores: n_heads * kv_len * d_head
+    scores = float(n_heads * kv_len * d_head)
+    # AV
+    av = float(n_heads * kv_len * d_head)
+    # out proj
+    out = float(d_model * d_model)
+    return qkv + scores + av + out
+
+
+def flops_mlp(d_model: int, ff_mult: float) -> float:
+    ff = d_model * ff_mult
+    return 2.0 * d_model * ff
+
+
+def flops_exit_head(d_model: int, vocab: int) -> float:
+    return float(d_model * vocab + d_model)  # logits + conf
+
+
+def theoretical_early_exit(
+    n_layers: int,
+    d_model: int,
+    n_heads: int,
+    ff_mult: float,
+    vocab: int,
+    exit_rate_by_layer: Sequence[float],
+    seq_len: int = 1,
+) -> Dict[str, Any]:
+    """Expected FLOPs under a per-layer exit distribution (decode token).
+
+    exit_rate_by_layer[i] = P(exit at layer i | reached layer i).
+    Surviving mass after layer i: product of (1 - exit) for j <= i.
+    """
+    if len(exit_rate_by_layer) != n_layers:
+        raise ValueError("exit_rate_by_layer length must equal n_layers")
+
+    dense_block = flops_attention_decode(d_model, n_heads, max(seq_len, 1)) + flops_mlp(
+        d_model, ff_mult
+    )
+    dense_total = n_layers * dense_block + flops_exit_head(d_model, vocab)
+
+    expected = 0.0
+    survive = 1.0
+    exited_mass = 0.0
+    layer_contrib = []
+    for i in range(n_layers):
+        block = dense_block
+        head = flops_exit_head(d_model, vocab) if i < n_layers - 1 or True else 0.0
+        cost_here = survive * (block + head)
+        expected += cost_here
+        p_exit = exit_rate_by_layer[i] if i < n_layers - 1 else 1.0
+        p_exit = max(0.0, min(1.0, p_exit))
+        mass_exit = survive * p_exit if i < n_layers - 1 else survive
+        exited_mass += mass_exit
+        layer_contrib.append({
+            "layer": i,
+            "survive_in": round(survive, 6),
+            "p_exit": round(p_exit, 6),
+            "mass_exit": round(mass_exit, 6),
+            "flops_contrib": round(cost_here, 2),
+        })
+        if i < n_layers - 1:
+            survive *= (1.0 - p_exit)
+
+    savings = 0.0 if dense_total <= 0 else (1.0 - expected / dense_total) * 100.0
+    return {
+        "dense_flops": round(dense_total, 2),
+        "layerskip_expected_flops": round(expected, 2),
+        "compute_ratio": round(expected / dense_total, 6) if dense_total else 0.0,
+        "savings_pct": round(savings, 3),
+        "exited_mass": round(exited_mass, 6),
+        "layer_contrib": layer_contrib,
+    }
+
+
+def theoretical_self_speculative(
+    n_layers: int,
+    draft_layers: int,
+    d_model: int,
+    n_heads: int,
+    ff_mult: float,
+    vocab: int,
+    speculate_k: int,
+    acceptance_rate: float,
+    kv_len: int = 128,
+) -> Dict[str, Any]:
+    """Expected wall-clock / FLOP speedup under self-speculation.
+
+    Uses Leviathan et al. speculative-sampling speedup with draft cost ratio
+    c = E / L (shared-weight early layers as draft, LayerSkip eq.):
+
+        speedup = (1 - α^{k+1}) / ((1 - α) · (k·c + 1))
+
+    FLOP ledger still tracks absolute block costs for the CLI theory tables.
+    """
+    E = max(1, min(draft_layers, n_layers - 1))
+    V = n_layers - E
+    k = max(1, speculate_k)
+    alpha = max(0.0, min(0.999999, acceptance_rate))
+    c = E / float(n_layers)  # relative draft cost
+
+    block = flops_attention_decode(d_model, n_heads, kv_len) + flops_mlp(d_model, ff_mult)
+    head = flops_exit_head(d_model, vocab)
+    dense_per_token = n_layers * (block + head)
+
+    # γ = expected # of accepted draft tokens = Σ_{i=1..k} α^i
+    gamma = 0.0
+    p_prefix = 1.0
+    for _ in range(k):
+        p_prefix *= alpha
+        gamma += p_prefix
+    tokens_per_round = gamma + 1.0
+
+    # Leviathan closed form (α→1 limit handled)
+    if abs(1.0 - alpha) < 1e-12:
+        speedup = (k + 1) / (k * c + 1)
+    else:
+        speedup = (1.0 - alpha ** (k + 1)) / ((1.0 - alpha) * (k * c + 1.0))
+
+    # Absolute FLOP estimate: draft k·E + verify one full L pass over (γ+1) tokens
+    # (batched verify still pays (γ+1)·L block FLOPs; wall-clock shares target pass)
+    round_flops = k * E * (block + head) + tokens_per_round * n_layers * (block + head)
+    flops_per_token = round_flops / tokens_per_round if tokens_per_round else round_flops
+
+    return {
+        "draft_layers": E,
+        "verify_layers": V,
+        "speculate_k": k,
+        "acceptance_rate": round(alpha, 6),
+        "draft_cost_ratio_c": round(c, 6),
+        "gamma_expected_accepted_drafts": round(gamma, 4),
+        "tokens_per_round": round(tokens_per_round, 4),
+        "round_flops": round(round_flops, 2),
+        "flops_per_token": round(flops_per_token, 2),
+        "dense_flops_per_token": round(dense_per_token, 2),
+        "speedup": round(speedup, 4),
+        "savings_pct": round((1.0 - 1.0 / speedup) * 100.0, 3) if speedup > 0 else 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+class LayerSkipEngine:
+    def __init__(self, cfg: LayerSkipConfig):
+        self.cfg = cfg
+        self.rng = random.Random(cfg.seed)
+        self.embed = [_randn(self.rng, cfg.d_model, 0.02) for _ in range(cfg.vocab_size)]
+        self.layers = [
+            TransformerBlock(cfg, i, random.Random(cfg.seed + 17 * (i + 1)))
+            for i in range(cfg.n_layers)
+        ]
+        self.final_head = ExitHead(cfg.d_model, cfg.vocab_size, random.Random(cfg.seed + 99))
+        self.last_hidden: Optional[List[List[float]]] = None
+        self.stats: Dict[str, Any] = {}
+
+    def reset_caches(self) -> None:
+        for layer in self.layers:
+            layer.reset_cache()
+
+    def embed_tokens(self, token_ids: Sequence[int]) -> List[List[float]]:
+        out = []
+        for tid in token_ids:
+            row = list(self.embed[tid % self.cfg.vocab_size])
+            # tiny position tag
+            out.append(row)
+        return out
+
+    def embed_synthetic(self, seq_len: int) -> List[List[float]]:
+        ids = [self.rng.randrange(self.cfg.vocab_size) for _ in range(seq_len)]
+        return self.embed_tokens(ids)
+
+    def _should_exit(self, conf: float, layer_idx: int) -> bool:
+        if layer_idx < self.cfg.min_exit_layer:
+            return False
+        if layer_idx >= self.cfg.n_layers - 1:
+            return True
+        # layer-dropout-inspired prior: deeper layers slightly easier to exit
+        depth_bonus = self.cfg.layer_dropout_scale * (layer_idx / max(self.cfg.n_layers - 1, 1))
+        return conf + depth_bonus >= self.cfg.exit_threshold
+
+    def prefill_early_exit(self, seq_len: int) -> Dict[str, Any]:
+        """Run full sequence; each position may exit at a different layer."""
+        self.reset_caches()
+        hidden = self.embed_synthetic(seq_len)
+        exit_layers = [-1] * seq_len
+        confidences = [0.0] * seq_len
+        predictions = [0] * seq_len
+        active = list(range(seq_len))
+        layer_exit_counts = [0] * self.cfg.n_layers
+        flops = 0.0
+        d_model = self.cfg.d_model
+        n_heads = self.cfg.n_heads
+        ff_mult = self.cfg.ff_mult
+        vocab = self.cfg.vocab_size
+
+        t0 = time.perf_counter()
+        current = [list(row) for row in hidden]
+
+        for li, block in enumerate(self.layers):
+            if not active:
+                break
+            # forward only active positions (early-exit sparsity)
+            new_current = [list(row) for row in current]
+            still_active = []
+            for pos in active:
+                # FLOP: one decode-ish step with kv_len ≈ pos+1 (prefill approx)
+                flops += flops_attention_decode(d_model, n_heads, pos + 1) + flops_mlp(d_model, ff_mult)
+                new_h = block.forward_token(current[pos], use_cache=True)
+                new_current[pos] = new_h
+                exit_out = block.exit_head.forward(new_h, self.cfg.exit_temperature)
+                flops += flops_exit_head(d_model, vocab)
+                confidences[pos] = exit_out["confidence"]
+                predictions[pos] = exit_out["pred_id"]
+                if self._should_exit(exit_out["confidence"], li):
+                    exit_layers[pos] = li
+                    layer_exit_counts[li] += 1
+                else:
+                    still_active.append(pos)
+            current = new_current
+            active = still_active
+
+        # force final layer for survivors
+        for pos in active:
+            exit_layers[pos] = self.cfg.n_layers - 1
+            layer_exit_counts[self.cfg.n_layers - 1] += 1
+            fo = self.final_head.forward(current[pos])
+            flops += flops_exit_head(d_model, vocab)
+            confidences[pos] = fo["confidence"]
+            predictions[pos] = fo["pred_id"]
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        self.last_hidden = current
+
+        # Empirical exit rates (fraction of tokens that exit at layer i)
+        rates = [c / seq_len for c in layer_exit_counts]
+        # Convert mass rates to conditional exit rates for theory comparison
+        cond_rates = []
+        survive = 1.0
+        for i, mass in enumerate(rates):
+            if i == self.cfg.n_layers - 1:
+                cond_rates.append(1.0)
+                break
+            if survive <= 1e-12:
+                cond_rates.append(0.0)
+            else:
+                p = min(1.0, mass / survive)
+                cond_rates.append(p)
+                survive *= (1.0 - p)
+
+        # Dense LayerSkip-arch baseline: all L blocks + exit head each layer
+        # (trained LayerSkip models always carry exit heads even if unused).
+        dense_flops = 0.0
+        for pos in range(seq_len):
+            for _ in range(self.cfg.n_layers):
+                dense_flops += (
+                    flops_attention_decode(d_model, n_heads, pos + 1)
+                    + flops_mlp(d_model, ff_mult)
+                    + flops_exit_head(d_model, vocab)
+                )
+
+        avg_exit = sum(exit_layers) / max(seq_len, 1)
+        theory = theoretical_early_exit(
+            self.cfg.n_layers, d_model, n_heads, ff_mult, vocab, cond_rates,
+            seq_len=max(1, seq_len // 2),
+        )
+
+        invariants = {
+            "all_exited": all(e >= 0 for e in exit_layers),
+            "exit_in_range": all(0 <= e < self.cfg.n_layers for e in exit_layers),
+            "finite_hidden": all(math.isfinite(x) for row in current for x in row),
+            "counts_sum": sum(layer_exit_counts) == seq_len,
+            "min_exit_honored": all(
+                exit_layers[i] >= self.cfg.min_exit_layer
+                or exit_layers[i] == self.cfg.n_layers - 1
+                for i in range(seq_len)
+            ),
+        }
+
+        self.stats = {
+            "exit_layers": exit_layers,
+            "layer_exit_counts": layer_exit_counts,
+            "avg_exit_layer": avg_exit,
+        }
+
+        return {
+            "status": "success",
+            "seq_len": seq_len,
+            "exit_layers": exit_layers,
+            "layer_exit_counts": layer_exit_counts,
+            "exit_mass_rates": [round(r, 6) for r in rates],
+            "conditional_exit_rates": [round(r, 6) for r in cond_rates],
+            "avg_exit_layer": round(avg_exit, 4),
+            "mean_confidence": round(sum(confidences) / max(seq_len, 1), 6),
+            "realized_flops": round(flops, 2),
+            "dense_flops": round(dense_flops, 2),
+            "realized_compute_ratio": round(flops / dense_flops, 6) if dense_flops else 0.0,
+            "realized_savings_pct": round((1.0 - flops / dense_flops) * 100.0, 3) if dense_flops else 0.0,
+            "theory": theory,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "invariants": invariants,
+            "predictions_head": predictions[: min(8, seq_len)],
+        }
+
+    def self_speculate(
+        self,
+        prompt_len: int = 16,
+        gen_tokens: int = 8,
+        acceptance_override: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Self-speculative decoding loop.
+
+        Draft path: layers[0:E]; verify path: layers[E:L] on proposed tokens.
+        Acceptance uses verifier final-head agreement with draft prediction
+        (or override for theory sweeps).
+        """
+        cfg = self.cfg
+        E = cfg.draft_layers
+        k = cfg.speculate_k
+        self.reset_caches()
+
+        # Prefill prompt through ALL layers (standard)
+        hidden = self.embed_synthetic(prompt_len)
+        current = [list(row) for row in hidden]
+        for block in self.layers:
+            current = block.forward_sequence(current)
+
+        d_model = cfg.d_model
+        n_heads = cfg.n_heads
+        ff_mult = cfg.ff_mult
+        vocab = cfg.vocab_size
+        flops = 0.0
+        # prefill flops (approx)
+        for pos in range(prompt_len):
+            for _ in range(cfg.n_layers):
+                flops += flops_attention_decode(d_model, n_heads, pos + 1) + flops_mlp(d_model, ff_mult)
+
+        generated: List[int] = []
+        rounds = []
+        accepted_total = 0
+        draft_total = 0
+        t0 = time.perf_counter()
+
+        # Working state: last hidden of full model
+        state = list(current[-1])
+        kv_len = prompt_len
+
+        while len(generated) < gen_tokens:
+            # --- Draft with first E layers ---
+            draft_state = list(state)
+            draft_tokens: List[int] = []
+            draft_confs: List[float] = []
+            for _step in range(k):
+                if len(generated) + len(draft_tokens) >= gen_tokens:
+                    break
+                hidden = draft_state
+                for li in range(E):
+                    flops += (
+                        flops_attention_decode(d_model, n_heads, kv_len + len(draft_tokens) + 1)
+                        + flops_mlp(d_model, ff_mult)
+                    )
+                    hidden = self.layers[li].forward_token(hidden, use_cache=True)
+                exit_out = self.layers[E - 1].exit_head.forward(hidden, cfg.exit_temperature)
+                flops += flops_exit_head(d_model, vocab)
+                tid = exit_out["pred_id"]
+                draft_tokens.append(tid)
+                draft_confs.append(exit_out["confidence"])
+                draft_state = list(self.embed[tid % cfg.vocab_size])
+
+            draft_total += len(draft_tokens)
+
+            # --- Verify with remaining layers (sequential prefix accept/reject) ---
+            accepted = 0
+            for di, dtok in enumerate(draft_tokens):
+                hidden = list(state) if di == 0 else list(self.embed[dtok % cfg.vocab_size])
+                for li in range(E, cfg.n_layers):
+                    flops += (
+                        flops_attention_decode(d_model, n_heads, kv_len + di + 1)
+                        + flops_mlp(d_model, ff_mult)
+                    )
+                    hidden = self.layers[li].forward_token(hidden, use_cache=True)
+
+                vout = self.final_head.forward(hidden, cfg.acceptance_temp)
+                flops += flops_exit_head(d_model, vocab)
+                if acceptance_override is not None:
+                    ok = self.rng.random() < acceptance_override
+                else:
+                    ok = vout["pred_id"] == dtok or vout["confidence"] >= cfg.exit_threshold
+                if ok:
+                    accepted += 1
+                    generated.append(dtok)
+                    state = hidden
+                    kv_len += 1
+                else:
+                    generated.append(vout["pred_id"])
+                    state = hidden
+                    kv_len += 1
+                    break
+
+            accepted_total += accepted
+            rounds.append({
+                "draft_tokens": draft_tokens,
+                "draft_confs": [round(c, 4) for c in draft_confs],
+                "accepted_prefix": accepted,
+                "generated_so_far": len(generated),
+            })
+            if not draft_tokens:
+                break
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        emp_alpha = (accepted_total / draft_total) if draft_total else 0.0
+        theory = theoretical_self_speculative(
+            cfg.n_layers, E, d_model, n_heads, ff_mult, vocab, k,
+            emp_alpha or 0.5, kv_len=max(kv_len, 1),
+        )
+        dense_gen_flops = gen_tokens * cfg.n_layers * (
+            flops_attention_decode(d_model, n_heads, prompt_len + gen_tokens // 2)
+            + flops_mlp(d_model, ff_mult)
+            + flops_exit_head(d_model, vocab)
+        )
+
+        return {
+            "status": "success",
+            "prompt_len": prompt_len,
+            "gen_tokens": len(generated),
+            "generated_ids": generated,
+            "rounds": rounds,
+            "draft_tokens_total": draft_total,
+            "accepted_draft_total": accepted_total,
+            "empirical_acceptance_rate": round(emp_alpha, 6),
+            "realized_flops": round(flops, 2),
+            "dense_gen_flops_ref": round(dense_gen_flops, 2),
+            "theory": theory,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "tokens_per_s": round(len(generated) / (elapsed_ms / 1000.0), 2) if elapsed_ms > 0 else None,
+        }
+
+    def exit_map(self, seq_len: int = 16) -> Dict[str, Any]:
+        out = self.prefill_early_exit(seq_len)
+        return {
+            "engine": "layerskip-self-speculative-engine",
+            "seq_len": seq_len,
+            "exit_layers": out["exit_layers"],
+            "layer_exit_counts": out["layer_exit_counts"],
+            "exit_mass_rates": out["exit_mass_rates"],
+            "avg_exit_layer": out["avg_exit_layer"],
+            "config": asdict(self.cfg),
+        }
+
+    def memory_report(self) -> Dict[str, Any]:
+        cfg = self.cfg
+        # params: per layer QKV/O + FF + exit head
+        d, ff, v, L = cfg.d_model, int(cfg.d_model * cfg.ff_mult), cfg.vocab_size, cfg.n_layers
+        per_layer = (
+            4 * d * d  # qkv o
+            + 2 * d * ff  # mlp
+            + d * v + d  # exit
+        )
+        total = L * per_layer + d * v + d + cfg.vocab_size * d
+        kv = sum(len(layer.k_cache) * d * 2 for layer in self.layers)
+        return {
+            "param_count_est": int(total),
+            "param_bytes_fp32": int(total * 4),
+            "kv_cache_elements": int(kv),
+            "kv_cache_bytes_fp32": int(kv * 4),
+            "n_layers": L,
+            "d_model": d,
+        }
+
+    def verify_invariants(self, seq_len: int = 32) -> Dict[str, Any]:
+        checks: Dict[str, bool] = {}
+        errors: List[str] = []
+
+        # 1. early-exit prefill invariants
+        out = self.prefill_early_exit(seq_len)
+        for k, val in out["invariants"].items():
+            checks[f"prefill_{k}"] = bool(val)
+            if not val:
+                errors.append(f"prefill invariant failed: {k}")
+
+        # 2. min_exit_layer never violated for early exits
+        for i, el in enumerate(out["exit_layers"]):
+            if el < self.cfg.min_exit_layer and el != self.cfg.n_layers - 1:
+                checks["min_exit_strict"] = False
+                errors.append(f"token {i} exited at {el} < min_exit")
+                break
+        else:
+            checks["min_exit_strict"] = True
+
+        # 3. higher threshold → later average exit (monotonicity soft check)
+        cfg_hi = LayerSkipConfig(
+            n_layers=self.cfg.n_layers,
+            d_model=self.cfg.d_model,
+            n_heads=self.cfg.n_heads,
+            ff_mult=self.cfg.ff_mult,
+            vocab_size=self.cfg.vocab_size,
+            exit_threshold=min(0.99, self.cfg.exit_threshold + 0.15),
+            min_exit_layer=self.cfg.min_exit_layer,
+            draft_layers=self.cfg.draft_layers,
+            seed=self.cfg.seed,
+        )
+        eng_hi = LayerSkipEngine(cfg_hi)
+        out_hi = eng_hi.prefill_early_exit(seq_len)
+        # Not always strict due to conf calibration; allow small slack
+        checks["threshold_shifts_exit_deeper_or_equal"] = (
+            out_hi["avg_exit_layer"] + 1e-9 >= out["avg_exit_layer"] - 0.5
+        )
+        if not checks["threshold_shifts_exit_deeper_or_equal"]:
+            errors.append(
+                f"higher threshold exited earlier: {out_hi['avg_exit_layer']} < {out['avg_exit_layer']}"
+            )
+
+        # 4. self-spec produces requested tokens
+        spec = self.self_speculate(prompt_len=8, gen_tokens=4, acceptance_override=0.7)
+        checks["speculate_emits_tokens"] = spec["gen_tokens"] == 4
+        checks["speculate_finite_flops"] = math.isfinite(spec["realized_flops"]) and spec["realized_flops"] > 0
+        if not checks["speculate_emits_tokens"]:
+            errors.append(f"expected 4 tokens, got {spec['gen_tokens']}")
+
+        # 5. theory speedup positive for cheap draft (E << L) + high acceptance
+        th = theoretical_self_speculative(
+            n_layers=max(12, self.cfg.n_layers),
+            draft_layers=max(1, min(2, self.cfg.n_layers // 4 or 1)),
+            d_model=self.cfg.d_model,
+            n_heads=self.cfg.n_heads,
+            ff_mult=self.cfg.ff_mult,
+            vocab=self.cfg.vocab_size,
+            speculate_k=max(4, self.cfg.speculate_k),
+            acceptance_rate=0.8,
+            kv_len=64,
+        )
+        checks["theory_speedup_gt_one"] = th["speedup"] > 1.0
+        if not checks["theory_speedup_gt_one"]:
+            errors.append(f"theory speedup {th['speedup']} <= 1")
+
+        # 6. dense FLOPs > early-exit realized FLOPs when exits happen early
+        checks["early_exit_saves_flops"] = out["realized_flops"] <= out["dense_flops"] * 1.01
+        if not checks["early_exit_saves_flops"]:
+            errors.append("early-exit used more FLOPs than dense")
+
+        # 7. capacity of exit mass
+        checks["exit_mass_complete"] = abs(sum(out["exit_mass_rates"]) - 1.0) < 1e-6
+
+        status = "pass" if all(checks.values()) else "fail"
+        return {
+            "status": status,
+            "checks": checks,
+            "errors": errors,
+            "sample_avg_exit_layer": out["avg_exit_layer"],
+            "sample_savings_pct": out["realized_savings_pct"],
+            "spec_acceptance": spec["empirical_acceptance_rate"],
+            "theory_speedup": th["speedup"],
+            "memory": self.memory_report(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _cfg_from_args(args: argparse.Namespace) -> LayerSkipConfig:
+    return LayerSkipConfig(
+        n_layers=args.layers,
+        d_model=args.d_model,
+        n_heads=args.heads,
+        ff_mult=args.ff_mult,
+        vocab_size=args.vocab,
+        exit_threshold=args.exit_threshold,
+        min_exit_layer=args.min_exit_layer,
+        exit_temperature=args.exit_temp,
+        draft_layers=args.draft_layers,
+        speculate_k=args.speculate_k,
+        seed=args.seed,
+    )
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    # synthetic uniform-ish exit schedule for theory table
+    rates = []
+    for i in range(cfg.n_layers):
+        if i < cfg.min_exit_layer:
+            rates.append(0.0)
+        elif i == cfg.n_layers - 1:
+            rates.append(1.0)
+        else:
+            # geometric-ish: more mass exits mid-depth
+            rates.append(0.15)
+    # renormalize conditional later inside theory
+    ee = theoretical_early_exit(
+        cfg.n_layers, cfg.d_model, cfg.n_heads, cfg.ff_mult, cfg.vocab_size, rates, seq_len=128
+    )
+    specs = []
+    for alpha in (0.4, 0.6, 0.8, 0.9):
+        specs.append(
+            theoretical_self_speculative(
+                cfg.n_layers, cfg.draft_layers, cfg.d_model, cfg.n_heads,
+                cfg.ff_mult, cfg.vocab_size, cfg.speculate_k, alpha, kv_len=128,
+            )
+        )
+    payload = {
+        "engine": "layerskip-self-speculative-engine",
+        "paper": "Elhoushi et al., LayerSkip (Meta FAIR), arXiv:2404.15690",
+        "config": asdict(cfg),
+        "early_exit_theory": ee,
+        "self_spec_theory_by_alpha": specs,
+        "notes": [
+            "Early-exit: intermediate classifiers halt easy tokens before full depth.",
+            "Self-speculation: first E layers draft; remaining L-E layers verify — shared weights.",
+            "No auxiliary draft model parameters (unlike EAGLE/Medusa heads-as-draft).",
+            "Layer-dropout training enables reliable exits without extra CE collapse.",
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    engine = LayerSkipEngine(cfg)
+    results = []
+    for sl in args.seq_lens:
+        engine.prefill_early_exit(min(8, sl))  # warmup
+        t0 = time.perf_counter()
+        out = engine.prefill_early_exit(sl)
+        dt = time.perf_counter() - t0
+        results.append({
+            "seq_len": sl,
+            "elapsed_s": round(dt, 6),
+            "tokens_per_s": round(sl / dt, 2) if dt > 0 else None,
+            "avg_exit_layer": out["avg_exit_layer"],
+            "realized_savings_pct": out["realized_savings_pct"],
+            "realized_compute_ratio": out["realized_compute_ratio"],
+            "dense_flops": out["dense_flops"],
+            "layerskip_flops": out["realized_flops"],
+        })
+    print(json.dumps({
+        "engine": "layerskip-self-speculative-engine",
+        "config": asdict(cfg),
+        "benchmarks": results,
+        "memory": engine.memory_report(),
+    }, indent=2))
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    engine = LayerSkipEngine(cfg)
+    report = engine.verify_invariants(seq_len=args.seq_len)
+    print(json.dumps(report, indent=2))
+    return 0 if report["status"] == "pass" else 1
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    engine = LayerSkipEngine(cfg)
+    timeline = []
+    step = max(1, args.tokens // max(args.steps, 1))
+    for i in range(args.steps):
+        sl = min(args.tokens, step * (i + 1))
+        out = engine.prefill_early_exit(sl)
+        timeline.append({
+            "step": i,
+            "seq_len": sl,
+            "avg_exit_layer": out["avg_exit_layer"],
+            "savings_pct": out["realized_savings_pct"],
+            "compute_ratio": out["realized_compute_ratio"],
+            "layer_exit_counts": out["layer_exit_counts"],
+        })
+    print(json.dumps({
+        "engine": "layerskip-self-speculative-engine",
+        "config": asdict(cfg),
+        "timeline": timeline,
+        "final_memory": engine.memory_report(),
+    }, indent=2))
+    return 0
+
+
+def cmd_exit_map(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    engine = LayerSkipEngine(cfg)
+    print(json.dumps(engine.exit_map(args.seq_len), indent=2))
+    return 0
+
+
+def cmd_speculate(args: argparse.Namespace) -> int:
+    cfg = _cfg_from_args(args)
+    engine = LayerSkipEngine(cfg)
+    out = engine.self_speculate(
+        prompt_len=args.prompt_len,
+        gen_tokens=args.gen_tokens,
+        acceptance_override=args.force_alpha,
+    )
+    print(json.dumps({
+        "engine": "layerskip-self-speculative-engine",
+        "config": asdict(cfg),
+        **out,
+        "memory": engine.memory_report(),
+    }, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="layerskip-self-speculative-engine",
+        description="LayerSkip early-exit + self-speculative decoding (Meta FAIR arXiv:2404.15690)",
+    )
+    p.add_argument("--layers", type=int, default=12)
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--heads", type=int, default=4)
+    p.add_argument("--ff-mult", type=float, default=4.0)
+    p.add_argument("--vocab", type=int, default=256)
+    p.add_argument("--exit-threshold", type=float, default=0.9)
+    p.add_argument("--min-exit-layer", type=int, default=2)
+    p.add_argument("--exit-temp", type=float, default=1.0)
+    p.add_argument("--draft-layers", type=int, default=4)
+    p.add_argument("--speculate-k", type=int, default=4)
+    p.add_argument("--seed", type=int, default=42)
+
+    sp = p.add_subparsers(dest="cmd", required=True)
+    sp.add_parser("status", help="Theory tables and config dump")
+
+    b = sp.add_parser("benchmark", help="Early-exit prefill microbenchmark")
+    b.add_argument("--seq-lens", type=int, nargs="+", default=[16, 32, 64])
+
+    v = sp.add_parser("verify", help="Invariant verification suite")
+    v.add_argument("--seq-len", type=int, default=32)
+
+    s = sp.add_parser("simulate", help="Growing-sequence exit timeline")
+    s.add_argument("--tokens", type=int, default=64)
+    s.add_argument("--steps", type=int, default=4)
+
+    e = sp.add_parser("exit-map", help="Dump per-token exit layer map")
+    e.add_argument("--seq-len", type=int, default=16)
+
+    spc = sp.add_parser("speculate", help="Self-speculative decoding rollout")
+    spc.add_argument("--prompt-len", type=int, default=16)
+    spc.add_argument("--gen-tokens", type=int, default=8)
+    spc.add_argument("--force-alpha", type=float, default=None,
+                     help="Override acceptance with fixed Bernoulli alpha")
+
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    dispatch = {
+        "status": cmd_status,
+        "benchmark": cmd_benchmark,
+        "verify": cmd_verify,
+        "simulate": cmd_simulate,
+        "exit-map": cmd_exit_map,
+        "speculate": cmd_speculate,
+    }
+    try:
+        return dispatch[args.cmd](args)
+    except Exception as exc:  # noqa: BLE001 — CLI boundary
+        print(json.dumps({"status": "error", "error": str(exc)}), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

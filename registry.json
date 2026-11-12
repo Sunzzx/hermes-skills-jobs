@@ -1855,5 +1855,22 @@
       "Sparse-Depth",
       "Inference"
     ]
+  },
+  {
+    "id": "layerskip-self-speculative-engine",
+    "title": "LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers.",
+    "cli": "layerskip-self-speculative-engine",
+    "evolved_at": "2026-11-12T09:33:19.521969",
+    "tags": [
+      "Frontier-AI",
+      "LayerSkip",
+      "EarlyExit",
+      "SelfSpeculative",
+      "Meta-FAIR",
+      "InferenceEngine"
+    ]
   }
 ]

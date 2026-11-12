@@ -1,20 +1,17 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-109-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-110-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (109 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (110 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
-| **Mixture-of-Depths Dynamic Compute Router** | `inference` | `mixture-of-depths-engine` | DeepMind MoD (arXiv:2404.02258): expert-choice router admits top-capacity tokens into full attention+MLP; unselected tokens residual-identity skip for ~C static FLOP budget (e.g. 12.5% → ~88–95% savings). | `MoD` `Expert-Choice` `Dynamic-Compute` |
-| **YOCO: You Only Cache Once Decoder-Decoder KV Engine** | `inference` | `yoco-cache-engine` | Meta FAIR YOCO (arXiv:2405.05254): self-decoder emits a single shared global KV once; cross-decoder layers cross-attend with zero private KV for ~2×–L× memory reduction. | `YOCO` `Decoder-Decoder` `KV-Cache` |
-| **Infini-Attention Compressive Infinite-Context Engine** | `inference` | `infini-attention-engine` | Google Infini-attention (arXiv:2404.07143): local sliding-window softmax + fixed-size ELU+1 linear-attention compressive memory with delta-rule updates and gated blend for O(1) unbounded context. | `Infinite-Context` `Compressive-Memory` `Linear-Attention` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -120,6 +117,11 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **CacheGen Streaming KV Cache Compression & Delta-Encoding Engine** | `inference` | N/A | Fast streaming KV cache compression, delta-encoding, and context migration for distributed LLM serving. | `inference` `kv-cache` `cachegen` |
 | **Palu: Low-Rank KV-Cache Compression Engine (ICLR 2025)** | `inference` | N/A | Post-training low-rank projection for KV cache states, reducing LLM memory footprint by 50-75% via latent SVD caching. | `inference` `kv-cache` `palu` |
 | **AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)** | `inference` | N/A | Dynamically optimizes token retention budgets across attention layers and heads based on prompt importance patterns, shifting memory budget to pivotal retrieval heads. | `inference` `kv-cache` `adakv` |
+| **FastGen: Adaptive KV Cache Compression via Attention Profiling (NeurIPS 2024)** | `inference` | `fastgen-engine` | Profiles attention heads dynamically into special sink, punctuation, local streaming, and retrieval archetypes to allocate structural token retention budgets during LLM inference. | `inference` `kv-cache` `attention-profiling` |
+| **Infini-Attention: Compressive Infinite-Context Engine (Google arXiv:2404.07143)** | `inference` | `infini-attention-engine` | Hybrid local sliding-window softmax + fixed-size linear-attention compressive memory with ELU+1 kernel, delta-rule updates, and gated blend for O(1) infinite context. | `inference` `infinite-context` `compressive-memory` |
+| **YOCO: You Only Cache Once Decoder-Decoder KV Engine (Meta FAIR, arXiv:2405.05254)** | `inference` | `yoco-cache-engine` | Meta FAIR YOCO decoder-decoder architecture: self-decoder emits a single shared global KV once; cross-decoder layers cross-attend with zero private KV — ~2x-Lx memory reduction vs standard causal stacks. | `YOCO` `Meta-FAIR` `KV-Cache` |
+| **Mixture-of-Depths Dynamic Compute Router (Google DeepMind, arXiv:2404.02258)** | `inference` | `mixture-of-depths-engine` | DeepMind Mixture-of-Depths expert-choice router: each layer admits only top-capacity tokens into full attention+MLP; unselected tokens take residual identity — static FLOP budget ~C with exact capacity caps. | `Mixture-of-Depths` `DeepMind` `Dynamic-Compute` |
+| **LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)** | `inference` | `layerskip-self-speculative-engine` | Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers. | `Frontier-AI` `LayerSkip` `EarlyExit` |
 
 ---
 
@@ -146,8 +148,12 @@ ports free 3000
 
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
+
+# Example: LayerSkip early-exit + self-speculative decoding
+layerskip-self-speculative-engine verify
+layerskip-self-speculative-engine speculate --gen-tokens 8 --force-alpha 0.8
 ```
 
 ---
 
-*Last Evolved: 2026-11-12 02:49:07*
+*Last Evolved: 2026-11-12 09:33:19*

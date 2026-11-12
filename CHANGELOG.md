@@ -926,3 +926,8 @@
 - **Title**: AdaKV: Adaptive Budget Allocation for KV Cache Compression (NeurIPS 2024)
 - **Category**: inference
 - **Description**: Dynamically optimizes token retention budgets across attention layers and heads based on prompt importance patterns, shifting memory budget to pivotal retrieval heads.
+
+### [2026-11-12 09:33:19] - Evolved `layerskip-self-speculative-engine`
+- **Title**: LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)
+- **Category**: inference
+- **Description**: Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers.
