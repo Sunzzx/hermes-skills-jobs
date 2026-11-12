@@ -10,6 +10,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
+- `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
 - **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
 ## 🚀 Live Capability Registry (115 Evolved Skills & Jobs)

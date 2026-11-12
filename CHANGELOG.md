@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 20:47:09] - Evolved `quip-sharp-incoherence-lattice-engine`
+- **Title**: QuIP#: Even Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks (ICML 2024, arXiv:2402.04396)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/quip-sharp-incoherence-lattice-engine`
+  - `skills/inference/quip-sharp-incoherence-lattice-engine/SKILL.md`
+  - `tests/test_quip_sharp_incoherence_lattice_engine.py`
+- **Capabilities**: RHT incoherence Ŵ=UWVᵀ; E8-family lattice VQ (8-dim blocks); BlockLDLQ Hessian adaptive rounding; RTN/LDLQ/RHT/E8/QuIP# ablations; outlier max/rms proxies; 7B footprint theory; pack ledger. 20/20 unit tests passed; CLI `status`/`calibrate`/`incohere`/`ldlq`/`quantize`/`codebook`/`benchmark`/`verify`/`pack`/`theory`.
+
+
 ### [2026-11-12 19:42:07] - Evolved `spinquant-learned-rotation-engine`
 - **Title**: SpinQuant: LLM Quantization with Learned Orthogonal Rotations (Meta FAIR, arXiv:2405.16406)
 - **Category**: inference

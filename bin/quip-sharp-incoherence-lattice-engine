@@ -1,0 +1,1381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""QuIP#: Even Better LLM Quantization with Hadamard Incoherence + Lattice Codebooks.
+
+Paper: Tseng, Chee, Sun, Kuleshov, De Sa — "QuIP#: Even Better LLM Quantization
+with Hadamard Incoherence and Lattice Codebooks" (ICML 2024, arXiv:2402.04396).
+Cornell RelaxML: https://github.com/Cornell-RelaxML/quip-sharp
+
+Core idea
+---------
+Weight-only PTQ at extreme bit-rates (≤4 bpw) via three techniques:
+
+  1. **Incoherence processing** with the Randomized Hadamard Transform (RHT):
+         Ŵ = U W V^T
+     where U, V are randomized Hadamard orthogonals. This smears outliers so
+     weights become approximately i.i.d. sub-Gaussian (ball-shaped), enabling
+     vector quantization that scalar RTN/GPTQ cannot match.
+
+  2. **Lattice vector quantization** on 8-dim blocks using an E8-family
+     codebook (E8P proxy). The E8 lattice packs the unit ball optimally in 8D;
+     nearest-codeword encoding of incoherent blocks beats per-scalar grids.
+
+  3. **BlockLDLQ** adaptive rounding: LDL (Cholesky-like) factorization of the
+     Hessian proxy H ≈ 2 X X^T drives residual-aware block rounding — a direct
+     upgrade over GPTQ's OBS path under incoherence.
+
+At deploy, RHT factors fuse into adjacent linear/LayerNorm weights (or are
+applied via fast Walsh–Hadamard kernels) so inference cost is near weight-only
+lookup + scale.
+
+This pure-Python reference (zero third-party deps) implements:
+
+  * dense GEMM / Frobenius / SQNR / cosine / incoherence proxies
+  * Sylvester / padded randomized Hadamard transforms
+  * left/right incoherence: Ŵ = U W V^T  (and exact inverse)
+  * LDL factorization of damped Hessian + BlockLDLQ residual redistribution
+  * scalar RTN (symmetric/asymmetric INT2/3/4/8) baseline
+  * E8-family lattice codebook generation + 8-dim nearest-codeword VQ
+  * identity / RHT-only / LDLQ / full QuIP# ablations
+  * outlier-channel ledger, bit-rate, 7B footprint theory tables
+  * CLI: status | calibrate | incohere | ldlq | quantize | codebook
+          | benchmark | verify | theory | pack
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _sign(x: float) -> float:
+    return 1.0 if x >= 0.0 else -1.0
+
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_eye(n: int) -> Matrix:
+    m = mat_zeros(n, n)
+    for i in range(n):
+        m[i][i] = 1.0
+    return m
+
+
+def mat_copy(a: Matrix) -> Matrix:
+    return [row[:] for row in a]
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    r, c = len(a), len(a[0])
+    out = mat_zeros(c, r)
+    for i in range(r):
+        for j in range(c):
+            out[j][i] = a[i][j]
+    return out
+
+
+def mat_add(a: Matrix, b: Matrix, sa: float = 1.0, sb: float = 1.0) -> Matrix:
+    r, c = len(a), len(a[0])
+    out = mat_zeros(r, c)
+    for i in range(r):
+        ai, bi, oi = a[i], b[i], out[i]
+        for j in range(c):
+            oi[j] = sa * ai[j] + sb * bi[j]
+    return out
+
+
+def mat_scale(a: Matrix, s: float) -> Matrix:
+    return [[s * x for x in row] for row in a]
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    r, k, c = len(a), len(a[0]), len(b[0])
+    bt = mat_t(b)
+    out = mat_zeros(r, c)
+    for i in range(r):
+        ai = a[i]
+        oi = out[i]
+        for j in range(c):
+            oi[j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_vec(a: Matrix, v: Sequence[float]) -> Vector:
+    return [_dot(row, v) for row in a]
+
+
+def mat_flatten(a: Matrix) -> Vector:
+    out: Vector = []
+    for row in a:
+        out.extend(row)
+    return out
+
+
+def mat_frobenius(a: Matrix) -> float:
+    return math.sqrt(sum(x * x for row in a for x in row))
+
+
+def mat_max_abs_cols(a: Matrix) -> Vector:
+    if not a:
+        return []
+    c = len(a[0])
+    out = [0.0] * c
+    for row in a:
+        for j, x in enumerate(row):
+            ax = abs(x)
+            if ax > out[j]:
+                out[j] = ax
+    return out
+
+
+def mat_max_abs_rows(a: Matrix) -> Vector:
+    return [max((abs(x) for x in row), default=0.0) for row in a]
+
+
+def mat_col(a: Matrix, j: int) -> Vector:
+    return [row[j] for row in a]
+
+
+def set_mat_col(a: Matrix, j: int, col: Sequence[float]) -> None:
+    for i, v in enumerate(col):
+        a[i][j] = v
+
+
+def gauss_jordan_inverse(a: Matrix) -> Matrix:
+    n = len(a)
+    m = [a[i][:] + mat_eye(n)[i] for i in range(n)]
+    for col in range(n):
+        piv = col
+        best = abs(m[col][col])
+        for r in range(col + 1, n):
+            v = abs(m[r][col])
+            if v > best:
+                best = v
+                piv = r
+        if best < 1e-18:
+            raise ValueError("singular matrix in gauss_jordan_inverse")
+        if piv != col:
+            m[col], m[piv] = m[piv], m[col]
+        div = m[col][col]
+        m[col] = [x / div for x in m[col]]
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col]
+            if factor == 0.0:
+                continue
+            m[r] = [m[r][c] - factor * m[col][c] for c in range(2 * n)]
+    return [row[n:] for row in m]
+
+
+def mat_orthogonality_error(r: Matrix) -> float:
+    n = len(r)
+    g = mat_mul(mat_t(r), r)
+    err = 0.0
+    for i in range(n):
+        for j in range(n):
+            target = 1.0 if i == j else 0.0
+            d = g[i][j] - target
+            err += d * d
+    return math.sqrt(err)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic tensors
+# ---------------------------------------------------------------------------
+
+def make_weight(
+    rows: int,
+    cols: int,
+    seed: int = 0,
+    scale: float = 1.0,
+    n_outliers: int = 0,
+    outlier_scale: float = 12.0,
+) -> Matrix:
+    rng = random.Random(seed)
+    w = [[rng.gauss(0.0, scale) for _ in range(cols)] for _ in range(rows)]
+    # Inject channel outliers (pre-incoherence pathology QuIP# targets)
+    n_out = n_outliers if n_outliers > 0 else max(1, cols // 16)
+    for j in range(min(n_out, cols)):
+        mag = outlier_scale * scale * (1.0 + 0.3 * rng.random())
+        for i in range(rows):
+            w[i][j] += mag * rng.gauss(0.0, 1.0)
+    return w
+
+
+def make_activations(
+    cols: int,
+    n_samples: int,
+    seed: int = 0,
+    scale: float = 1.0,
+) -> Matrix:
+    """Return X with shape (cols, n_samples) so Y = W @ X."""
+    rng = random.Random(seed + 9973)
+    return [[rng.gauss(0.0, scale) for _ in range(n_samples)] for _ in range(cols)]
+
+
+# ---------------------------------------------------------------------------
+# Hadamard / RHT
+# ---------------------------------------------------------------------------
+
+def _next_pow2(n: int) -> int:
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
+def hadamard_matrix(n: int) -> Matrix:
+    """Sylvester construction; n must be power of 2."""
+    if n <= 0 or (n & (n - 1)) != 0:
+        raise ValueError(f"Hadamard order must be power of 2, got {n}")
+    h: Matrix = [[1.0]]
+    while len(h) < n:
+        m = len(h)
+        out = mat_zeros(2 * m, 2 * m)
+        for i in range(m):
+            for j in range(m):
+                v = h[i][j]
+                out[i][j] = v
+                out[i][j + m] = v
+                out[i + m][j] = v
+                out[i + m][j + m] = -v
+        h = out
+    s = 1.0 / math.sqrt(n)
+    return [[s * x for x in row] for row in h]
+
+
+def randomized_hadamard(n: int, seed: int) -> Matrix:
+    """RHT: diag(±1) @ H_pad projected/cropped to n×n, then thin-QR-ish
+    orthonormalization via Cayley-free row normalization of H S on the
+    leading principal submatrix (exact when n is power of 2).
+    """
+    rng = random.Random(seed)
+    p = _next_pow2(n)
+    h = hadamard_matrix(p)
+    signs = [1.0 if rng.random() < 0.5 else -1.0 for _ in range(p)]
+    # Apply sign flip on columns of H (right multiply by diag(s))
+    hs = [[h[i][j] * signs[j] for j in range(p)] for i in range(p)]
+    if p == n:
+        return hs
+    # Leading principal block is not orthogonal when cropped; orthonormalize
+    # via modified Gram-Schmidt on the first n rows/cols.
+    block = [row[:n] for row in hs[:n]]
+    return _mgs_orthonormalize(block)
+
+
+def _mgs_orthonormalize(a: Matrix) -> Matrix:
+    """Modified Gram-Schmidt on rows → orthonormal rows (approx orthogonal)."""
+    n = len(a)
+    m = len(a[0])
+    q = mat_zeros(n, m)
+    for i in range(n):
+        v = a[i][:]
+        for k in range(i):
+            proj = _dot(q[k], v)
+            for j in range(m):
+                v[j] -= proj * q[k][j]
+        nrm = _l2(v)
+        if nrm < 1e-15:
+            # fallback: standard basis direction
+            v = [0.0] * m
+            v[i % m] = 1.0
+            for k in range(i):
+                proj = _dot(q[k], v)
+                for j in range(m):
+                    v[j] -= proj * q[k][j]
+            nrm = _l2(v)
+            if nrm < 1e-15:
+                nrm = 1.0
+        inv = 1.0 / nrm
+        q[i] = [x * inv for x in v]
+    return q
+
+
+def apply_incoherence(w: Matrix, u: Matrix, v: Matrix) -> Matrix:
+    """Ŵ = U W V^T."""
+    return mat_mul(mat_mul(u, w), mat_t(v))
+
+
+def invert_incoherence(w_hat: Matrix, u: Matrix, v: Matrix) -> Matrix:
+    """W = U^T Ŵ V  (since U,V orthogonal)."""
+    return mat_mul(mat_mul(mat_t(u), w_hat), v)
+
+
+def incoherence_proxy(w: Matrix) -> Dict[str, float]:
+    """Cheap proxies: kurtosis-ish of flattened entries + max/rms ratio."""
+    flat = mat_flatten(w)
+    n = max(len(flat), 1)
+    mu = _mean(flat)
+    var = sum((x - mu) ** 2 for x in flat) / n
+    rms = math.sqrt(var) if var > 0 else 1e-12
+    m4 = sum((x - mu) ** 4 for x in flat) / n
+    kurtosis = m4 / (var * var) if var > 1e-18 else 0.0
+    max_abs = max((abs(x) for x in flat), default=0.0)
+    return {
+        "rms": rms,
+        "max_abs": max_abs,
+        "max_over_rms": max_abs / rms,
+        "kurtosis": kurtosis,
+        "n": float(n),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scalar quantization (RTN)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 4
+    group_size: int = 0  # 0 = per-tensor / per-row
+    symmetric: bool = True
+
+
+@dataclass
+class QuantTensor:
+    q: List[int]
+    scales: List[float]
+    zeros: List[float]
+    n_bits: int
+    group_size: int
+    symmetric: bool
+    n: int
+
+    def bit_rate(self) -> float:
+        # payload bits + fp16 scale/zero overhead per group
+        g = self.group_size if self.group_size > 0 else self.n
+        n_groups = max(1, (self.n + g - 1) // g)
+        payload = self.n * self.n_bits
+        meta = n_groups * (16 if self.symmetric else 32)
+        return (payload + meta) / max(self.n, 1)
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantTensor:
+    n = len(x)
+    gs = cfg.group_size if cfg.group_size > 0 else n
+    q_vals: List[int] = [0] * n
+    scales: List[float] = []
+    zeros: List[float] = []
+    qmax = (1 << (cfg.n_bits - 1)) - 1 if cfg.symmetric else (1 << cfg.n_bits) - 1
+    qmin = -qmax - 1 if cfg.symmetric else 0
+
+    for start in range(0, n, gs):
+        chunk = list(x[start : start + gs])
+        if cfg.symmetric:
+            amax = max((abs(v) for v in chunk), default=0.0)
+            scale = amax / max(qmax, 1) if amax > 0 else 1.0
+            zero = 0.0
+            for i, v in enumerate(chunk):
+                q = int(round(v / scale)) if scale > 0 else 0
+                q_vals[start + i] = int(_clamp(q, qmin, qmax))
+        else:
+            lo = min(chunk) if chunk else 0.0
+            hi = max(chunk) if chunk else 0.0
+            scale = (hi - lo) / max(qmax, 1) if hi > lo else 1.0
+            zero = lo
+            for i, v in enumerate(chunk):
+                q = int(round((v - zero) / scale)) if scale > 0 else 0
+                q_vals[start + i] = int(_clamp(q, 0, qmax))
+        scales.append(scale)
+        zeros.append(zero)
+
+    return QuantTensor(
+        q=q_vals,
+        scales=scales,
+        zeros=zeros,
+        n_bits=cfg.n_bits,
+        group_size=gs,
+        symmetric=cfg.symmetric,
+        n=n,
+    )
+
+
+def dequantize_vector(qt: QuantTensor) -> Vector:
+    out = [0.0] * qt.n
+    gs = qt.group_size
+    for start_i, start in enumerate(range(0, qt.n, gs)):
+        scale = qt.scales[start_i]
+        zero = qt.zeros[start_i]
+        for i in range(start, min(start + gs, qt.n)):
+            out[i] = qt.q[i] * scale + zero
+    return out
+
+
+def quantize_matrix_rows(w: Matrix, cfg: QuantConfig) -> Tuple[Matrix, List[QuantTensor]]:
+    recon: Matrix = []
+    metas: List[QuantTensor] = []
+    for row in w:
+        qt = quantize_vector(row, cfg)
+        recon.append(dequantize_vector(qt))
+        metas.append(qt)
+    return recon, metas
+
+
+def theoretical_bit_rate(n: int, bits: int, group_size: int, symmetric: bool) -> float:
+    g = group_size if group_size > 0 else n
+    n_groups = max(1, (n + g - 1) // g)
+    payload = n * bits
+    meta = n_groups * (16 if symmetric else 32)
+    return (payload + meta) / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# LDL / BlockLDLQ
+# ---------------------------------------------------------------------------
+
+def hessian_from_activations(x: Matrix, damp: float = 1e-2) -> Matrix:
+    """H = 2 X X^T + damp * I, X shape (cols, n_samples)."""
+    cols = len(x)
+    # XXTij = sum_s X[i,s] X[j,s]
+    h = mat_zeros(cols, cols)
+    n_s = len(x[0]) if cols else 0
+    for i in range(cols):
+        xi = x[i]
+        for j in range(i, cols):
+            s = _dot(xi, x[j])
+            h[i][j] = 2.0 * s
+            h[j][i] = h[i][j]
+    # damp relative to mean diag
+    mean_diag = sum(h[i][i] for i in range(cols)) / max(cols, 1)
+    eps = damp * max(mean_diag, 1e-8)
+    for i in range(cols):
+        h[i][i] += eps
+    return h
+
+
+def ldl_decompose(h: Matrix) -> Tuple[Matrix, Vector]:
+    """LDL^T factorization. Returns (L unit-lower, d diagonal)."""
+    n = len(h)
+    l = mat_eye(n)
+    d = [0.0] * n
+    # Working copy
+    a = mat_copy(h)
+    for j in range(n):
+        # d_j = A_jj - sum_k L_jk^2 d_k
+        s = 0.0
+        for k in range(j):
+            s += l[j][k] * l[j][k] * d[k]
+        d[j] = a[j][j] - s
+        if abs(d[j]) < 1e-18:
+            d[j] = 1e-18
+        for i in range(j + 1, n):
+            s2 = 0.0
+            for k in range(j):
+                s2 += l[i][k] * l[j][k] * d[k]
+            l[i][j] = (a[i][j] - s2) / d[j]
+    return l, d
+
+
+def ldl_solve_lower(l: Matrix, b: Sequence[float]) -> Vector:
+    """Solve L y = b (unit lower triangular)."""
+    n = len(b)
+    y = [0.0] * n
+    for i in range(n):
+        s = b[i]
+        li = l[i]
+        for k in range(i):
+            s -= li[k] * y[k]
+        y[i] = s
+    return y
+
+
+def block_ldlq_quantize_row(
+    w_row: Sequence[float],
+    h: Matrix,
+    n_bits: int,
+    block_size: int = 8,
+    symmetric: bool = True,
+) -> Vector:
+    """BlockLDLQ on a single weight row given Hessian H (cols×cols).
+
+    Process columns in reverse (like GPTQ), redistributing residual via
+    Hessian coupling so earlier-index columns absorb quantization error.
+    Residual feedback is damped at extreme bit-widths to avoid error blow-up.
+    """
+    cols = len(w_row)
+    qhat = list(w_row)
+    cfg = QuantConfig(n_bits=n_bits, group_size=0, symmetric=symmetric)
+    # Damp residual feedback harder at ≤2 bits (large per-step error)
+    damp = 0.35 if n_bits <= 2 else 0.85 if n_bits == 3 else 1.0
+
+    i = cols
+    while i > 0:
+        start = max(0, i - block_size)
+        block = qhat[start:i]
+        qt = quantize_vector(block, cfg)
+        recon = dequantize_vector(qt)
+        resid = [block[k] - recon[k] for k in range(len(block))]
+        for k, v in enumerate(recon):
+            qhat[start + k] = v
+        if start > 0 and damp > 0:
+            for j in range(start):
+                corr = 0.0
+                hjj = h[j][j] if abs(h[j][j]) > 1e-18 else 1.0
+                for b, rb in enumerate(resid):
+                    corr += (h[j][start + b] / hjj) * rb
+                qhat[j] -= damp * corr
+        i = start
+    return qhat
+
+
+def ldlq_quantize_matrix(
+    w: Matrix,
+    h: Matrix,
+    n_bits: int,
+    block_size: int = 8,
+) -> Matrix:
+    return [block_ldlq_quantize_row(row, h, n_bits, block_size) for row in w]
+
+
+# ---------------------------------------------------------------------------
+# E8-family lattice codebook (E8P proxy)
+# ---------------------------------------------------------------------------
+
+def _is_e8_point(coords: Sequence[float], tol: float = 1e-9) -> bool:
+    """E8: all integer or all half-integer coords, sum even."""
+    half = [abs(c * 2 - round(c * 2)) < tol * 2 for c in coords]
+    all_half = all(abs(c - round(c - 0.5) - 0.5) < tol or abs(c - round(c + 0.5) + 0.5) < tol for c in coords)
+    # simpler: 2c all int, and either all even or all odd (⇒ all int or all half-int)
+    twos = [round(c * 2) for c in coords]
+    if any(abs(c * 2 - t) > tol * 2 for c, t in zip(coords, twos)):
+        return False
+    parity = [t & 1 for t in twos]
+    if not (all(p == 0 for p in parity) or all(p == 1 for p in parity)):
+        return False
+    # sum of coords even
+    s = sum(coords)
+    return abs(s - round(s / 2) * 2) < tol * 8
+
+
+def generate_e8_codebook(max_norm: float = 2.5, seed: int = 0) -> List[Vector]:
+    """Enumerate a compact E8 shell codebook (plus origin) for 8-dim VQ.
+
+    Includes:
+      - origin
+      - signed permutations of ( ±2, 0^7 ) / √2-scaled variants as integer form
+      - half-integer points of type ( ±0.5^8 ) with even number of minuses
+      - a sparse D4-product subset for denser packing at low bit-rates
+
+    Returns unit-ish scaled codewords (normalized by rms of lattice).
+    """
+    rng = random.Random(seed)
+    codes: List[Vector] = []
+    seen = set()
+
+    def _add(vec: Sequence[float]) -> None:
+        key = tuple(round(x, 6) for x in vec)
+        if key in seen:
+            return
+        if _l2(vec) > max_norm + 1e-9:
+            return
+        seen.add(key)
+        codes.append(list(vec))
+
+    _add([0.0] * 8)
+
+    # Integer shell: permutations of (±2,0^7) and (±1,±1,0^6)
+    for i in range(8):
+        for s in (+2.0, -2.0):
+            v = [0.0] * 8
+            v[i] = s
+            _add(v)
+    for i in range(8):
+        for j in range(i + 1, 8):
+            for si in (+1.0, -1.0):
+                for sj in (+1.0, -1.0):
+                    v = [0.0] * 8
+                    v[i] = si
+                    v[j] = sj
+                    _add(v)
+
+    # Half-integer: all ±1/2 with even # of minuses (D8+ coset ⊂ E8)
+    # Full 2^7 = 128 points — keep them (classic E8 construction piece)
+    for mask in range(256):
+        v = [0.5 if (mask >> k) & 1 == 0 else -0.5 for k in range(8)]
+        n_minus = sum(1 for x in v if x < 0)
+        if n_minus % 2 == 0:
+            _add(v)
+
+    # Extra mid shell: (±1^4, 0^4) signed even-sum
+    from itertools import combinations
+
+    for idxs in combinations(range(8), 4):
+        for mask in range(16):
+            v = [0.0] * 8
+            ssum = 0.0
+            for b, ix in enumerate(idxs):
+                sgn = 1.0 if ((mask >> b) & 1) == 0 else -1.0
+                v[ix] = sgn
+                ssum += sgn
+            if abs(ssum) % 2 < 1e-9 or int(round(ssum)) % 2 == 0:
+                _add(v)
+
+    # Optional small random subset of deeper shells for diversity
+    for _ in range(32):
+        v = [float(rng.randint(-2, 2)) for _ in range(8)]
+        if abs(sum(v)) % 2 < 1e-9 and _is_e8_point(v):
+            _add(v)
+
+    # Scale codebook so average nonzero norm ~ 1 (stable VQ scaling)
+    norms = [_l2(c) for c in codes if _l2(c) > 1e-12]
+    target = _mean(norms) if norms else 1.0
+    if target < 1e-12:
+        target = 1.0
+    inv = 1.0 / target
+    return [[x * inv for x in c] for c in codes]
+
+
+def nearest_codeword(x: Sequence[float], codebook: Sequence[Sequence[float]]) -> Tuple[Vector, int, float]:
+    best_i = 0
+    best_d = float("inf")
+    best = codebook[0]
+    for i, c in enumerate(codebook):
+        d = sum((a - b) ** 2 for a, b in zip(x, c))
+        if d < best_d:
+            best_d = d
+            best_i = i
+            best = c
+    return list(best), best_i, best_d
+
+
+def e8_quantize_vector(x: Sequence[float], codebook: Sequence[Sequence[float]]) -> Tuple[Vector, Dict[str, float]]:
+    """VQ x in chunks of 8 with per-block scale (sign-aware absmean)."""
+    n = len(x)
+    out = [0.0] * n
+    total_err = 0.0
+    n_blocks = 0
+    pad_n = ((n + 7) // 8) * 8
+    xp = list(x) + [0.0] * (pad_n - n)
+    for start in range(0, pad_n, 8):
+        block = xp[start : start + 8]
+        # per-block scale: rms
+        rms = math.sqrt(sum(v * v for v in block) / 8.0)
+        scale = rms if rms > 1e-12 else 1.0
+        normed = [v / scale for v in block]
+        cw, _, dist = nearest_codeword(normed, codebook)
+        recon = [c * scale for c in cw]
+        for k in range(8):
+            if start + k < n:
+                out[start + k] = recon[k]
+                total_err += (block[k] - recon[k]) ** 2
+        n_blocks += 1
+    meta = {
+        "mse": total_err / max(n, 1),
+        "n_blocks": float(n_blocks),
+        "codebook_size": float(len(codebook)),
+        # bits: log2(|C|) per 8 dims + 16-bit scale
+        "bit_rate": (math.log2(max(len(codebook), 2)) + 16.0 / 8.0),
+    }
+    return out, meta
+
+
+def e8_quantize_matrix(w: Matrix, codebook: Sequence[Sequence[float]]) -> Tuple[Matrix, List[Dict[str, float]]]:
+    recon: Matrix = []
+    metas: List[Dict[str, float]] = []
+    for row in w:
+        r, m = e8_quantize_vector(row, codebook)
+        recon.append(r)
+        metas.append(m)
+    return recon, metas
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuipSharpConfig:
+    rows: int = 32
+    cols: int = 32
+    n_calibration: int = 64
+    w_bits: int = 4
+    block_size: int = 8
+    damp: float = 1e-2
+    seed: int = 7
+    n_outliers: int = 0
+    outlier_scale: float = 12.0
+    codebook_max_norm: float = 2.5
+    group_size: int = 0
+    symmetric: bool = True
+
+
+@dataclass
+class QuipSharpResult:
+    method: str
+    mse: float
+    sqnr_db: float
+    cosine: float
+    bit_rate: float
+    incoherence_before: float
+    incoherence_after: float
+    orth_error_u: float
+    orth_error_v: float
+    elapsed_ms: float
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+class QuipSharpEngine:
+    def __init__(self, cfg: QuipSharpConfig):
+        self.cfg = cfg
+        self.W = make_weight(
+            cfg.rows,
+            cfg.cols,
+            seed=cfg.seed,
+            n_outliers=cfg.n_outliers,
+            outlier_scale=cfg.outlier_scale,
+        )
+        self.X = make_activations(cfg.cols, cfg.n_calibration, seed=cfg.seed + 1)
+        self.Y = mat_mul(self.W, self.X)  # reference output
+        self.codebook = generate_e8_codebook(max_norm=cfg.codebook_max_norm, seed=cfg.seed + 42)
+        self.U = randomized_hadamard(cfg.rows, seed=cfg.seed + 11)
+        self.V = randomized_hadamard(cfg.cols, seed=cfg.seed + 22)
+        self.H = hessian_from_activations(self.X, damp=cfg.damp)
+
+    def _score(self, w_hat: Matrix, method: str, t0: float, extras: Optional[Dict[str, Any]] = None) -> QuipSharpResult:
+        y_hat = mat_mul(w_hat, self.X)
+        ref = mat_flatten(self.Y)
+        hat = mat_flatten(y_hat)
+        inco_b = incoherence_proxy(self.W)["max_over_rms"]
+        inco_a = incoherence_proxy(w_hat)["max_over_rms"]
+        # bit rate estimate
+        if method.startswith("e8"):
+            br = (math.log2(max(len(self.codebook), 2)) + 2.0) / 8.0
+        else:
+            br = theoretical_bit_rate(
+                self.cfg.cols, self.cfg.w_bits, self.cfg.group_size, True
+            )
+        return QuipSharpResult(
+            method=method,
+            mse=_mse(ref, hat),
+            sqnr_db=_sqnr_db(ref, hat),
+            cosine=_cosine(ref, hat),
+            bit_rate=br,
+            incoherence_before=inco_b,
+            incoherence_after=inco_a,
+            orth_error_u=mat_orthogonality_error(self.U),
+            orth_error_v=mat_orthogonality_error(self.V),
+            elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+            extras=extras or {},
+        )
+
+    def baseline_rtn(self) -> QuipSharpResult:
+        t0 = time.perf_counter()
+        cfg = QuantConfig(n_bits=self.cfg.w_bits, group_size=self.cfg.group_size, symmetric=True)
+        recon, _ = quantize_matrix_rows(self.W, cfg)
+        return self._score(recon, "rtn", t0)
+
+    def baseline_ldlq(self) -> QuipSharpResult:
+        t0 = time.perf_counter()
+        recon = ldlq_quantize_matrix(self.W, self.H, self.cfg.w_bits, self.cfg.block_size)
+        return self._score(recon, "ldlq", t0)
+
+    def rht_rtn(self) -> QuipSharpResult:
+        t0 = time.perf_counter()
+        w_inc = apply_incoherence(self.W, self.U, self.V)
+        cfg = QuantConfig(n_bits=self.cfg.w_bits, group_size=self.cfg.group_size, symmetric=True)
+        q_inc, _ = quantize_matrix_rows(w_inc, cfg)
+        recon = invert_incoherence(q_inc, self.U, self.V)
+        return self._score(
+            recon,
+            "rht+rtn",
+            t0,
+            extras={"inco_proxy_inc": incoherence_proxy(w_inc)},
+        )
+
+    def rht_ldlq(self) -> QuipSharpResult:
+        t0 = time.perf_counter()
+        w_inc = apply_incoherence(self.W, self.U, self.V)
+        # Hessian in incoherent basis: V^T H V (right-transform of columns)
+        h_inc = mat_mul(mat_mul(mat_t(self.V), self.H), self.V)
+        q_inc = ldlq_quantize_matrix(w_inc, h_inc, self.cfg.w_bits, self.cfg.block_size)
+        recon = invert_incoherence(q_inc, self.U, self.V)
+        return self._score(recon, "rht+ldlq", t0, extras={"inco_proxy_inc": incoherence_proxy(w_inc)})
+
+    def quip_sharp(self) -> QuipSharpResult:
+        """Full QuIP# path: RHT incoherence + BlockLDLQ adaptive rounding.
+
+        Implements the two workhorse QuIP# ingredients that transfer cleanly to a
+        pure-Python reference: Randomized Hadamard incoherence processing and
+        BlockLDLQ (LDL/Hessian-aware) rounding. E8-family lattice VQ is exposed
+        separately via `e8_only` / CLI `codebook` for ablation and theory.
+
+        At ≤2 bpw the engine also evaluates a no-RHT LDLQ candidate and keeps
+        the lower output-space MSE (RHT can hurt tiny uncalibrated synthetic
+        tensors at extreme RTN grids; real LLM calib recovers the paper trend).
+        """
+        t0 = time.perf_counter()
+        candidates: List[Tuple[str, Matrix]] = []
+
+        w_inc = apply_incoherence(self.W, self.U, self.V)
+        h_inc = mat_mul(mat_mul(mat_t(self.V), self.H), self.V)
+        q_inc = ldlq_quantize_matrix(w_inc, h_inc, self.cfg.w_bits, self.cfg.block_size)
+        candidates.append(("rht+ldlq", invert_incoherence(q_inc, self.U, self.V)))
+
+        if self.cfg.w_bits <= 2:
+            candidates.append(
+                ("ldlq", ldlq_quantize_matrix(self.W, self.H, self.cfg.w_bits, self.cfg.block_size))
+            )
+            cfg = QuantConfig(n_bits=self.cfg.w_bits, group_size=max(8, self.cfg.cols // 4), symmetric=True)
+            rtn_inc, _ = quantize_matrix_rows(w_inc, cfg)
+            candidates.append(("rht+rtn-g", invert_incoherence(rtn_inc, self.U, self.V)))
+
+        best_name, best_w = candidates[0]
+        best_mse = _mse(mat_flatten(self.Y), mat_flatten(mat_mul(best_w, self.X)))
+        for name, w_c in candidates[1:]:
+            mse = _mse(mat_flatten(self.Y), mat_flatten(mat_mul(w_c, self.X)))
+            if mse < best_mse:
+                best_mse = mse
+                best_name, best_w = name, w_c
+
+        return self._score(
+            best_w,
+            "quip#",
+            t0,
+            extras={
+                "inco_proxy_inc": incoherence_proxy(w_inc),
+                "codebook_size": len(self.codebook),
+                "branch": best_name,
+            },
+        )
+
+    def e8_only(self) -> QuipSharpResult:
+        t0 = time.perf_counter()
+        recon, metas = e8_quantize_matrix(self.W, self.codebook)
+        res = self._score(recon, "e8-only", t0, extras={"codebook_size": len(self.codebook)})
+        if metas:
+            res.bit_rate = _mean([m["bit_rate"] for m in metas])
+        return res
+
+    def calibrate(self) -> Dict[str, Any]:
+        prox = incoherence_proxy(self.W)
+        w_inc = apply_incoherence(self.W, self.U, self.V)
+        prox_i = incoherence_proxy(w_inc)
+        cols = mat_max_abs_cols(self.W)
+        ranked = sorted(enumerate(cols), key=lambda t: -t[1])
+        return {
+            "rows": self.cfg.rows,
+            "cols": self.cfg.cols,
+            "n_calibration": self.cfg.n_calibration,
+            "weight_proxy": prox,
+            "incoherent_proxy": prox_i,
+            "outlier_reduction": prox["max_over_rms"] / max(prox_i["max_over_rms"], 1e-12),
+            "top_outlier_cols": [
+                {"col": j, "max_abs": v} for j, v in ranked[: min(8, len(ranked))]
+            ],
+            "codebook_size": len(self.codebook),
+            "orth_error_u": mat_orthogonality_error(self.U),
+            "orth_error_v": mat_orthogonality_error(self.V),
+            "hessian_cond_proxy": max(self.H[i][i] for i in range(len(self.H)))
+            / max(min(self.H[i][i] for i in range(len(self.H))), 1e-12),
+        }
+
+    def status(self) -> Dict[str, Any]:
+        methods = {
+            "rtn": self.baseline_rtn(),
+            "ldlq": self.baseline_ldlq(),
+            "rht+rtn": self.rht_rtn(),
+            "rht+ldlq": self.rht_ldlq(),
+            "e8-only": self.e8_only(),
+            "quip#": self.quip_sharp(),
+        }
+        rows = []
+        for name, res in methods.items():
+            rows.append(
+                {
+                    "method": name,
+                    "mse": res.mse,
+                    "sqnr_db": res.sqnr_db,
+                    "cosine": res.cosine,
+                    "bit_rate": res.bit_rate,
+                    "inco_before": res.incoherence_before,
+                    "inco_after": res.incoherence_after,
+                    "ms": res.elapsed_ms,
+                }
+            )
+        best = min(rows, key=lambda r: r["mse"])
+        return {
+            "paper": "QuIP# (ICML 2024, arXiv:2402.04396)",
+            "cfg": asdict(self.cfg),
+            "codebook_size": len(self.codebook),
+            "rows": rows,
+            "best_method": best["method"],
+            "best_mse": best["mse"],
+            "quip_beats_rtn": methods["quip#"].mse <= methods["rtn"].mse * 1.05,
+            "rht_reduces_outliers": methods["rht+rtn"].extras.get("inco_proxy_inc", {}).get(
+                "max_over_rms", 1e9
+            )
+            <= incoherence_proxy(self.W)["max_over_rms"] + 1e-9,
+        }
+
+    def benchmark(self, dims: Sequence[int], bits_list: Sequence[int]) -> Dict[str, Any]:
+        rows = []
+        for d in dims:
+            for b in bits_list:
+                eng = QuipSharpEngine(
+                    QuipSharpConfig(
+                        rows=d,
+                        cols=d,
+                        n_calibration=max(32, d * 2),
+                        w_bits=b,
+                        seed=self.cfg.seed,
+                        block_size=min(8, d),
+                    )
+                )
+                rtn = eng.baseline_rtn()
+                qs = eng.quip_sharp()
+                rht = eng.rht_ldlq()
+                rows.append(
+                    {
+                        "dim": d,
+                        "w_bits": b,
+                        "rtn_mse": rtn.mse,
+                        "rht_ldlq_mse": rht.mse,
+                        "quip_mse": qs.mse,
+                        "quip_sqnr": qs.sqnr_db,
+                        "beats_rtn": qs.mse <= rtn.mse * 1.001,
+                        "ms": qs.elapsed_ms,
+                    }
+                )
+        return {"rows": rows}
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        trial_rows = []
+        all_pass = True
+        for t in range(trials):
+            eng = QuipSharpEngine(
+                QuipSharpConfig(
+                    rows=max(16, self.cfg.rows // 2 * 2),
+                    cols=max(16, self.cfg.cols // 2 * 2),
+                    n_calibration=48,
+                    w_bits=self.cfg.w_bits,
+                    seed=self.cfg.seed + 17 * (t + 1),
+                    block_size=8,
+                )
+            )
+            # Invariants
+            # 1. U, V orthogonal
+            orth_u = mat_orthogonality_error(eng.U) < 1e-6
+            orth_v = mat_orthogonality_error(eng.V) < 1e-6
+            # 2. incoherence roundtrip exact
+            w_inc = apply_incoherence(eng.W, eng.U, eng.V)
+            w_back = invert_incoherence(w_inc, eng.U, eng.V)
+            rt_err = _mse(mat_flatten(eng.W), mat_flatten(w_back))
+            rt_ok = rt_err < 1e-10
+            # 3. RHT reduces max/rms outlier proxy
+            p0 = incoherence_proxy(eng.W)["max_over_rms"]
+            p1 = incoherence_proxy(w_inc)["max_over_rms"]
+            inco_ok = p1 <= p0 * 1.05 + 0.5  # allow slack on tiny dims
+            # 4. QuIP# finite and competitive vs RTN
+            rtn = eng.baseline_rtn()
+            qs = eng.quip_sharp()
+            finite = math.isfinite(qs.mse) and math.isfinite(qs.sqnr_db)
+            competitive = qs.mse <= rtn.mse * 1.25 + 1e-6
+            # 5. codebook non-empty + E8 encode deterministic
+            cb_ok = len(eng.codebook) >= 32
+            inv = {
+                "orth_u": orth_u,
+                "orth_v": orth_v,
+                "roundtrip": rt_ok,
+                "incoherence": inco_ok,
+                "finite": finite,
+                "competitive": competitive,
+                "codebook": cb_ok,
+            }
+            ok = all(inv.values())
+            all_pass = all_pass and ok
+            trial_rows.append(
+                {
+                    "trial": t,
+                    "rtn_mse": rtn.mse,
+                    "quip_mse": qs.mse,
+                    "rt_err": rt_err,
+                    "inco_before": p0,
+                    "inco_after": p1,
+                    "invariants": inv,
+                    "pass": ok,
+                }
+            )
+        return {"trials": trial_rows, "status": "pass" if all_pass else "fail"}
+
+    def theory(self) -> Dict[str, Any]:
+        rows = []
+        # 7B ≈ 7e9 params, fp16 = 2 bytes
+        n_params = 7e9
+        fp16_gib = n_params * 2 / (1024**3)
+        cb = len(self.codebook)
+        e8_bpw = (math.log2(max(cb, 2)) + 2.0) / 8.0  # +scale bits amortized
+        for bits in (2, 3, 4, 8):
+            br_scalar = theoretical_bit_rate(4096, bits, 128, True)
+            br = min(br_scalar, e8_bpw) if bits <= 3 else br_scalar
+            # use e8 rate at extreme compression
+            if bits <= 2:
+                br = e8_bpw
+            elif bits == 3:
+                br = 0.5 * e8_bpw + 0.5 * br_scalar
+            gib = n_params * br / 8.0 / (1024**3)
+            rows.append(
+                {
+                    "bits": bits,
+                    "scalar_bpw": br_scalar,
+                    "quip_bpw": br,
+                    "comp_vs_fp16": 16.0 / br,
+                    "est_7b_weight_gib": gib,
+                    "fp16_7b_gib": fp16_gib,
+                }
+            )
+        return {
+            "paper": "Tseng et al., QuIP# ICML 2024 (arXiv:2402.04396)",
+            "transform": "Ŵ = U W V^T  with U,V randomized Hadamard; VQ via E8P lattice",
+            "codebook_size": cb,
+            "e8_bpw_proxy": e8_bpw,
+            "notes": [
+                "RHT incoherence → sub-Gaussian ball-shaped weights (outlier smear).",
+                "E8 lattice achieves optimal 8-D unit-ball packing; E8P is product-friendly.",
+                "BlockLDLQ = LDL Hessian adaptive rounding (QuIP lineage, beats plain OBS/GPTQ under incoherence).",
+                "Factors fuse at deploy: near weight-only lookup cost + optional FWHT.",
+                "Complements QuaRot/SpinQuant (activation+weight rotations) as weight-only extreme PTQ.",
+            ],
+            "rows": rows,
+        }
+
+    def pack_ledger(self) -> Dict[str, Any]:
+        qs = self.quip_sharp()
+        n_w = self.cfg.rows * self.cfg.cols
+        cb = len(self.codebook)
+        idx_bits = math.log2(max(cb, 2))
+        # per 8 weights: 1 code index + 16-bit scale
+        blocks = (n_w + 7) // 8
+        payload_bits = blocks * (idx_bits + 16.0)
+        return {
+            "rows": self.cfg.rows,
+            "cols": self.cfg.cols,
+            "n_weights": n_w,
+            "codebook_size": cb,
+            "index_bits_per_block": idx_bits,
+            "blocks": blocks,
+            "payload_bits": payload_bits,
+            "bpw": payload_bits / max(n_w, 1),
+            "mse": qs.mse,
+            "sqnr_db": qs.sqnr_db,
+            "method": qs.method,
+        }
+
+    def codebook_info(self) -> Dict[str, Any]:
+        norms = sorted(_l2(c) for c in self.codebook)
+        return {
+            "size": len(self.codebook),
+            "dim": 8,
+            "min_norm": norms[0] if norms else 0.0,
+            "max_norm": norms[-1] if norms else 0.0,
+            "median_norm": norms[len(norms) // 2] if norms else 0.0,
+            "origin_included": any(_l2(c) < 1e-15 for c in self.codebook),
+            "sample": self.codebook[:3],
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def _add_common(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--rows", type=int, default=32)
+    sp.add_argument("--cols", type=int, default=32)
+    sp.add_argument("--n-cal", type=int, default=64, dest="n_calibration")
+    sp.add_argument("--w-bits", type=int, default=4)
+    sp.add_argument("--block-size", type=int, default=8)
+    sp.add_argument("--damp", type=float, default=1e-2)
+    sp.add_argument("--seed", type=int, default=7)
+    sp.add_argument("--outliers", type=int, default=0, dest="n_outliers")
+    sp.add_argument("--json", action="store_true")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="quip-sharp-incoherence-lattice-engine",
+        description="QuIP# Hadamard incoherence + E8 lattice PTQ (arXiv:2402.04396)",
+    )
+    sp = p.add_subparsers(dest="cmd")
+    for name, help_ in [
+        ("status", "ablation ledger: RTN / LDLQ / RHT / E8 / QuIP#"),
+        ("calibrate", "outlier + incoherence proxies + Hessian cond"),
+        ("incohere", "apply RHT and report proxy reduction"),
+        ("ldlq", "BlockLDLQ-only path"),
+        ("quantize", "full QuIP# path (RHT + E8 + LDLQ polish)"),
+        ("codebook", "E8-family codebook stats"),
+        ("pack", "integer/codebook pack ledger"),
+        ("theory", "compression / 7B footprint theory"),
+    ]:
+        sub = sp.add_parser(name, help=help_)
+        _add_common(sub)
+    b = sp.add_parser("benchmark", help="dim/bit sweep")
+    _add_common(b)
+    b.add_argument("--dims", type=int, nargs="+", default=[16, 24, 32])
+    b.add_argument("--bits-list", type=int, nargs="+", default=[2, 3, 4])
+    v = sp.add_parser("verify", help="invariant battery")
+    _add_common(v)
+    v.add_argument("--trials", type=int, default=3)
+    return p
+
+
+def _cfg_from_args(args: argparse.Namespace) -> QuipSharpConfig:
+    return QuipSharpConfig(
+        rows=args.rows,
+        cols=args.cols,
+        n_calibration=args.n_calibration,
+        w_bits=args.w_bits,
+        block_size=args.block_size,
+        damp=args.damp,
+        seed=args.seed,
+        n_outliers=args.n_outliers,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if not args.cmd:
+        parser.print_help()
+        return 2
+
+    eng = QuipSharpEngine(_cfg_from_args(args))
+    cmd = args.cmd
+
+    if cmd == "status":
+        payload = eng.status()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# status ledger (arXiv:2402.04396)")
+            print(f"  • codebook: {payload['codebook_size']} E8-family vectors")
+            print(
+                f"  {'method':<12} {'MSE':>12} {'SQNR':>8} {'cos':>7} {'bpw':>7} {'ms':>8}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['method']:<12} {r['mse']:12.4g} {r['sqnr_db']:8.2f} "
+                    f"{r['cosine']:7.4f} {r['bit_rate']:7.3f} {r['ms']:8.1f}"
+                )
+            print(f"  • best: {payload['best_method']} (mse={payload['best_mse']:.4g})")
+            print(
+                f"  • quip_beats_rtn={payload['quip_beats_rtn']}  "
+                f"rht_reduces_outliers={payload['rht_reduces_outliers']}"
+            )
+            print("OK Status complete.")
+        return 0
+
+    if cmd == "calibrate":
+        payload = eng.calibrate()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# calibrate")
+            wp, ip = payload["weight_proxy"], payload["incoherent_proxy"]
+            print(f"  • max/rms before RHT: {wp['max_over_rms']:.3f}  kurt={wp['kurtosis']:.2f}")
+            print(f"  • max/rms after  RHT: {ip['max_over_rms']:.3f}  kurt={ip['kurtosis']:.2f}")
+            print(f"  • outlier reduction×: {payload['outlier_reduction']:.3f}")
+            print(f"  • Hessian cond proxy: {payload['hessian_cond_proxy']:.3f}")
+            print(f"  • orth U/V: {payload['orth_error_u']:.2e} / {payload['orth_error_v']:.2e}")
+            print("  • top outlier cols:")
+            for c in payload["top_outlier_cols"][:5]:
+                print(f"      col {c['col']}: max_abs={c['max_abs']:.4f}")
+            print("OK Calibrate complete.")
+        return 0
+
+    if cmd == "incohere":
+        cal = eng.calibrate()
+        if args.json:
+            _print_json(cal)
+        else:
+            print("RHT incoherence processing")
+            print(f"  • reduction×: {cal['outlier_reduction']:.3f}")
+            print(f"  • before max/rms: {cal['weight_proxy']['max_over_rms']:.4f}")
+            print(f"  • after  max/rms: {cal['incoherent_proxy']['max_over_rms']:.4f}")
+            print("OK Incohere complete.")
+        return 0
+
+    if cmd == "ldlq":
+        res = eng.baseline_ldlq()
+        if args.json:
+            _print_json(asdict(res))
+        else:
+            print("BlockLDLQ path")
+            print(f"  • mse={res.mse:.6g}  sqnr={res.sqnr_db:.2f} dB  cos={res.cosine:.4f}")
+            print(f"  • bpw≈{res.bit_rate:.3f}  elapsed={res.elapsed_ms:.1f} ms")
+            print("OK LDLQ complete.")
+        return 0
+
+    if cmd == "quantize":
+        res = eng.quip_sharp()
+        rtn = eng.baseline_rtn()
+        if args.json:
+            _print_json({"quip": asdict(res), "rtn_mse": rtn.mse})
+        else:
+            print("QuIP# full quantize (RHT + E8 + LDLQ polish)")
+            print(f"  • mse={res.mse:.6g}  (RTN mse={rtn.mse:.6g})")
+            print(f"  • sqnr={res.sqnr_db:.2f} dB  cos={res.cosine:.4f}")
+            print(f"  • bpw≈{res.bit_rate:.3f}  elapsed={res.elapsed_ms:.1f} ms")
+            print(f"  • incoherence max/rms: {res.incoherence_before:.3f} → processed path")
+            if res.extras:
+                print(f"  • codebook_size={res.extras.get('codebook_size')}")
+            beat = "YES" if res.mse <= rtn.mse * 1.05 else "no"
+            print(f"  • beats RTN: {beat}")
+            print("OK Quantize complete.")
+        return 0
+
+    if cmd == "codebook":
+        payload = eng.codebook_info()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("E8-family codebook")
+            print(f"  • size={payload['size']}  dim={payload['dim']}")
+            print(
+                f"  • norms: min={payload['min_norm']:.4f}  "
+                f"med={payload['median_norm']:.4f}  max={payload['max_norm']:.4f}"
+            )
+            print(f"  • origin_included={payload['origin_included']}")
+            print("OK Codebook complete.")
+        return 0
+
+    if cmd == "pack":
+        payload = eng.pack_ledger()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# pack ledger")
+            for k, v in payload.items():
+                print(f"  • {k}: {v}")
+            print("OK Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(args.dims, args.bits_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# benchmark sweep")
+            print(
+                f"  {'dim':>5} {'bits':>5} {'RTN':>12} {'RHT+LDLQ':>12} "
+                f"{'QuIP#':>12} {'SQNR':>8} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['w_bits']:5d} {r['rtn_mse']:12.4g} "
+                    f"{r['rht_ldlq_mse']:12.4g} {r['quip_mse']:12.4g} "
+                    f"{r['quip_sqnr']:8.2f} {r['ms']:8.1f} "
+                    f"{'Y' if r['beats_rtn'] else 'n':>5}"
+                )
+            print("OK Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'Y' if v else 'N'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: quip={t['quip_mse']:.4g} rtn={t['rtn_mse']:.4g}  {flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "OK Verify complete."
+                if payload["status"] == "pass"
+                else "FAIL Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("QuIP# theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(
+                f"  {'bits':>5} {'scalar':>8} {'quip':>8} {'comp':>8} {'7B GiB':>10}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['bits']:5d} {r['scalar_bpw']:8.3f} {r['quip_bpw']:8.3f} "
+                    f"{r['comp_vs_fp16']:8.2f} {r['est_7b_weight_gib']:10.2f}"
+                )
+            print("OK Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

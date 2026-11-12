@@ -1972,5 +1972,25 @@
       "W4A8",
       "Inference"
     ]
+  },
+  {
+    "id": "quip-sharp-incoherence-lattice-engine",
+    "title": "QuIP#: Hadamard Incoherence + E8 Lattice PTQ Engine (ICML 2024, arXiv:2402.04396)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Weight-only extreme PTQ via Randomized Hadamard Transform incoherence, E8-family lattice vector quantization, and BlockLDLQ Hessian adaptive rounding \u2014 SOTA-class 2\u20134 bpw compression reference (Tseng et al., Cornell RelaxML).",
+    "cli": "quip-sharp-incoherence-lattice-engine",
+    "evolved_at": "2026-11-12T20:47:09.716596+05:30",
+    "tags": [
+      "Inference",
+      "QuIP#",
+      "Incoherence",
+      "Hadamard",
+      "E8Lattice",
+      "LDLQ",
+      "Quantization",
+      "PTQ",
+      "LLM"
+    ]
   }
 ]
