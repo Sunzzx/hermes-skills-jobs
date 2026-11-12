@@ -1,0 +1,926 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""AWQ: Activation-aware Weight Quantization Engine.
+
+Paper: Lin et al., "AWQ: Activation-aware Weight Quantization for LLM
+Compression and Acceleration" (MLSys 2024, arXiv:2306.00978).
+
+Core idea
+---------
+Not all weights are equal. Channels that multiply large-magnitude activations
+dominate the layer output error under low-bit quantization. AWQ:
+
+  1. measures per-input-channel activation saliency  s_j = E[|X_j|]
+  2. applies an equivalent scale transform for alpha in [0, 1]:
+         W'_{:,j} = W_{:,j} * s_j^{alpha}
+         X'_j     = X_j     / s_j^{alpha}
+     so W' X' = W X exactly in fp
+  3. group-wise asymmetric RTN-quantizes the *scaled* weights W'
+  4. grid-searches alpha to minimize ||W X - dequant(W'_q) X'||_F^2
+  5. folds s^{alpha} into the stored scales (or prior LayerNorm gamma)
+
+Unlike GPTQ (OBS residual redistribution), AWQ needs no Hessian inverse —
+only activation statistics + a cheap alpha grid. Production stacks (vLLM,
+TGI, llama.cpp, AutoAWQ) ship this as the default INT4 path for many models.
+
+Pure-Python reference (zero third-party deps):
+
+  * dense GEMM / Frobenius helpers
+  * activation saliency (mean-abs, RMS, max)
+  * group asymmetric / symmetric RTN + dequant
+  * equivalent channel scale transform
+  * alpha grid search with MSE / SQNR / cosine ledgers
+  * RTN baseline (alpha=0) comparison
+  * theoretical bit-rate & 7B footprint tables
+  * CLI: status | calibrate | search | quantize | benchmark | verify | theory | pack
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if p <= 0:
+        return sorted_vals[0]
+    if p >= 100:
+        return sorted_vals[-1]
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    f = int(math.floor(k))
+    c = min(f + 1, len(sorted_vals) - 1)
+    if f == c:
+        return sorted_vals[f]
+    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+
+
+# ---------------------------------------------------------------------------
+# Dense matrix primitives (row-major List[List[float]])
+# ---------------------------------------------------------------------------
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_copy(a: Matrix) -> Matrix:
+    return [row[:] for row in a]
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    r, c = len(a), len(a[0])
+    out = mat_zeros(c, r)
+    for i in range(r):
+        for j in range(c):
+            out[j][i] = a[i][j]
+    return out
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    r, c = len(a), len(b[0])
+    out = mat_zeros(r, c)
+    bt = mat_t(b)
+    for i in range(r):
+        ai = a[i]
+        for j in range(c):
+            out[i][j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_scale_cols(w: Matrix, scales: Sequence[float]) -> Matrix:
+    """W'_{:,j} = W_{:,j} * scales[j]."""
+    rows, cols = len(w), len(w[0])
+    assert len(scales) == cols
+    out = mat_zeros(rows, cols)
+    for i in range(rows):
+        wi = w[i]
+        oi = out[i]
+        for j in range(cols):
+            oi[j] = wi[j] * scales[j]
+    return out
+
+
+def mat_scale_rows(x: Matrix, scales: Sequence[float]) -> Matrix:
+    """For X shaped (cols, n_cal): X'_j,: = X_j,: / scales[j]."""
+    rows, cols = len(x), len(x[0])
+    assert len(scales) == rows
+    out = mat_zeros(rows, cols)
+    for i in range(rows):
+        inv = 1.0 / scales[i] if abs(scales[i]) > 1e-18 else 1.0
+        xi = x[i]
+        oi = out[i]
+        for j in range(cols):
+            oi[j] = xi[j] * inv
+    return out
+
+
+def mat_fro(a: Matrix) -> float:
+    s = 0.0
+    for row in a:
+        for v in row:
+            s += v * v
+    return math.sqrt(s)
+
+
+def mat_flatten(a: Matrix) -> Vector:
+    out: Vector = []
+    for row in a:
+        out.extend(row)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Synthetic calibration data
+# ---------------------------------------------------------------------------
+
+def make_weight(rows: int, cols: int, seed: int = 42) -> Matrix:
+    """Gaussian weights with a few large-magnitude channels (salient)."""
+    rng = random.Random(seed)
+    w = mat_zeros(rows, cols)
+    for i in range(rows):
+        for j in range(cols):
+            w[i][j] = rng.gauss(0.0, 0.35)
+    n_sal = max(1, cols // 8)
+    for k in range(n_sal):
+        j = (k * 7 + 3) % cols
+        boost = 2.5 + 0.4 * k
+        for i in range(rows):
+            w[i][j] *= boost
+    return w
+
+
+def make_activations(cols: int, n_cal: int, seed: int = 7) -> Matrix:
+    """X shaped (cols, n_cal). Heavy-tailed on the same salient channels."""
+    rng = random.Random(seed)
+    x = mat_zeros(cols, n_cal)
+    n_sal = max(1, cols // 8)
+    sal = {((k * 7 + 3) % cols) for k in range(n_sal)}
+    for j in range(cols):
+        scale = 3.5 if j in sal else 0.8
+        for t in range(n_cal):
+            v = rng.gauss(0.0, scale)
+            if rng.random() < 0.02:
+                v *= 6.0
+            x[j][t] = v
+    return x
+
+
+# ---------------------------------------------------------------------------
+# Activation saliency
+# ---------------------------------------------------------------------------
+
+def activation_saliency(x: Matrix, mode: str = "mean_abs") -> Vector:
+    """Per-input-channel saliency s_j from X (cols x n_cal)."""
+    cols = len(x)
+    s = [0.0] * cols
+    for j in range(cols):
+        row = x[j]
+        if mode == "mean_abs":
+            s[j] = _mean([abs(v) for v in row])
+        elif mode == "rms":
+            s[j] = math.sqrt(_mean([v * v for v in row]))
+        elif mode == "max":
+            s[j] = max(abs(v) for v in row) if row else 0.0
+        else:
+            raise ValueError(f"unknown saliency mode: {mode}")
+        s[j] = max(s[j], 1e-8)
+    return s
+
+
+def normalize_saliency(s: Vector) -> Vector:
+    """Normalize so geometric mean ~ 1 (stable alpha powers)."""
+    logs = [math.log(max(v, 1e-12)) for v in s]
+    gmean = math.exp(_mean(logs))
+    gmean = max(gmean, 1e-12)
+    return [v / gmean for v in s]
+
+
+# ---------------------------------------------------------------------------
+# Group RTN quantizer
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 4
+    group_size: int = 128
+    symmetric: bool = False  # AWQ default: asymmetric
+    clip_ratio: float = 1.0
+
+
+@dataclass
+class QuantizedVector:
+    q: List[int]
+    scales: List[float]
+    zeros: List[float]
+    n_bits: int
+    group_size: int
+    symmetric: bool
+
+    def bit_rate(self) -> float:
+        n = len(self.q)
+        if n == 0:
+            return 0.0
+        n_g = len(self.scales)
+        meta_bits = n_g * 16 * (1 if self.symmetric else 2)
+        return (n * self.n_bits + meta_bits) / n
+
+    def compression_ratio(self, ref_bits: float = 16.0) -> float:
+        br = self.bit_rate()
+        return ref_bits / br if br > 1e-12 else 0.0
+
+
+def _group_params(vals: Sequence[float], cfg: QuantConfig) -> Tuple[float, float]:
+    """Return (scale, zero) for one group. q = round(x/scale + zero)."""
+    qmax = (1 << cfg.n_bits) - 1
+    if not vals:
+        return 1.0, 0.0
+    lo = min(vals)
+    hi = max(vals)
+    if cfg.clip_ratio < 1.0:
+        mid = 0.5 * (lo + hi)
+        half = 0.5 * (hi - lo) * cfg.clip_ratio
+        lo, hi = mid - half, mid + half
+    if cfg.symmetric:
+        m = max(abs(lo), abs(hi), 1e-12)
+        scale = (2.0 * m) / max(qmax, 1)
+        zero = (qmax + 1) / 2.0
+        return max(scale, 1e-12), zero
+    if hi - lo < 1e-12:
+        return 1e-8, float(-lo)
+    scale = (hi - lo) / max(qmax, 1)
+    scale = max(scale, 1e-12)
+    zero = _clamp(-lo / scale, 0.0, float(qmax))
+    return scale, zero
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantizedVector:
+    n = len(x)
+    gs = cfg.group_size if cfg.group_size > 0 else n
+    q: List[int] = [0] * n
+    scales: List[float] = []
+    zeros: List[float] = []
+    qmax = (1 << cfg.n_bits) - 1
+    for start in range(0, n, gs):
+        end = min(start + gs, n)
+        chunk = list(x[start:end])
+        scale, zero = _group_params(chunk, cfg)
+        scales.append(scale)
+        zeros.append(zero)
+        for i, v in enumerate(chunk):
+            qi = int(round(v / scale + zero))
+            q[start + i] = int(_clamp(qi, 0, qmax))
+    return QuantizedVector(
+        q=q, scales=scales, zeros=zeros, n_bits=cfg.n_bits,
+        group_size=gs, symmetric=cfg.symmetric,
+    )
+
+
+def dequantize_vector(qt: QuantizedVector) -> Vector:
+    n = len(qt.q)
+    gs = qt.group_size
+    out = [0.0] * n
+    for start in range(0, n, gs):
+        g = start // gs
+        end = min(start + gs, n)
+        scale = qt.scales[g]
+        zero = qt.zeros[g]
+        for i in range(start, end):
+            out[i] = (qt.q[i] - zero) * scale
+    return out
+
+
+def quantize_matrix_rowmajor(w: Matrix, cfg: QuantConfig) -> Tuple[Matrix, List[QuantizedVector]]:
+    """Quantize each row independently with group RTN along the row."""
+    rows, cols = len(w), len(w[0])
+    recon = mat_zeros(rows, cols)
+    packed: List[QuantizedVector] = []
+    for i in range(rows):
+        qt = quantize_vector(w[i], cfg)
+        packed.append(qt)
+        recon[i] = dequantize_vector(qt)
+    return recon, packed
+
+
+def theoretical_bit_rate(n: int, bits: int, group_size: int, symmetric: bool) -> float:
+    gs = group_size if group_size > 0 else n
+    n_g = (n + gs - 1) // gs
+    meta = n_g * 16 * (1 if symmetric else 2)
+    return (n * bits + meta) / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# AWQ core
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AWQConfig:
+    rows: int = 64
+    cols: int = 64
+    n_bits: int = 4
+    group_size: int = 32
+    symmetric: bool = False
+    n_calibration: int = 256
+    saliency_mode: str = "mean_abs"
+    alpha_grid: int = 20
+    alpha_min: float = 0.0
+    alpha_max: float = 1.0
+    clip_ratio: float = 1.0
+    seed: int = 42
+
+
+@dataclass
+class AWQResult:
+    rows: int
+    cols: int
+    n_bits: int
+    group_size: int
+    best_alpha: float
+    mse: float
+    sqnr_db: float
+    cosine: float
+    rtn_mse: float
+    rtn_sqnr_db: float
+    rtn_cosine: float
+    bit_rate: float
+    compression_vs_fp16: float
+    elapsed_ms: float
+    alpha_curve: List[Dict[str, float]] = field(default_factory=list)
+    saliency_stats: Dict[str, float] = field(default_factory=dict)
+    invariants: Dict[str, bool] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class AWQEngine:
+    def __init__(self, cfg: AWQConfig):
+        self.cfg = cfg
+        self.W: Matrix = make_weight(cfg.rows, cfg.cols, seed=cfg.seed)
+        self.X: Matrix = make_activations(cfg.cols, cfg.n_calibration, seed=cfg.seed + 1)
+        self.s_raw: Vector = []
+        self.s_norm: Vector = []
+        self._last: Optional[AWQResult] = None
+        self._W_q: Optional[Matrix] = None
+        self._scales_applied: Optional[Vector] = None
+
+    def calibrate(self) -> Vector:
+        self.s_raw = activation_saliency(self.X, mode=self.cfg.saliency_mode)
+        self.s_norm = normalize_saliency(self.s_raw)
+        return self.s_norm
+
+    def saliency_stats(self) -> Dict[str, float]:
+        if not self.s_raw:
+            self.calibrate()
+        s = sorted(self.s_raw)
+        return {
+            "min": s[0],
+            "p50": _percentile(s, 50),
+            "p90": _percentile(s, 90),
+            "p99": _percentile(s, 99),
+            "max": s[-1],
+            "mean": _mean(self.s_raw),
+            "ratio_max_mean": s[-1] / max(_mean(self.s_raw), 1e-12),
+            "n_channels": float(len(s)),
+        }
+
+    def _alpha_scales(self, alpha: float) -> Vector:
+        if not self.s_norm:
+            self.calibrate()
+        return [max(v ** alpha, 1e-8) for v in self.s_norm]
+
+    def _output_fp(self) -> Matrix:
+        return mat_mul(self.W, self.X)
+
+    def _reconstruct_at_alpha(self, alpha: float) -> Tuple[Matrix, float, QuantizedVector]:
+        cfg = self.cfg
+        scales = self._alpha_scales(alpha)
+        W_s = mat_scale_cols(self.W, scales)
+        X_s = mat_scale_rows(self.X, scales)
+        qcfg = QuantConfig(
+            n_bits=cfg.n_bits,
+            group_size=cfg.group_size if cfg.group_size > 0 else cfg.cols,
+            symmetric=cfg.symmetric,
+            clip_ratio=cfg.clip_ratio,
+        )
+        W_q, packed = quantize_matrix_rowmajor(W_s, qcfg)
+        Y_hat = mat_mul(W_q, X_s)
+        br = packed[0].bit_rate() if packed else float(cfg.n_bits)
+        return Y_hat, br, packed[0]
+
+    def search_alpha(self) -> Tuple[float, List[Dict[str, float]]]:
+        cfg = self.cfg
+        if not self.s_norm:
+            self.calibrate()
+        Y = self._output_fp()
+        y_flat = mat_flatten(Y)
+        n = max(cfg.alpha_grid, 2)
+        curve: List[Dict[str, float]] = []
+        best_a, best_mse = 0.0, float("inf")
+        for k in range(n):
+            a = cfg.alpha_min + (cfg.alpha_max - cfg.alpha_min) * (k / (n - 1))
+            Y_hat, br, _ = self._reconstruct_at_alpha(a)
+            yh = mat_flatten(Y_hat)
+            mse = _mse(y_flat, yh)
+            sq = _sqnr_db(y_flat, yh)
+            cos = _cosine(y_flat, yh)
+            curve.append({
+                "alpha": a, "mse": mse, "sqnr_db": sq, "cosine": cos, "bit_rate": br,
+            })
+            if mse < best_mse:
+                best_mse = mse
+                best_a = a
+        return best_a, curve
+
+    def quantize(self, alpha: Optional[float] = None) -> AWQResult:
+        t0 = time.perf_counter()
+        if not self.s_norm:
+            self.calibrate()
+        if alpha is None:
+            best_a, curve = self.search_alpha()
+        else:
+            best_a = float(alpha)
+            _, curve = self.search_alpha()
+
+        Y = self._output_fp()
+        y_flat = mat_flatten(Y)
+
+        Y_awq, br, _sample_qt = self._reconstruct_at_alpha(best_a)
+        yh = mat_flatten(Y_awq)
+        mse = _mse(y_flat, yh)
+        sq = _sqnr_db(y_flat, yh)
+        cos = _cosine(y_flat, yh)
+
+        Y_rtn, _, _ = self._reconstruct_at_alpha(0.0)
+        yr = mat_flatten(Y_rtn)
+        rtn_mse = _mse(y_flat, yr)
+        rtn_sq = _sqnr_db(y_flat, yr)
+        rtn_cos = _cosine(y_flat, yr)
+
+        scales = self._alpha_scales(best_a)
+        self._scales_applied = scales
+        W_s = mat_scale_cols(self.W, scales)
+        qcfg = QuantConfig(
+            n_bits=self.cfg.n_bits,
+            group_size=self.cfg.group_size if self.cfg.group_size > 0 else self.cfg.cols,
+            symmetric=self.cfg.symmetric,
+            clip_ratio=self.cfg.clip_ratio,
+        )
+        self._W_q, _ = quantize_matrix_rowmajor(W_s, qcfg)
+
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        sstats = self.saliency_stats()
+        inv = {
+            "finite_mse": math.isfinite(mse),
+            "beats_rtn": mse <= rtn_mse + 1e-15,
+            "cosine_high": cos > 0.9,
+            "alpha_in_range": 0.0 <= best_a <= 1.0 + 1e-9,
+            "bit_rate_sane": 1.0 < br < 20.0,
+            "saliency_positive": sstats["min"] > 0.0,
+        }
+        res = AWQResult(
+            rows=self.cfg.rows,
+            cols=self.cfg.cols,
+            n_bits=self.cfg.n_bits,
+            group_size=self.cfg.group_size,
+            best_alpha=best_a,
+            mse=mse,
+            sqnr_db=sq,
+            cosine=cos,
+            rtn_mse=rtn_mse,
+            rtn_sqnr_db=rtn_sq,
+            rtn_cosine=rtn_cos,
+            bit_rate=br,
+            compression_vs_fp16=16.0 / br if br > 1e-12 else 0.0,
+            elapsed_ms=elapsed,
+            alpha_curve=curve,
+            saliency_stats=sstats,
+            invariants=inv,
+        )
+        self._last = res
+        return res
+
+    def pack_int_weights(self) -> Dict[str, Any]:
+        if self._W_q is None:
+            self.quantize()
+        assert self._W_q is not None
+        qcfg = QuantConfig(
+            n_bits=self.cfg.n_bits,
+            group_size=self.cfg.group_size if self.cfg.group_size > 0 else self.cfg.cols,
+            symmetric=self.cfg.symmetric,
+        )
+        scales = self._scales_applied or self._alpha_scales(
+            self._last.best_alpha if self._last else 0.5
+        )
+        W_s = mat_scale_cols(self.W, scales)
+        qt = quantize_vector(W_s[0], qcfg)
+        return {
+            "rows": self.cfg.rows,
+            "cols": self.cfg.cols,
+            "n_bits": self.cfg.n_bits,
+            "group_size": qcfg.group_size,
+            "bit_rate": qt.bit_rate(),
+            "compression_vs_fp16": qt.compression_ratio(16.0),
+            "int_min": min(qt.q) if qt.q else 0,
+            "int_max": max(qt.q) if qt.q else 0,
+            "packed_sample": qt.q[:16],
+            "best_alpha": self._last.best_alpha if self._last else None,
+            "channel_scales_sample": (self._scales_applied or [])[:8],
+        }
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        results = []
+        all_ok = True
+        base_seed = self.cfg.seed
+        for t in range(trials):
+            cfg = AWQConfig(**{**asdict(self.cfg), "seed": base_seed + 17 * t})
+            eng = AWQEngine(cfg)
+            res = eng.quantize()
+            ok = all(res.invariants.values())
+            all_ok = all_ok and ok
+            results.append({
+                "trial": t,
+                "best_alpha": res.best_alpha,
+                "mse": res.mse,
+                "rtn_mse": res.rtn_mse,
+                "invariants": res.invariants,
+                "ok": ok,
+            })
+        return {"status": "pass" if all_ok else "fail", "trials": results}
+
+    def benchmark(self, dims: Sequence[int], bits_list: Sequence[int]) -> Dict[str, Any]:
+        rows_out = []
+        for d in dims:
+            for b in bits_list:
+                cfg = AWQConfig(
+                    rows=d, cols=d, n_bits=b,
+                    group_size=min(self.cfg.group_size, d),
+                    symmetric=self.cfg.symmetric,
+                    n_calibration=min(self.cfg.n_calibration, max(64, d * 2)),
+                    alpha_grid=self.cfg.alpha_grid,
+                    saliency_mode=self.cfg.saliency_mode,
+                    seed=self.cfg.seed,
+                )
+                eng = AWQEngine(cfg)
+                res = eng.quantize()
+                rows_out.append({
+                    "dim": d, "bits": b, "best_alpha": res.best_alpha,
+                    "mse": res.mse, "rtn_mse": res.rtn_mse,
+                    "sqnr_db": res.sqnr_db, "bit_rate": res.bit_rate,
+                    "compression": res.compression_vs_fp16,
+                    "elapsed_ms": res.elapsed_ms,
+                    "beats_rtn": res.mse <= res.rtn_mse + 1e-15,
+                })
+        return {"rows": rows_out}
+
+    def theory(self) -> Dict[str, Any]:
+        bits_opts = [2, 3, 4, 8]
+        gs_opts = [32, 64, 128]
+        rows = []
+        for bits in bits_opts:
+            for gs in gs_opts:
+                br = theoretical_bit_rate(4096, bits, gs, symmetric=False)
+                bytes_7b = 7e9 * br / 8.0
+                rows.append({
+                    "bits": bits, "group_size": gs, "bit_rate": br,
+                    "comp_vs_fp16": 16.0 / br,
+                    "est_7b_gib": bytes_7b / (1024 ** 3),
+                })
+        return {
+            "paper": "AWQ arXiv:2306.00978 (MLSys 2024)",
+            "transform": "W' = W diag(s^a),  X' = diag(s^{-a}) X,  a* = argmin_a ||WX - Q(W') X'||",
+            "rows": rows,
+            "notes": [
+                "Protects salient weight channels via activation-magnitude scales",
+                "No Hessian / Cholesky — O(G · quant) grid over alpha in [0,1]",
+                "Default production path in vLLM / AutoAWQ / many GGUF exporters",
+                "Complements GPTQ (OBS) and QuaRot (Hadamard rotation)",
+            ],
+        }
+
+    def status(self) -> Dict[str, Any]:
+        res = self.quantize()
+        return {
+            "engine": "awq-activation-aware-weight-quant-engine",
+            "paper": "arXiv:2306.00978 (MLSys 2024)",
+            "config": asdict(self.cfg),
+            "saliency_mode": self.cfg.saliency_mode,
+            "result": res.to_dict(),
+            "theory_preview": self.theory()["rows"][:4],
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=False))
+
+
+def _print_status(eng: AWQEngine) -> None:
+    st = eng.status()
+    res = st["result"]
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║  AWQ Activation-aware Weight Quant Engine (MLSys 2024)      ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
+    print(f"  • Layer shape        : {res['rows']} × {res['cols']}")
+    print(
+        f"  • Precision          : INT{res['n_bits']}  group={res['group_size']}  "
+        f"sym={eng.cfg.symmetric}"
+    )
+    print(f"  • Saliency mode      : {eng.cfg.saliency_mode}")
+    ss = res.get("saliency_stats", {})
+    print(
+        f"  • Saliency           : min={ss.get('min', 0):.4g}  p50={ss.get('p50', 0):.4g}  "
+        f"max={ss.get('max', 0):.4g}  max/mean={ss.get('ratio_max_mean', 0):.2f}"
+    )
+    print(f"  • Best alpha α*      : {res['best_alpha']:.4f}")
+    print(f"  • AWQ  output MSE    : {res['mse']:.6g}")
+    print(f"  • RTN  output MSE    : {res['rtn_mse']:.6g}")
+    print(f"  • AWQ  SQNR          : {res['sqnr_db']:.2f} dB   cosine={res['cosine']:.6f}")
+    print(f"  • RTN  SQNR          : {res['rtn_sqnr_db']:.2f} dB   cosine={res['rtn_cosine']:.6f}")
+    print(
+        f"  • Bit-rate           : {res['bit_rate']:.3f} bits/w  "
+        f"({res['compression_vs_fp16']:.2f}× vs FP16)"
+    )
+    print(f"  • Latency            : {res['elapsed_ms']:.2f} ms")
+    inv = res.get("invariants", {})
+    flags = " ".join(f"{'✓' if v else '✗'}{k}" for k, v in inv.items())
+    print(f"  • Invariants         : {flags}")
+    print("✅ AWQ status ledger ready.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="awq-activation-aware-weight-quant-engine",
+        description="AWQ activation-aware weight quantizer (arXiv:2306.00978)",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--rows", type=int, default=64)
+        sp.add_argument("--cols", type=int, default=64)
+        sp.add_argument("--bits", type=int, default=4)
+        sp.add_argument("--group-size", type=int, default=32)
+        sp.add_argument("--n-cal", type=int, default=256)
+        sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--symmetric", action="store_true")
+        sp.add_argument("--saliency", choices=["mean_abs", "rms", "max"], default="mean_abs")
+        sp.add_argument("--alpha-grid", type=int, default=20)
+        sp.add_argument("--alpha", type=float, default=None, help="Fix alpha; skip search")
+        sp.add_argument("--clip-ratio", type=float, default=1.0)
+        sp.add_argument("--json", action="store_true")
+
+    for name in ("status", "calibrate", "search", "quantize", "pack"):
+        sp = sub.add_parser(name)
+        add_common(sp)
+
+    sp_b = sub.add_parser("benchmark")
+    add_common(sp_b)
+    sp_b.add_argument("--dims", type=int, nargs="+", default=[32, 48, 64])
+    sp_b.add_argument("--bits-list", type=int, nargs="+", default=[3, 4, 8])
+
+    sp_v = sub.add_parser("verify")
+    add_common(sp_v)
+    sp_v.add_argument("--trials", type=int, default=3)
+
+    sp_t = sub.add_parser("theory")
+    add_common(sp_t)
+
+    return p
+
+
+def cfg_from_args(args: argparse.Namespace) -> AWQConfig:
+    return AWQConfig(
+        rows=args.rows,
+        cols=args.cols,
+        n_bits=args.bits,
+        group_size=args.group_size,
+        symmetric=bool(getattr(args, "symmetric", False)),
+        n_calibration=args.n_cal,
+        saliency_mode=getattr(args, "saliency", "mean_abs"),
+        alpha_grid=getattr(args, "alpha_grid", 20),
+        clip_ratio=getattr(args, "clip_ratio", 1.0),
+        seed=args.seed,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not argv:
+        argv = ["status"]
+    args = parser.parse_args(argv)
+    cmd = args.cmd or "status"
+    cfg = cfg_from_args(args)
+    eng = AWQEngine(cfg)
+
+    if cmd == "status":
+        if args.json:
+            _print_json(eng.status())
+        else:
+            _print_status(eng)
+        return 0
+
+    if cmd == "calibrate":
+        s = eng.calibrate()
+        stats = eng.saliency_stats()
+        payload = {
+            "status": "success",
+            "saliency_mode": cfg.saliency_mode,
+            "stats": stats,
+            "sample_s_norm": s[: min(16, len(s))],
+            "X_shape": [cfg.cols, cfg.n_calibration],
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📐 Activation saliency calibration")
+            print(f"  • mode: {cfg.saliency_mode}")
+            for k, v in stats.items():
+                print(f"  • {k}: {v}")
+            print("✅ Saliency s_j = E[|X_j|] accumulated and normalized.")
+        return 0
+
+    if cmd == "search":
+        best, curve = eng.search_alpha()
+        if args.json:
+            _print_json({"best_alpha": best, "curve": curve})
+        else:
+            print("🔍 AWQ alpha grid search")
+            print(f"  • grid size: {len(curve)}")
+            step = max(1, len(curve) // 5)
+            for pt in curve[::step]:
+                print(
+                    f"  • α={pt['alpha']:.3f}  MSE={pt['mse']:.6g}  "
+                    f"SQNR={pt['sqnr_db']:.2f}dB  cos={pt['cosine']:.4f}"
+                )
+            print(f"  • best α* = {best:.4f}")
+            print("✅ Alpha search complete.")
+        return 0
+
+    if cmd == "quantize":
+        alpha = getattr(args, "alpha", None)
+        res = eng.quantize(alpha=alpha)
+        if args.json:
+            _print_json(res.to_dict())
+        else:
+            print("⚙️  AWQ layer quantization")
+            print(f"  • α*={res.best_alpha:.4f}")
+            print(
+                f"  • AWQ MSE={res.mse:.6g}  SQNR={res.sqnr_db:.2f}dB  cos={res.cosine:.6f}"
+            )
+            print(
+                f"  • RTN MSE={res.rtn_mse:.6g}  SQNR={res.rtn_sqnr_db:.2f}dB  "
+                f"cos={res.rtn_cosine:.6f}"
+            )
+            print(
+                f"  • bit_rate={res.bit_rate:.3f}  comp={res.compression_vs_fp16:.2f}×  "
+                f"{res.elapsed_ms:.2f}ms"
+            )
+            better = "YES" if res.mse <= res.rtn_mse else "no"
+            print(f"  • AWQ beats RTN (MSE): {better}")
+            print("✅ Quantization complete.")
+        return 0
+
+    if cmd == "pack":
+        eng.quantize(alpha=getattr(args, "alpha", None))
+        packed = eng.pack_int_weights()
+        if args.json:
+            _print_json(packed)
+        else:
+            print("📦 INT pack ledger")
+            for k in (
+                "rows", "cols", "n_bits", "group_size", "bit_rate",
+                "compression_vs_fp16", "int_min", "int_max", "best_alpha",
+            ):
+                print(f"  • {k}: {packed[k]}")
+            print(f"  • sample q[:16]: {packed['packed_sample']}")
+            print(f"  • channel scales sample: {packed['channel_scales_sample']}")
+            print("✅ Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(args.dims, args.bits_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📊 AWQ benchmark sweep")
+            print(
+                f"  {'dim':>5} {'bits':>5} {'α*':>7} {'MSE':>12} {'RTN_MSE':>12} "
+                f"{'SQNR':>8} {'comp':>6} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['bits']:5d} {r['best_alpha']:7.3f} "
+                    f"{r['mse']:12.4g} {r['rtn_mse']:12.4g} {r['sqnr_db']:8.2f} "
+                    f"{r['compression']:6.2f} {r['elapsed_ms']:8.2f} "
+                    f"{'Y' if r['beats_rtn'] else 'n':>5}"
+                )
+            print("✅ Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("🧪 AWQ invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'✓' if v else '✗'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: α*={t['best_alpha']:.3f}  "
+                    f"mse={t['mse']:.4g}  rtn={t['rtn_mse']:.4g}  {flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "✅ Verify complete."
+                if payload["status"] == "pass"
+                else "❌ Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("📚 AWQ theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(f"  {'bits':>5} {'gs':>5} {'bit_rate':>10} {'comp':>8} {'7B GiB':>10}")
+            for r in payload["rows"]:
+                print(
+                    f"  {r['bits']:5d} {r['group_size']:5d} {r['bit_rate']:10.3f} "
+                    f"{r['comp_vs_fp16']:8.2f} {r['est_7b_gib']:10.2f}"
+                )
+            print("✅ Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

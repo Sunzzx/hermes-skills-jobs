@@ -947,3 +947,8 @@
 - **Title**: QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)
 - **Category**: inference
 - **Description**: Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers.
+
+### [2026-11-12 12:52:17] - Evolved `awq-activation-aware-weight-quant-engine`
+- **Title**: AWQ: Activation-aware Weight Quantization Engine (MLSys 2024, arXiv:2306.00978)
+- **Category**: inference
+- **Description**: Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline — pure-Python INT4 reference (vLLM/AutoAWQ path).

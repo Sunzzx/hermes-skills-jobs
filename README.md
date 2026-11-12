@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-112-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-113-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (112 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (113 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -124,6 +124,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **LayerSkip Early-Exit + Self-Speculative Decoding Engine (Meta FAIR arXiv:2404.15690)** | `inference` | `layerskip-self-speculative-engine` | Meta LayerSkip early-exit inference and self-speculative decoding with shared-weight draft layers, confidence-gated depth exits, Leviathan acceptance math, and exact FLOP ledgers. | `Frontier-AI` `LayerSkip` `EarlyExit` |
 | **QuaRot: Outlier-Free 4-Bit Inference via Randomized Hadamard Rotation (arXiv:2404.00456)** | `inference` | `quarot-hadamard-quant-engine` | Orthogonal randomized Hadamard rotation (FWHT) smears activation outliers so RTN group INT4 weight+activation quant stays near-lossless — pure-Python reference with SQNR/GEMM ledgers. | `Frontier-AI` `QuaRot` `Hadamard` |
 | **GPTQ: Hessian Optimal Brain Surgeon One-Shot Weight Quantization (ICLR 2023, arXiv:2210.17323)** | `inference` | `gptq-hessian-weight-quant-engine` | Layer-wise post-training weight quantization minimizing --WX - WqX-- via dampened Hessian OBS, Cholesky inverse, act-order column permutation, and group INT2/3/4/8 packing with RTN baselines. | `Frontier-AI` `GPTQ` `Hessian` |
+| **AWQ Activation-aware Weight Quant Engine (MLSys 2024)** | `inference` | `awq-activation-aware-weight-quant-engine` | Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline — pure-Python INT4 reference (vLLM/AutoAWQ path). | `AWQ` `INT4` `ActivationAware` |
 
 ---
 

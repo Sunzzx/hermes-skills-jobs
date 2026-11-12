@@ -1913,5 +1913,28 @@
       "PostTrainingQuantization",
       "InferenceEngine"
     ]
+  },
+  {
+    "id": "awq-activation-aware-weight-quant-engine",
+    "name": "awq-activation-aware-weight-quant-engine",
+    "title": "AWQ: Activation-aware Weight Quantization Engine (MLSys 2024, arXiv:2306.00978)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline \u2014 pure-Python INT4 reference (vLLM/AutoAWQ path).",
+    "cli": "awq-activation-aware-weight-quant-engine",
+    "bin": "bin/awq-activation-aware-weight-quant-engine",
+    "skill": "skills/inference/awq-activation-aware-weight-quant-engine/SKILL.md",
+    "test_cmd": "pytest tests/test_awq_activation_aware_weight_quant_engine.py",
+    "evolved_at": "2026-11-12T12:52:17.149805",
+    "tags": [
+      "Frontier-AI",
+      "AWQ",
+      "ActivationAware",
+      "INT4",
+      "Quantization",
+      "PostTrainingQuantization",
+      "InferenceEngine",
+      "AlphaSearch"
+    ]
   }
 ]
