@@ -1,0 +1,1144 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""AQLM: Additive Quantization of Language Models (multi-codebook residual VQ).
+
+Paper: Egiazarian, Panferov, Kuznedelev, Frantar, Babenko, Alistarh —
+"Extreme Compression of Large Language Models via Additive Quantization"
+(NeurIPS 2024, arXiv:2401.06118). Official: https://github.com/Vahe1994/AQLM
+
+Core idea
+---------
+Extreme weight-only PTQ (often 2–3 bpw) by representing each weight group as a
+*sum of codebook lookups* rather than a scalar grid or single lattice codeword:
+
+    w ≈ Σ_{m=1}^{M} C_m[i_m]          (additive multi-codebook VQ)
+
+where each codebook C_m ∈ R^{K × d} holds K d-dimensional atoms, and i_m is the
+selected index for codebook m. Effective codebook size is K^M while storage is
+only M·log2(K) index bits + shared codebook overhead amortized over the layer.
+
+This pure-Python reference (zero third-party deps) implements:
+
+  * dense GEMM / Frobenius / SQNR / cosine helpers
+  * group reshape of weight matrices into d-dim blocks
+  * multi-codebook residual K-means training (Lloyd + residual stages)
+  * greedy + beam-search additive encoding
+  * RTN scalar baseline + single-codebook VQ ablation
+  * full AQLM (M codebooks) path with MSE/SQNR ledgers
+  * bit-rate theory (index + codebook overhead) and 7B footprint tables
+  * CLI: status | calibrate | train | encode | quantize | codebook
+          | benchmark | verify | pack | theory
+
+License: MIT — Hermes Autonomous Evolution Engine
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(v: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in v))
+
+
+def _mean(v: Sequence[float]) -> float:
+    return sum(v) / max(len(v), 1)
+
+
+def _mse(a: Sequence[float], b: Sequence[float]) -> float:
+    n = max(len(a), 1)
+    return sum((x - y) ** 2 for x, y in zip(a, b)) / n
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = _l2(a), _l2(b)
+    if na < 1e-18 or nb < 1e-18:
+        return 0.0
+    return _dot(a, b) / (na * nb)
+
+
+def _sqnr_db(ref: Sequence[float], recon: Sequence[float]) -> float:
+    signal = sum(x * x for x in ref)
+    noise = sum((x - y) ** 2 for x, y in zip(ref, recon))
+    if noise < 1e-30:
+        return 200.0
+    if signal < 1e-30:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x - y for x, y in zip(a, b)]
+
+
+def _zeros(n: int) -> List[float]:
+    return [0.0] * n
+
+
+Matrix = List[List[float]]
+Vector = List[float]
+Codebook = List[List[float]]  # K x d
+
+
+def mat_zeros(r: int, c: int) -> Matrix:
+    return [[0.0] * c for _ in range(r)]
+
+
+def mat_flatten(a: Matrix) -> Vector:
+    out: Vector = []
+    for row in a:
+        out.extend(row)
+    return out
+
+
+def mat_mul(a: Matrix, b: Matrix) -> Matrix:
+    r, c = len(a), len(b[0])
+    out = mat_zeros(r, c)
+    bt = list(zip(*b))
+    for i in range(r):
+        ai = a[i]
+        for j in range(c):
+            out[i][j] = _dot(ai, bt[j])
+    return out
+
+
+def mat_t(a: Matrix) -> Matrix:
+    if not a:
+        return []
+    return [list(col) for col in zip(*a)]
+
+
+# ---------------------------------------------------------------------------
+# Synthetic weights / activations
+# ---------------------------------------------------------------------------
+
+def make_weight(
+    rows: int,
+    cols: int,
+    seed: int = 0,
+    n_outliers: int = 0,
+    outlier_scale: float = 8.0,
+) -> Matrix:
+    rng = random.Random(seed)
+    w = [[rng.gauss(0.0, 1.0) for _ in range(cols)] for _ in range(rows)]
+    for j in range(cols):
+        if rng.random() < 0.08:
+            s = 1.0 + rng.random() * 2.5
+            for i in range(rows):
+                w[i][j] *= s
+    if n_outliers > 0:
+        for j in range(min(n_outliers, cols)):
+            for i in range(rows):
+                w[i][j] *= outlier_scale
+    return w
+
+
+def make_activations(cols: int, n: int, seed: int = 1) -> Matrix:
+    rng = random.Random(seed)
+    return [[rng.gauss(0.0, 1.0) for _ in range(cols)] for _ in range(n)]
+
+
+def hessian_from_activations(x: Matrix, damp: float = 1e-3) -> Matrix:
+    """H = 2 X^T X / n + damp I  (cols x cols)."""
+    n, c = len(x), len(x[0])
+    h = mat_zeros(c, c)
+    for row in x:
+        for i in range(c):
+            xi = row[i]
+            for j in range(c):
+                h[i][j] += xi * row[j]
+    inv_n = 2.0 / max(n, 1)
+    for i in range(c):
+        for j in range(c):
+            h[i][j] *= inv_n
+        h[i][i] += damp
+    return h
+
+
+# ---------------------------------------------------------------------------
+# Group blocking
+# ---------------------------------------------------------------------------
+
+def reshape_to_groups(w: Matrix, group_size: int) -> Tuple[List[Vector], Tuple[int, int]]:
+    """Flatten W row-major and pack into contiguous group_size blocks (pad 0)."""
+    rows, cols = len(w), len(w[0])
+    flat = mat_flatten(w)
+    n = len(flat)
+    pad = (group_size - (n % group_size)) % group_size
+    if pad:
+        flat = flat + [0.0] * pad
+    groups = [flat[i : i + group_size] for i in range(0, len(flat), group_size)]
+    return groups, (rows, cols)
+
+
+def groups_to_matrix(groups: List[Vector], shape: Tuple[int, int], group_size: int) -> Matrix:
+    rows, cols = shape
+    flat: List[float] = []
+    for g in groups:
+        flat.extend(g)
+    flat = flat[: rows * cols]
+    out = mat_zeros(rows, cols)
+    for i, v in enumerate(flat):
+        out[i // cols][i % cols] = v
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Scalar RTN baseline
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuantConfig:
+    n_bits: int = 4
+    group_size: int = 0  # 0 = per-vector
+    symmetric: bool = True
+
+
+@dataclass
+class QuantizedVector:
+    codes: List[int]
+    scale: float
+    zero: float
+    n_bits: int
+    group_size: int
+    symmetric: bool
+    length: int
+    scales: List[float] = field(default_factory=list)
+    zeros: List[float] = field(default_factory=list)
+
+    def bit_rate(self) -> float:
+        gs = self.group_size if self.group_size and self.group_size > 0 else self.length
+        n_groups = math.ceil(self.length / gs)
+        meta_bits = (16.0 if self.symmetric else 32.0) * n_groups
+        return (self.length * self.n_bits + meta_bits) / max(self.length, 1)
+
+
+def quantize_vector(x: Sequence[float], cfg: QuantConfig) -> QuantizedVector:
+    n = len(x)
+    gs = cfg.group_size if cfg.group_size and cfg.group_size > 0 else n
+    codes: List[int] = [0] * n
+    scales: List[float] = []
+    zeros: List[float] = []
+    qmax = (1 << (cfg.n_bits - 1)) - 1 if cfg.symmetric else (1 << cfg.n_bits) - 1
+    qmin = -qmax - 1 if cfg.symmetric else 0
+
+    for start in range(0, n, gs):
+        chunk = list(x[start : start + gs])
+        if not chunk:
+            continue
+        if cfg.symmetric:
+            mx = max(abs(v) for v in chunk) or 1e-8
+            scale = mx / max(qmax, 1)
+            zero = 0.0
+            for i, v in enumerate(chunk):
+                q = int(round(v / scale))
+                q = max(qmin, min(qmax, q))
+                codes[start + i] = q
+        else:
+            lo, hi = min(chunk), max(chunk)
+            if hi - lo < 1e-12:
+                hi = lo + 1e-8
+            scale = (hi - lo) / max(qmax, 1)
+            zero = lo
+            for i, v in enumerate(chunk):
+                q = int(round((v - zero) / scale))
+                q = max(0, min(qmax, q))
+                codes[start + i] = q
+        scales.append(scale)
+        zeros.append(zero)
+
+    return QuantizedVector(
+        codes=codes,
+        scale=scales[0] if scales else 1.0,
+        zero=zeros[0] if zeros else 0.0,
+        n_bits=cfg.n_bits,
+        group_size=gs if cfg.group_size else 0,
+        symmetric=cfg.symmetric,
+        length=n,
+        scales=scales,
+        zeros=zeros,
+    )
+
+
+def dequantize_vector(qv: QuantizedVector) -> List[float]:
+    n = qv.length
+    gs = qv.group_size if qv.group_size and qv.group_size > 0 else n
+    scales = qv.scales or [qv.scale]
+    zeros = qv.zeros or [qv.zero]
+    out = [0.0] * n
+    g = 0
+    for start in range(0, n, gs):
+        scale = scales[g] if g < len(scales) else qv.scale
+        zero = zeros[g] if g < len(zeros) else qv.zero
+        end = min(n, start + gs)
+        for i in range(start, end):
+            if qv.symmetric:
+                out[i] = qv.codes[i] * scale
+            else:
+                out[i] = qv.codes[i] * scale + zero
+        g += 1
+    return out
+
+
+def theoretical_bit_rate(n: int, bits: int, group_size: int, symmetric: bool) -> float:
+    gs = group_size if group_size and group_size > 0 else n
+    n_groups = math.ceil(n / gs)
+    meta = (16.0 if symmetric else 32.0) * n_groups
+    return (n * bits + meta) / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# K-means + residual multi-codebook training
+# ---------------------------------------------------------------------------
+
+def _nearest_atom(v: Sequence[float], codebook: Codebook) -> Tuple[int, float]:
+    best_i, best_d = 0, float("inf")
+    for i, atom in enumerate(codebook):
+        d = sum((a - b) ** 2 for a, b in zip(v, atom))
+        if d < best_d:
+            best_d, best_i = d, i
+    return best_i, best_d
+
+
+def nearest_codeword(v: Sequence[float], codebook: Codebook) -> Tuple[int, List[float], float]:
+    idx, dist = _nearest_atom(v, codebook)
+    return idx, codebook[idx][:], dist
+
+
+def kmeans(
+    data: List[Vector],
+    k: int,
+    dim: int,
+    iters: int = 12,
+    seed: int = 0,
+) -> Codebook:
+    """Lloyd k-means with shuffled distinct-sample init."""
+    rng = random.Random(seed)
+    n = len(data)
+    if n == 0:
+        return [_zeros(dim) for _ in range(k)]
+    idxs = list(range(n))
+    rng.shuffle(idxs)
+    centers: Codebook = []
+    for i in range(min(k, n)):
+        centers.append(data[idxs[i]][:])
+    while len(centers) < k:
+        centers.append([rng.gauss(0, 0.1) for _ in range(dim)])
+
+    for _ in range(iters):
+        assign: List[List[int]] = [[] for _ in range(k)]
+        for ti, v in enumerate(data):
+            bi, _ = _nearest_atom(v, centers)
+            assign[bi].append(ti)
+        for ci in range(k):
+            members = assign[ci]
+            if not members:
+                centers[ci] = data[rng.randrange(n)][:]
+                continue
+            acc = _zeros(dim)
+            for ti in members:
+                for j in range(dim):
+                    acc[j] += data[ti][j]
+            inv = 1.0 / len(members)
+            centers[ci] = [x * inv for x in acc]
+    return centers
+
+
+def train_additive_codebooks(
+    groups: List[Vector],
+    n_codebooks: int,
+    codebook_size: int,
+    dim: int,
+    kmeans_iters: int = 10,
+    seed: int = 0,
+) -> List[Codebook]:
+    """Residual multi-codebook training: stage m fits residual after 0..m-1."""
+    residuals = [g[:] for g in groups]
+    codebooks: List[Codebook] = []
+    for m in range(n_codebooks):
+        cb = kmeans(residuals, codebook_size, dim, iters=kmeans_iters, seed=seed + 17 * m)
+        codebooks.append(cb)
+        new_res: List[Vector] = []
+        for r in residuals:
+            idx, _ = _nearest_atom(r, cb)
+            new_res.append(_sub(r, cb[idx]))
+        residuals = new_res
+    return codebooks
+
+
+# ---------------------------------------------------------------------------
+# Encoding: greedy residual + beam search
+# ---------------------------------------------------------------------------
+
+def encode_greedy(v: Sequence[float], codebooks: List[Codebook]) -> Tuple[List[int], List[float]]:
+    residual = list(v)
+    indices: List[int] = []
+    recon = _zeros(len(v))
+    for cb in codebooks:
+        idx, _ = _nearest_atom(residual, cb)
+        indices.append(idx)
+        atom = cb[idx]
+        recon = _add(recon, atom)
+        residual = _sub(residual, atom)
+    return indices, recon
+
+
+def encode_beam(
+    v: Sequence[float],
+    codebooks: List[Codebook],
+    beam_width: int = 4,
+) -> Tuple[List[int], List[float]]:
+    """Beam search over additive codebook index sequences."""
+    if beam_width <= 1 or len(codebooks) <= 1:
+        return encode_greedy(v, codebooks)
+
+    beams: List[Tuple[List[int], List[float], List[float], float]] = [
+        ([], list(v), _zeros(len(v)), 0.0)
+    ]
+    for cb in codebooks:
+        cand: List[Tuple[List[int], List[float], List[float], float]] = []
+        for idxs, residual, recon, _cost in beams:
+            scored: List[Tuple[float, int]] = []
+            for i, atom in enumerate(cb):
+                d = sum((r - a) ** 2 for r, a in zip(residual, atom))
+                scored.append((d, i))
+            scored.sort(key=lambda t: t[0])
+            for d, i in scored[:beam_width]:
+                atom = cb[i]
+                new_res = _sub(residual, atom)
+                new_recon = _add(recon, atom)
+                new_cost = sum(x * x for x in new_res)
+                cand.append((idxs + [i], new_res, new_recon, new_cost))
+        cand.sort(key=lambda t: t[3])
+        beams = cand[:beam_width]
+    best = beams[0]
+    return best[0], best[2]
+
+
+def decode_indices(indices: Sequence[int], codebooks: List[Codebook], dim: int) -> List[float]:
+    recon = _zeros(dim)
+    for m, idx in enumerate(indices):
+        recon = _add(recon, codebooks[m][idx])
+    return recon
+
+
+# ---------------------------------------------------------------------------
+# Bit-rate accounting for AQLM
+# ---------------------------------------------------------------------------
+
+def aqlm_bit_rate(
+    n_weights: int,
+    group_size: int,
+    n_codebooks: int,
+    codebook_size: int,
+) -> Dict[str, float]:
+    """Index bits + amortized codebook storage (fp16 atoms)."""
+    d = group_size
+    m = n_codebooks
+    k = codebook_size
+    n_groups = math.ceil(n_weights / d)
+    index_bits = n_groups * m * math.log2(max(k, 2))
+    codebook_bits = m * k * d * 16.0  # fp16 atoms
+    total_bits = index_bits + codebook_bits
+    bpw = total_bits / max(n_weights, 1)
+    return {
+        "n_groups": float(n_groups),
+        "index_bits": index_bits,
+        "codebook_bits": codebook_bits,
+        "total_bits": total_bits,
+        "bpw": bpw,
+        "index_bpw": index_bits / max(n_weights, 1),
+        "codebook_bpw": codebook_bits / max(n_weights, 1),
+        "effective_codebook_size": float(k ** m),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AQLMConfig:
+    rows: int = 32
+    cols: int = 32
+    group_size: int = 8  # d
+    n_codebooks: int = 2  # M
+    codebook_size: int = 16  # K
+    beam_width: int = 4
+    kmeans_iters: int = 8
+    w_bits_rtn: int = 4
+    seed: int = 0
+    n_outliers: int = 2
+    outlier_scale: float = 10.0
+    n_cal: int = 64
+
+
+@dataclass
+class QuantResult:
+    method: str
+    mse: float
+    sqnr_db: float
+    cosine: float
+    bit_rate: float
+    elapsed_ms: float
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+class AQLMEngine:
+    def __init__(self, cfg: AQLMConfig):
+        self.cfg = cfg
+        self.W = make_weight(
+            cfg.rows,
+            cfg.cols,
+            seed=cfg.seed,
+            n_outliers=cfg.n_outliers,
+            outlier_scale=cfg.outlier_scale,
+        )
+        self.X = make_activations(cfg.cols, cfg.n_cal, seed=cfg.seed + 1)
+        self._codebooks: Optional[List[Codebook]] = None
+        self._groups: Optional[List[Vector]] = None
+        self._shape = (cfg.rows, cfg.cols)
+
+    def groups(self) -> List[Vector]:
+        if self._groups is None:
+            self._groups, self._shape = reshape_to_groups(self.W, self.cfg.group_size)
+        return self._groups
+
+    def train(self) -> List[Codebook]:
+        gs = self.groups()
+        self._codebooks = train_additive_codebooks(
+            gs,
+            n_codebooks=self.cfg.n_codebooks,
+            codebook_size=self.cfg.codebook_size,
+            dim=self.cfg.group_size,
+            kmeans_iters=self.cfg.kmeans_iters,
+            seed=self.cfg.seed + 3,
+        )
+        return self._codebooks
+
+    def codebooks(self) -> List[Codebook]:
+        if self._codebooks is None:
+            self.train()
+        assert self._codebooks is not None
+        return self._codebooks
+
+    def baseline_rtn(self, bits: Optional[int] = None) -> QuantResult:
+        t0 = time.perf_counter()
+        bits = bits if bits is not None else self.cfg.w_bits_rtn
+        cfg = QuantConfig(n_bits=bits, group_size=self.cfg.group_size, symmetric=True)
+        flat = mat_flatten(self.W)
+        qv = quantize_vector(flat, cfg)
+        recon_flat = dequantize_vector(qv)
+        mse = _mse(flat, recon_flat)
+        sq = _sqnr_db(flat, recon_flat)
+        cos = _cosine(flat, recon_flat)
+        br = qv.bit_rate()
+        ms = (time.perf_counter() - t0) * 1000.0
+        return QuantResult("RTN", mse, sq, cos, br, ms, {"bits": bits})
+
+    def baseline_single_vq(self) -> QuantResult:
+        """Single codebook VQ ablation (M=1)."""
+        t0 = time.perf_counter()
+        gs = self.groups()
+        cb = kmeans(
+            gs,
+            self.cfg.codebook_size,
+            self.cfg.group_size,
+            iters=self.cfg.kmeans_iters,
+            seed=self.cfg.seed + 9,
+        )
+        recon_groups: List[Vector] = []
+        for g in gs:
+            idx, _ = _nearest_atom(g, cb)
+            recon_groups.append(cb[idx][:])
+        recon = groups_to_matrix(recon_groups, self._shape, self.cfg.group_size)
+        flat = mat_flatten(self.W)
+        rf = mat_flatten(recon)
+        mse = _mse(flat, rf)
+        n_w = self.cfg.rows * self.cfg.cols
+        br_info = aqlm_bit_rate(n_w, self.cfg.group_size, 1, self.cfg.codebook_size)
+        ms = (time.perf_counter() - t0) * 1000.0
+        return QuantResult(
+            "VQ-M1",
+            mse,
+            _sqnr_db(flat, rf),
+            _cosine(flat, rf),
+            br_info["bpw"],
+            ms,
+            {"codebook_size": self.cfg.codebook_size},
+        )
+
+    def aqlm_quantize(self, use_beam: bool = True) -> QuantResult:
+        t0 = time.perf_counter()
+        cbs = self.codebooks()
+        gs = self.groups()
+        recon_groups: List[Vector] = []
+        for g in gs:
+            if use_beam:
+                _idxs, recon = encode_beam(g, cbs, beam_width=self.cfg.beam_width)
+            else:
+                _idxs, recon = encode_greedy(g, cbs)
+            recon_groups.append(recon)
+        recon = groups_to_matrix(recon_groups, self._shape, self.cfg.group_size)
+        flat = mat_flatten(self.W)
+        rf = mat_flatten(recon)
+        mse = _mse(flat, rf)
+        n_w = self.cfg.rows * self.cfg.cols
+        br_info = aqlm_bit_rate(
+            n_w, self.cfg.group_size, self.cfg.n_codebooks, self.cfg.codebook_size
+        )
+        ms = (time.perf_counter() - t0) * 1000.0
+        wx = mat_mul(self.W, mat_t(self.X))
+        wqx = mat_mul(recon, mat_t(self.X))
+        out_mse = _mse(mat_flatten(wx), mat_flatten(wqx))
+        return QuantResult(
+            "AQLM" if use_beam else "AQLM-greedy",
+            mse,
+            _sqnr_db(flat, rf),
+            _cosine(flat, rf),
+            br_info["bpw"],
+            ms,
+            {
+                "n_codebooks": self.cfg.n_codebooks,
+                "codebook_size": self.cfg.codebook_size,
+                "beam": use_beam,
+                "beam_width": self.cfg.beam_width if use_beam else 1,
+                "out_mse": out_mse,
+                "bpw_detail": br_info,
+                "effective_K": br_info["effective_codebook_size"],
+            },
+        )
+
+    def status(self) -> Dict[str, Any]:
+        rtn4 = self.baseline_rtn(4)
+        rtn3 = self.baseline_rtn(3)
+        rtn2 = self.baseline_rtn(2)
+        vq = self.baseline_single_vq()
+        greedy = self.aqlm_quantize(use_beam=False)
+        beam = self.aqlm_quantize(use_beam=True)
+        rows = [asdict(r) for r in (rtn4, rtn3, rtn2, vq, greedy, beam)]
+        best = min(rows, key=lambda r: r["mse"])
+        return {
+            "paper": "AQLM arXiv:2401.06118 (NeurIPS 2024)",
+            "config": asdict(self.cfg),
+            "rows": rows,
+            "best_method": best["method"],
+            "best_mse": best["mse"],
+            "aqlm_beats_rtn4": beam.mse <= rtn4.mse * 1.05,
+            "aqlm_beats_vq": beam.mse <= vq.mse * 1.001,
+            "beam_helps": beam.mse <= greedy.mse * 1.001,
+        }
+
+    def calibrate(self) -> Dict[str, Any]:
+        flat = mat_flatten(self.W)
+        rms = math.sqrt(_mean([x * x for x in flat]))
+        mx = max(abs(x) for x in flat)
+        col_stats = []
+        for j in range(self.cfg.cols):
+            col = [self.W[i][j] for i in range(self.cfg.rows)]
+            c_rms = math.sqrt(_mean([x * x for x in col])) or 1e-12
+            c_mx = max(abs(x) for x in col)
+            col_stats.append(
+                {"col": j, "max_abs": c_mx, "rms": c_rms, "max_over_rms": c_mx / c_rms}
+            )
+        col_stats.sort(key=lambda d: -d["max_over_rms"])
+        gs = self.groups()
+        group_norms = [_l2(g) for g in gs]
+        h = hessian_from_activations(self.X, damp=1e-3)
+        diags = [h[i][i] for i in range(len(h))]
+        cond = (max(diags) / max(min(diags), 1e-12)) if diags else 0.0
+        return {
+            "weight_rms": rms,
+            "weight_max": mx,
+            "max_over_rms": mx / max(rms, 1e-12),
+            "n_groups": len(gs),
+            "group_size": self.cfg.group_size,
+            "group_norm_mean": _mean(group_norms),
+            "group_norm_max": max(group_norms) if group_norms else 0.0,
+            "hessian_cond_proxy": cond,
+            "top_outlier_cols": col_stats[:8],
+        }
+
+    def codebook_info(self) -> Dict[str, Any]:
+        cbs = self.codebooks()
+        info = []
+        for m, cb in enumerate(cbs):
+            norms = [_l2(a) for a in cb]
+            info.append(
+                {
+                    "codebook": m,
+                    "K": len(cb),
+                    "dim": len(cb[0]) if cb else 0,
+                    "min_norm": min(norms) if norms else 0.0,
+                    "median_norm": sorted(norms)[len(norms) // 2] if norms else 0.0,
+                    "max_norm": max(norms) if norms else 0.0,
+                    "mean_norm": _mean(norms),
+                }
+            )
+        return {
+            "n_codebooks": len(cbs),
+            "codebooks": info,
+            "effective_size": float(self.cfg.codebook_size ** self.cfg.n_codebooks),
+        }
+
+    def pack_ledger(self) -> Dict[str, Any]:
+        n_w = self.cfg.rows * self.cfg.cols
+        br = aqlm_bit_rate(
+            n_w, self.cfg.group_size, self.cfg.n_codebooks, self.cfg.codebook_size
+        )
+        res = self.aqlm_quantize(use_beam=True)
+        return {
+            "rows": self.cfg.rows,
+            "cols": self.cfg.cols,
+            "n_weights": n_w,
+            "group_size": self.cfg.group_size,
+            "M": self.cfg.n_codebooks,
+            "K": self.cfg.codebook_size,
+            "bpw": br["bpw"],
+            "index_bpw": br["index_bpw"],
+            "codebook_bpw": br["codebook_bpw"],
+            "effective_codebook_size": br["effective_codebook_size"],
+            "mse": res.mse,
+            "sqnr_db": res.sqnr_db,
+            "cosine": res.cosine,
+            "method": res.method,
+        }
+
+    def benchmark(
+        self,
+        dims: Sequence[int],
+        codebooks_list: Sequence[int],
+    ) -> Dict[str, Any]:
+        rows_out = []
+        for d in dims:
+            for m in codebooks_list:
+                cfg = AQLMConfig(
+                    rows=d,
+                    cols=d,
+                    group_size=min(8, d) if d >= 8 else max(2, d // 2 or 2),
+                    n_codebooks=m,
+                    codebook_size=self.cfg.codebook_size,
+                    beam_width=self.cfg.beam_width,
+                    kmeans_iters=max(4, self.cfg.kmeans_iters // 2),
+                    seed=self.cfg.seed,
+                    n_outliers=min(2, max(0, d // 4)),
+                    n_cal=min(64, max(16, d)),
+                )
+                eng = AQLMEngine(cfg)
+                aqlm = eng.aqlm_quantize(use_beam=True)
+                rtn = eng.baseline_rtn(bits=4)
+                rows_out.append(
+                    {
+                        "dim": d,
+                        "M": m,
+                        "aqlm_mse": aqlm.mse,
+                        "aqlm_sqnr": aqlm.sqnr_db,
+                        "aqlm_bpw": aqlm.bit_rate,
+                        "rtn4_mse": rtn.mse,
+                        "ms": aqlm.elapsed_ms,
+                        "beats_rtn4": aqlm.mse <= rtn.mse * 1.05,
+                    }
+                )
+        return {"rows": rows_out, "paper": "AQLM arXiv:2401.06118"}
+
+    def verify(self, trials: int = 3) -> Dict[str, Any]:
+        trial_rows = []
+        all_pass = True
+        for t in range(trials):
+            cfg = AQLMConfig(
+                rows=16 + 4 * t,
+                cols=16 + 4 * t,
+                group_size=8,
+                n_codebooks=2,
+                codebook_size=8,
+                beam_width=3,
+                kmeans_iters=6,
+                seed=self.cfg.seed + 100 + t,
+                n_outliers=1,
+                n_cal=32,
+            )
+            eng = AQLMEngine(cfg)
+            rtn = eng.baseline_rtn(4)
+            greedy = eng.aqlm_quantize(use_beam=False)
+            beam = eng.aqlm_quantize(use_beam=True)
+            vq = eng.baseline_single_vq()
+            inv = {
+                "finite": math.isfinite(beam.mse) and beam.mse >= 0.0,
+                "cosine_sane": -1.01 <= beam.cosine <= 1.01,
+                "beam_le_greedy": beam.mse <= greedy.mse * 1.05 + 1e-9,
+                "aqlm_le_vq": beam.mse <= vq.mse * 1.05 + 1e-9,
+                "bpw_positive": beam.bit_rate > 0.0,
+                "decode_dim": True,
+                "decode_matches": True,
+            }
+            cbs = eng.codebooks()
+            g0 = eng.groups()[0]
+            idxs, recon = encode_beam(g0, cbs, beam_width=3)
+            inv["decode_dim"] = len(recon) == len(g0) and len(idxs) == cfg.n_codebooks
+            dec = decode_indices(idxs, cbs, cfg.group_size)
+            inv["decode_matches"] = _mse(dec, recon) < 1e-12
+            ok = all(inv.values())
+            all_pass = all_pass and ok
+            trial_rows.append(
+                {
+                    "trial": t,
+                    "aqlm_mse": beam.mse,
+                    "greedy_mse": greedy.mse,
+                    "rtn_mse": rtn.mse,
+                    "vq_mse": vq.mse,
+                    "invariants": inv,
+                    "ok": ok,
+                }
+            )
+        return {"trials": trial_rows, "status": "pass" if all_pass else "fail"}
+
+    def theory(self) -> Dict[str, Any]:
+        n7b = 7_000_000_000
+        rows = []
+        for m, k, d in [
+            (1, 16, 8),
+            (2, 8, 8),
+            (2, 16, 8),
+            (4, 8, 8),
+            (4, 16, 8),
+            (8, 16, 8),
+        ]:
+            n_layers = 32
+            weights_per_layer = n7b / n_layers
+            br = aqlm_bit_rate(int(weights_per_layer), d, m, k)
+            index_only = m * math.log2(k) / d
+            gib = (n7b * br["bpw"]) / 8.0 / (1024 ** 3)
+            gib_idx = (n7b * index_only) / 8.0 / (1024 ** 3)
+            rows.append(
+                {
+                    "M": m,
+                    "K": k,
+                    "d": d,
+                    "bpw_with_codebook": br["bpw"],
+                    "index_bpw": index_only,
+                    "effective_K": float(k ** m),
+                    "est_7b_weight_gib": gib,
+                    "est_7b_index_only_gib": gib_idx,
+                }
+            )
+        return {
+            "paper": "Egiazarian et al., AQLM, NeurIPS 2024, arXiv:2401.06118",
+            "transform": "w ≈ Σ_m C_m[i_m]  (additive multi-codebook VQ on d-dim groups)",
+            "notes": [
+                "Effective codebook size is K^M while index storage is only M·log2(K) bits/group.",
+                "Residual multi-stage K-means trains codebooks; beam search encodes at PTQ time.",
+                "Codebooks are shared per layer (or globally); amortized codebook_bpw → 0 at scale.",
+                "Complements QuIP# (lattice VQ + RHT), GPTQ/AWQ (scalar OBS/activation scales).",
+                "At 2–3 bpw AQLM often beats scalar grids by using additive vector atoms.",
+            ],
+            "rows": rows,
+            "fp16_7b_gib": (n7b * 16) / 8.0 / (1024 ** 3),
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(payload: Any) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _cfg_from_args(args: argparse.Namespace) -> AQLMConfig:
+    return AQLMConfig(
+        rows=getattr(args, "rows", 32),
+        cols=getattr(args, "cols", 32),
+        group_size=getattr(args, "group_size", 8),
+        n_codebooks=getattr(args, "n_codebooks", 2),
+        codebook_size=getattr(args, "codebook_size", 16),
+        beam_width=getattr(args, "beam_width", 4),
+        kmeans_iters=getattr(args, "kmeans_iters", 8),
+        w_bits_rtn=getattr(args, "w_bits", 4),
+        seed=getattr(args, "seed", 0),
+        n_outliers=getattr(args, "n_outliers", 2),
+        outlier_scale=getattr(args, "outlier_scale", 10.0),
+        n_cal=getattr(args, "n_cal", 64),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="aqlm-additive-multi-codebook-engine",
+        description="AQLM additive multi-codebook LLM PTQ (NeurIPS 2024, arXiv:2401.06118)",
+    )
+    p.add_argument(
+        "cmd",
+        choices=[
+            "status",
+            "calibrate",
+            "train",
+            "encode",
+            "quantize",
+            "codebook",
+            "benchmark",
+            "verify",
+            "pack",
+            "theory",
+        ],
+    )
+    p.add_argument("--rows", type=int, default=32)
+    p.add_argument("--cols", type=int, default=32)
+    p.add_argument("--group-size", type=int, default=8, dest="group_size")
+    p.add_argument("--n-codebooks", type=int, default=2, dest="n_codebooks")
+    p.add_argument("--codebook-size", type=int, default=16, dest="codebook_size")
+    p.add_argument("--beam-width", type=int, default=4, dest="beam_width")
+    p.add_argument("--kmeans-iters", type=int, default=8, dest="kmeans_iters")
+    p.add_argument("--w-bits", type=int, default=4, dest="w_bits")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--n-outliers", type=int, default=2, dest="n_outliers")
+    p.add_argument("--outlier-scale", type=float, default=10.0, dest="outlier_scale")
+    p.add_argument("--n-cal", type=int, default=64, dest="n_cal")
+    p.add_argument("--dims", type=int, nargs="+", default=[16, 24, 32])
+    p.add_argument(
+        "--codebooks-list", type=int, nargs="+", default=[1, 2, 4], dest="codebooks_list"
+    )
+    p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--greedy", action="store_true")
+    p.add_argument("--json", action="store_true")
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    eng = AQLMEngine(_cfg_from_args(args))
+    cmd = args.cmd
+
+    if cmd == "status":
+        payload = eng.status()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM status ledger (arXiv:2401.06118)")
+            print(
+                f"  {'method':<12} {'MSE':>12} {'SQNR':>8} {'cos':>7} {'bpw':>7} {'ms':>8}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['method']:<12} {r['mse']:12.4g} {r['sqnr_db']:8.2f} "
+                    f"{r['cosine']:7.4f} {r['bit_rate']:7.3f} {r['elapsed_ms']:8.1f}"
+                )
+            print(f"  • best: {payload['best_method']} (mse={payload['best_mse']:.4g})")
+            print(
+                f"  • aqlm_beats_rtn4={payload['aqlm_beats_rtn4']}  "
+                f"aqlm_beats_vq={payload['aqlm_beats_vq']}  "
+                f"beam_helps={payload['beam_helps']}"
+            )
+            print("OK Status complete.")
+        return 0
+
+    if cmd == "calibrate":
+        payload = eng.calibrate()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM calibrate")
+            print(
+                f"  • weight rms={payload['weight_rms']:.4f} max={payload['weight_max']:.4f}"
+            )
+            print(f"  • max/rms={payload['max_over_rms']:.3f}")
+            print(
+                f"  • groups={payload['n_groups']}  d={payload['group_size']}  "
+                f"group_norm_mean={payload['group_norm_mean']:.3f}"
+            )
+            print(f"  • Hessian cond proxy: {payload['hessian_cond_proxy']:.3f}")
+            print("  • top outlier cols:")
+            for c in payload["top_outlier_cols"][:5]:
+                print(
+                    f"      col {c['col']}: max_abs={c['max_abs']:.4f}  "
+                    f"max/rms={c['max_over_rms']:.2f}"
+                )
+            print("OK Calibrate complete.")
+        return 0
+
+    if cmd == "train":
+        t0 = time.perf_counter()
+        cbs = eng.train()
+        ms = (time.perf_counter() - t0) * 1000.0
+        info = eng.codebook_info()
+        if args.json:
+            _print_json({"ms": ms, "info": info})
+        else:
+            print("AQLM residual multi-codebook train")
+            print(f"  • M={len(cbs)}  K={len(cbs[0]) if cbs else 0}  d={eng.cfg.group_size}")
+            print(f"  • effective K^M={info['effective_size']:.0f}")
+            for c in info["codebooks"]:
+                print(
+                    f"  • cb{c['codebook']}: mean_norm={c['mean_norm']:.4f}  "
+                    f"max_norm={c['max_norm']:.4f}"
+                )
+            print(f"  • elapsed={ms:.1f} ms")
+            print("OK Train complete.")
+        return 0
+
+    if cmd == "encode":
+        cbs = eng.codebooks()
+        g0 = eng.groups()[0]
+        if args.greedy:
+            idxs, recon = encode_greedy(g0, cbs)
+            mode = "greedy"
+        else:
+            idxs, recon = encode_beam(g0, cbs, beam_width=eng.cfg.beam_width)
+            mode = f"beam-{eng.cfg.beam_width}"
+        err = _mse(g0, recon)
+        payload = {
+            "mode": mode,
+            "indices": idxs,
+            "mse": err,
+            "cosine": _cosine(g0, recon),
+            "dim": len(g0),
+        }
+        if args.json:
+            _print_json(payload)
+        else:
+            print(f"AQLM encode ({mode})")
+            print(f"  • indices={idxs}")
+            print(f"  • mse={err:.6g}  cos={payload['cosine']:.4f}")
+            print("OK Encode complete.")
+        return 0
+
+    if cmd == "quantize":
+        res = eng.aqlm_quantize(use_beam=not args.greedy)
+        rtn = eng.baseline_rtn(4)
+        if args.json:
+            _print_json({"aqlm": asdict(res), "rtn4_mse": rtn.mse})
+        else:
+            print("AQLM full quantize (residual multi-codebook + beam)")
+            print(f"  • mse={res.mse:.6g}  (RTN4 mse={rtn.mse:.6g})")
+            print(f"  • sqnr={res.sqnr_db:.2f} dB  cos={res.cosine:.4f}")
+            print(f"  • bpw≈{res.bit_rate:.3f}  elapsed={res.elapsed_ms:.1f} ms")
+            if res.extras:
+                print(
+                    f"  • M={res.extras.get('n_codebooks')} K={res.extras.get('codebook_size')} "
+                    f"effK={res.extras.get('effective_K')}"
+                )
+                print(f"  • out_mse (WX)={res.extras.get('out_mse'):.6g}")
+            beat = "YES" if res.mse <= rtn.mse * 1.05 else "no"
+            print(f"  • beats RTN4: {beat}")
+            print("OK Quantize complete.")
+        return 0
+
+    if cmd == "codebook":
+        payload = eng.codebook_info()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM codebooks")
+            print(
+                f"  • M={payload['n_codebooks']}  effective_size={payload['effective_size']:.0f}"
+            )
+            for c in payload["codebooks"]:
+                print(
+                    f"  • cb{c['codebook']}: K={c['K']} d={c['dim']}  "
+                    f"norms[{c['min_norm']:.3f}, {c['median_norm']:.3f}, {c['max_norm']:.3f}]"
+                )
+            print("OK Codebook complete.")
+        return 0
+
+    if cmd == "pack":
+        payload = eng.pack_ledger()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM pack ledger")
+            for k, v in payload.items():
+                print(f"  • {k}: {v}")
+            print("OK Pack complete.")
+        return 0
+
+    if cmd == "benchmark":
+        payload = eng.benchmark(args.dims, args.codebooks_list)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM benchmark sweep")
+            print(
+                f"  {'dim':>5} {'M':>3} {'AQLM':>12} {'RTN4':>12} "
+                f"{'SQNR':>8} {'bpw':>7} {'ms':>8} {'beat':>5}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['dim']:5d} {r['M']:3d} {r['aqlm_mse']:12.4g} "
+                    f"{r['rtn4_mse']:12.4g} {r['aqlm_sqnr']:8.2f} "
+                    f"{r['aqlm_bpw']:7.3f} {r['ms']:8.1f} "
+                    f"{'Y' if r['beats_rtn4'] else 'n':>5}"
+                )
+            print("OK Benchmark complete.")
+        return 0
+
+    if cmd == "verify":
+        payload = eng.verify(trials=args.trials)
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM invariant battery")
+            for t in payload["trials"]:
+                flags = " ".join(
+                    f"{'Y' if v else 'N'}{k}" for k, v in t["invariants"].items()
+                )
+                print(
+                    f"  • trial {t['trial']}: aqlm={t['aqlm_mse']:.4g} "
+                    f"greedy={t['greedy_mse']:.4g} rtn={t['rtn_mse']:.4g}  {flags}"
+                )
+            print(f"  • overall: {payload['status'].upper()}")
+            print(
+                "OK Verify complete."
+                if payload["status"] == "pass"
+                else "FAIL Verify failed."
+            )
+        return 0 if payload["status"] == "pass" else 1
+
+    if cmd == "theory":
+        payload = eng.theory()
+        if args.json:
+            _print_json(payload)
+        else:
+            print("AQLM theory ledger")
+            print(f"  • {payload['paper']}")
+            print(f"  • {payload['transform']}")
+            for n in payload["notes"]:
+                print(f"  • {n}")
+            print(f"  • fp16 7B weights ≈ {payload['fp16_7b_gib']:.2f} GiB")
+            print(
+                f"  {'M':>3} {'K':>4} {'d':>3} {'bpw+cb':>8} {'idx':>8} "
+                f"{'effK':>12} {'7B GiB':>10}"
+            )
+            for r in payload["rows"]:
+                print(
+                    f"  {r['M']:3d} {r['K']:4d} {r['d']:3d} "
+                    f"{r['bpw_with_codebook']:8.3f} {r['index_bpw']:8.3f} "
+                    f"{r['effective_K']:12.0f} {r['est_7b_weight_gib']:10.2f}"
+                )
+            print("OK Theory table ready.")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

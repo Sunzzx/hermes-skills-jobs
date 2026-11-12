@@ -1992,5 +1992,24 @@
       "PTQ",
       "LLM"
     ]
+  },
+  {
+    "id": "aqlm-additive-multi-codebook-engine",
+    "title": "AQLM: Additive Multi-Codebook LLM Quantization Engine (NeurIPS 2024, arXiv:2401.06118)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Extreme weight-only PTQ via residual multi-codebook additive VQ: w\u2248\u03a3_m C_m[i_m]; residual K-means training, beam-search encoding, RTN/VQ ablations, K^M effective codebook vs M\u00b7log2(K) index bits, 7B footprint theory.",
+    "cli": "aqlm-additive-multi-codebook-engine",
+    "evolved_at": "2026-11-12T22:02:20.828193",
+    "tags": [
+      "Frontier-AI",
+      "AQLM",
+      "AdditiveQuantization",
+      "MultiCodebook",
+      "ResidualVQ",
+      "BeamSearch",
+      "WeightOnlyPTQ",
+      "Inference"
+    ]
   }
 ]

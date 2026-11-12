@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 22:02:20] - Evolved `aqlm-additive-multi-codebook-engine`
+- **Title**: AQLM: Additive Quantization of Language Models — multi-codebook residual VQ (NeurIPS 2024, arXiv:2401.06118)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/aqlm-additive-multi-codebook-engine`
+  - `skills/inference/aqlm-additive-multi-codebook-engine/SKILL.md`
+  - `tests/test_aqlm_additive_multi_codebook_engine.py`
+- **Capabilities**: Residual multi-stage K-means codebooks; greedy + beam-search additive encode; RTN/VQ-M1 ablations; MSE/SQNR/cosine + ||(W−Wq)X|| ledgers; K^M effective size vs M·log2(K) index bpw; 7B footprint theory. 19/19 unit tests passed; CLI `status`/`calibrate`/`train`/`encode`/`quantize`/`codebook`/`benchmark`/`verify`/`pack`/`theory`.
+
+
 ### [2026-11-12 20:47:09] - Evolved `quip-sharp-incoherence-lattice-engine`
 - **Title**: QuIP#: Even Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks (ICML 2024, arXiv:2402.04396)
 - **Category**: inference

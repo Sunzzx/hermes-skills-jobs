@@ -1,7 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-115-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-117-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
@@ -10,13 +10,15 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 
 
 ## Recently Evolved
+- `aqlm-additive-multi-codebook-engine` — AQLM multi-codebook additive VQ PTQ (NeurIPS 2024, arXiv:2401.06118)
 - `quip-sharp-incoherence-lattice-engine` — QuIP# RHT incoherence + E8 lattice weight-only PTQ (ICML 2024, arXiv:2402.04396)
 - **spinquant-learned-rotation-engine** — SpinQuant learned orthogonal rotation PTQ (Meta FAIR arXiv:2405.16406). Cayley Stiefel R* for W4A8; CLI in `bin/spinquant-learned-rotation-engine`.
 
-## 🚀 Live Capability Registry (115 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (117 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **AQLM Additive Multi-Codebook LLM Quantization (NeurIPS 2024, arXiv:2401.06118)** | `inference` | `aqlm-additive-multi-codebook-engine` | Extreme weight-only PTQ via residual multi-codebook additive VQ (w≈Σ_m C_m[i_m]): residual K-means, beam encode, RTN/VQ ablations, K^M effective codebook, 7B footprint theory. | `AQLM` `AdditiveVQ` `MultiCodebook` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -164,4 +166,4 @@ gptq-hessian-weight-quant-engine verify --trials 3
 
 ---
 
-*Last Evolved: 2026-11-12 11:46:30 +0530*
+*Last Evolved: 2026-11-12 22:02:20 +0530*
