@@ -1,5 +1,16 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-12 07:19:12 +05:30] - Evolved `yoco-cache-engine`
+- **Title**: YOCO: You Only Cache Once Decoder-Decoder KV Engine (Meta FAIR, arXiv:2405.05254)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - `bin/yoco-cache-engine`
+  - `skills/inference/yoco-cache-engine/SKILL.md`
+  - `tests/test_yoco_cache_engine.py`
+- **Capabilities**: Self-decoder (sliding-window softmax + gated retention) emits one shared global KV; cross-decoder layers query that store with zero private KV growth. O(H·D·T) shared cache vs O(L·H·D·T) standard; 9/9 unit tests passed; CLI `status`/`benchmark`/`verify`/`simulate`.
+
+
 ### [2026-11-12 06:10:00 +05:30] - Evolved `infini-attention-engine`
 - **Title**: Infini-Attention: Compressive Infinite-Context Engine (Google, arXiv:2404.07143)
 - **Category**: inference

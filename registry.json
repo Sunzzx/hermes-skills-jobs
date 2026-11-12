@@ -1821,5 +1821,22 @@
       "google-2024",
       "long-context"
     ]
+  },
+  {
+    "id": "yoco-cache-engine",
+    "title": "YOCO: You Only Cache Once Decoder-Decoder KV Engine (Meta FAIR, arXiv:2405.05254)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Meta FAIR YOCO decoder-decoder architecture: self-decoder emits a single shared global KV once; cross-decoder layers cross-attend with zero private KV \u2014 ~2x-Lx memory reduction vs standard causal stacks.",
+    "cli": "yoco-cache-engine",
+    "evolved_at": "2026-11-12T07:19:12.896732",
+    "tags": [
+      "YOCO",
+      "Meta-FAIR",
+      "KV-Cache",
+      "Decoder-Decoder",
+      "Gated-Retention",
+      "Inference"
+    ]
   }
 ]
