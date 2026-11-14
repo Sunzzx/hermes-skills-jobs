@@ -2167,5 +2167,23 @@
       "asplos"
     ],
     "added_at": "2026-11-14 18:55:00"
+  },
+  {
+    "id": "sarathi-chunked-prefill",
+    "title": "Sarathi-Serve: Chunked-Prefill & Stall-Free Piggyback Batching Engine (OSDI 2024)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Chunked prefill & stall-free piggyback batching scheduler for high-throughput LLM serving, eliminating ITL/TBT bubbles via uniform iteration budgets (OSDI 2024).",
+    "cli": "sarathi-chunked-prefill",
+    "evolved_at": "2026-11-14T20:11:25.378089",
+    "tags": [
+      "sarathi-serve",
+      "chunked-prefill",
+      "piggyback-batching",
+      "osdi2024",
+      "inference-engine",
+      "llm-serving",
+      "roofline-model"
+    ]
   }
 ]
