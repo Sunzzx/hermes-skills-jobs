@@ -2121,5 +2121,20 @@
       "MemoryManagement",
       "Inference"
     ]
+  },
+  {
+    "id": "pissa-principal-adapter",
+    "title": "PiSSA Principal Singular Values & Vectors Adaptation Engine",
+    "description": "Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971) for parameter-efficient fine-tuning with zero inference latency overhead.",
+    "cli": "pissa-principal-adapter",
+    "category": "ml-optimization",
+    "tags": [
+      "peft",
+      "lora",
+      "svd",
+      "fine-tuning",
+      "llm"
+    ],
+    "added_at": "2026-11-14 08:42:49"
   }
 ]

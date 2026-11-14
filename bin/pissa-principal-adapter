@@ -311,13 +311,19 @@ class PiSSATrainer:
         AT = _transpose(self.A)
         dB = _matmul(AT, dW)
 
+        # Gradient clipping / normalized step to prevent divergence on unnormalized test weights
+        grad_norm = math.sqrt(sum(dA[i][k] ** 2 for i in range(self.m) for k in range(self.rank)) + sum(dB[k][j] ** 2 for k in range(self.rank) for j in range(self.n)))
+        effective_lr = self.lr
+        if grad_norm > 5.0:
+            effective_lr = self.lr * (5.0 / grad_norm)
+
         # Gradient step
         for i in range(self.m):
             for k in range(self.rank):
-                self.A[i][k] -= self.lr * dA[i][k]
+                self.A[i][k] -= effective_lr * dA[i][k]
         for k in range(self.rank):
             for j in range(self.n):
-                self.B[k][j] -= self.lr * dB[k][j]
+                self.B[k][j] -= effective_lr * dB[k][j]
 
         return loss
 
