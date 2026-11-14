@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-123-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-124-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (123 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (124 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -135,6 +135,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)** | `research` | `dora-weight-decomposed-adapter` | Weight magnitude/direction decomposition with LoRA on the directional component only: W'=m⊙normalize_cols(W0+BA); analytic sphere-projected grads; DoRA/LoRA/full-FT AdamW ablations; PEFT param ledger + LLaMA-7B adapter footprint theory (NVIDIA DoRA). | `Frontier-AI` `DoRA` `LoRA` |
 | **VeRA: Vector-based Random Matrix Adaptation Engine** | `research` | N/A | VeRA parameter-efficient fine-tuning (ICLR 2024): frozen network-shared random matrices A_hat and B_hat with trainable per-layer diagonal scaling vectors d and b, reducing LoRA trainable parameters by 10x-100x while maintaining downstream accuracy. |  |
 | **PagedAttention Virtual Memory & Block-Table Allocator** | `inference` | `paged-kv-allocator` | Virtual memory paging manager for LLM KV caches. Eliminates memory fragmentation by mapping non-contiguous physical memory blocks to logical token sequences with copy-on-write fork support. | `PagedAttention` `KVCache` `vLLM` |
+| **PiSSA Principal Singular Values & Vectors Adaptation Engine** | `ml-optimization` | `pissa-principal-adapter` | Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971) for parameter-efficient fine-tuning with zero inference latency overhead. | `peft` `lora` `svd` |
 
 ---
 
@@ -165,4 +166,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-14 07:33:42*
+*Last Evolved: 2026-11-14 08:43:09*

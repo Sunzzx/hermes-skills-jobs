@@ -1034,3 +1034,8 @@
 - **Title**: PagedAttention Virtual Memory & Block-Table Allocator
 - **Category**: inference
 - **Description**: Virtual memory paging manager for LLM KV caches. Eliminates memory fragmentation by mapping non-contiguous physical memory blocks to logical token sequences with copy-on-write fork support.
+
+### [2026-11-14 08:43:09] - Evolved `pissa-principal-adapter`
+- **Title**: PiSSA Principal Singular Values & Vectors Adaptation Engine
+- **Category**: ml-optimization
+- **Description**: Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971) for parameter-efficient fine-tuning with zero inference latency overhead.
