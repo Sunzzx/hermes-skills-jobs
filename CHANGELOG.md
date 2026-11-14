@@ -1039,3 +1039,8 @@
 - **Title**: PiSSA Principal Singular Values & Vectors Adaptation Engine
 - **Category**: ml-optimization
 - **Description**: Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971) for parameter-efficient fine-tuning with zero inference latency overhead.
+
+### [2026-11-14 10:56:45] - Evolved `radix-attention-cache`
+- **Title**: RadixAttention: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS, arXiv:2312.07104)
+- **Category**: inference
+- **Description**: 
