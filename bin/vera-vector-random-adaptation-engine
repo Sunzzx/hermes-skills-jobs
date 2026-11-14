@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""VeRA: Vector-based Random Matrix Adaptation Engine.
+
+Paper: Kopiczko, Blankevoort, Tomczak (Qualcomm AI Research) —
+  "VeRA: Vector-based Random Matrix Adaptation" (ICLR 2024, arXiv:2310.11454).
+
+Key Mechanism:
+  VeRA freezes a single pair of random matrices A_hat in R^{r x d_in} and
+  B_hat in R^{d_out x r} shared across ALL adapted layers across the network,
+  and trains ONLY per-layer diagonal scaling vectors d in R^{d_out} and b in R^r
+  (optionally with scaling alpha/r):
+    Delta W = diag(d) @ B_hat @ diag(b) @ A_hat
+  This reduces trainable parameters by 10x-100x compared to standard LoRA while
+  maintaining competitive downstream accuracy.
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+Vector = List[float]
+Matrix = List[List[float]]
+
+
+def _zeros(m: int, n: int) -> Matrix:
+    return [[0.0] * n for _ in range(m)]
+
+
+def _zeros_vec(n: int) -> Vector:
+    return [0.0] * n
+
+
+def _shape(M: Matrix) -> Tuple[int, int]:
+    return len(M), len(M[0]) if M else 0
+
+
+def _transpose(M: Matrix) -> Matrix:
+    m, n = _shape(M)
+    out = _zeros(n, m)
+    for i in range(m):
+        for j in range(n):
+            out[j][i] = M[i][j]
+    return out
+
+
+def _matmul(A: Matrix, B: Matrix) -> Matrix:
+    m, kA = _shape(A)
+    kB, n = _shape(B)
+    if kA != kB:
+        raise ValueError(f"Inner dim mismatch: {kA} vs {kB}")
+    out = _zeros(m, n)
+    for i in range(m):
+        Ai = A[i]
+        for k in range(kA):
+            aik = Ai[k]
+            if aik == 0.0:
+                continue
+            Bk = B[k]
+            for j in range(n):
+                out[i][j] += aik * Bk[j]
+    return out
+
+
+def _mat_vec(A: Matrix, v: Vector) -> Vector:
+    m, n = _shape(A)
+    if len(v) != n:
+        raise ValueError(f"Dim mismatch: mat {m}x{n} vs vec {len(v)}")
+    out = [0.0] * m
+    for i in range(m):
+        s = 0.0
+        Ai = A[i]
+        for j in range(n):
+            s += Ai[j] * v[j]
+        out[i] = s
+    return out
+
+
+def _vec_mat(v: Vector, A: Matrix) -> Vector:
+    m, n = _shape(A)
+    if len(v) != m:
+        raise ValueError(f"Dim mismatch: vec {len(v)} vs mat {m}x{n}")
+    out = [0.0] * n
+    for i in range(m):
+        vi = v[i]
+        if vi == 0.0:
+            continue
+        Ai = A[i]
+        for j in range(n):
+            out[j] += vi * Ai[j]
+    return out
+
+
+def _add(A: Matrix, B: Matrix) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] + B[i][j] for j in range(n)] for i in range(m)]
+
+
+def _sub(A: Matrix, B: Matrix) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] - B[i][j] for j in range(n)] for i in range(m)]
+
+
+def _scale(A: Matrix, s: float) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] * s for j in range(n)] for i in range(m)]
+
+
+def _scale_vec(v: Vector, s: float) -> Vector:
+    return [x * s for x in v]
+
+
+def _norm_frob(A: Matrix) -> float:
+    s = 0.0
+    for row in A:
+        for x in row:
+            s += x * x
+    return math.sqrt(s)
+
+
+def _dot(u: Vector, v: Vector) -> float:
+    return sum(a * b for a, b in zip(u, v))
+
+
+def _norm_vec(u: Vector) -> float:
+    return math.sqrt(sum(x * x for x in u))
+
+
+def _deepcopy_mat(A: Matrix) -> Matrix:
+    return [row[:] for row in A]
+
+
+def _rand_gauss(m: int, n: int, seed: int = 42, scale: float = 0.02) -> Matrix:
+    rng = random.Random(seed)
+    out = _zeros(m, n)
+    for i in range(m):
+        for j in range(n):
+            out[i][j] = rng.gauss(0.0, scale)
+    return out
+
+
+def _rand_gauss_vec(n: int, seed: int = 42, scale: float = 0.02) -> Vector:
+    rng = random.Random(seed)
+    return [rng.gauss(0.0, scale) for _ in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Shared Random Matrix Generator (PRNG / Kaiming / Normalized)
+# ---------------------------------------------------------------------------
+
+class SharedRandomMatrices:
+    """Generates deterministic frozen shared random matrices A_hat and B_hat."""
+
+    def __init__(self, d_max_out: int, d_max_in: int, rank: int, seed: int = 42, init_type: str = "kaiming_uniform"):
+        self.d_max_out = d_max_out
+        self.d_max_in = d_max_in
+        self.rank = rank
+        self.seed = seed
+        self.init_type = init_type
+        self.B_hat, self.A_hat = self._generate()
+
+    def _generate(self) -> Tuple[Matrix, Matrix]:
+        rng = random.Random(self.seed)
+        # B_hat: shape (d_max_out, rank)
+        # A_hat: shape (rank, d_max_in)
+        if self.init_type == "kaiming_uniform":
+            # Kaiming uniform bound = sqrt(3 / fan_in)
+            bound_B = math.sqrt(3.0 / max(1, self.rank))
+            bound_A = math.sqrt(3.0 / max(1, self.d_max_in))
+            B_hat = [[rng.uniform(-bound_B, bound_B) for _ in range(self.rank)] for _ in range(self.d_max_out)]
+            A_hat = [[rng.uniform(-bound_A, bound_A) for _ in range(self.d_max_in)] for _ in range(self.rank)]
+        elif self.init_type == "normal":
+            std_B = 1.0 / math.sqrt(self.rank)
+            std_A = 1.0 / math.sqrt(self.d_max_in)
+            B_hat = [[rng.gauss(0.0, std_B) for _ in range(self.rank)] for _ in range(self.d_max_out)]
+            A_hat = [[rng.gauss(0.0, std_A) for _ in range(self.d_max_in)] for _ in range(self.rank)]
+        else:  # normalized
+            B_hat = _zeros(self.d_max_out, self.rank)
+            for i in range(self.d_max_out):
+                row = [rng.gauss(0.0, 1.0) for _ in range(self.rank)]
+                norm = math.sqrt(sum(x * x for x in row)) or 1.0
+                B_hat[i] = [x / norm for x in row]
+            A_hat = _zeros(self.rank, self.d_max_in)
+            for i in range(self.rank):
+                row = [rng.gauss(0.0, 1.0) for _ in range(self.d_max_in)]
+                norm = math.sqrt(sum(x * x for x in row)) or 1.0
+                A_hat[i] = [x / norm for x in row]
+        return B_hat, A_hat
+
+    def slice_for_layer(self, d_out: int, d_in: int) -> Tuple[Matrix, Matrix]:
+        """Extract submatrix slice for a layer of shape (d_out, d_in)."""
+        if d_out > self.d_max_out or d_in > self.d_max_in:
+            raise ValueError(f"Requested layer ({d_out}, {d_in}) exceeds maximum ({self.d_max_out}, {self.d_max_in})")
+        B_sub = [self.B_hat[i][:self.rank] for i in range(d_out)]
+        A_sub = [self.A_hat[r][:d_in] for r in range(self.rank)]
+        return B_sub, A_sub
+
+
+# ---------------------------------------------------------------------------
+# VeRA Layer Formulation and Forward / Backward
+# ---------------------------------------------------------------------------
+
+class VeRALayer:
+    """Individual adapted linear layer with frozen W0, frozen shared A_hat, B_hat,
+    and trainable scaling vectors d in R^{d_out} and b in R^r.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        W0: Matrix,
+        B_hat: Matrix,
+        A_hat: Matrix,
+        rank: int,
+        alpha: float = 1.0,
+        init_d_val: float = 0.0,
+        init_b_val: float = 1.0,
+    ):
+        self.name = name
+        self.W0 = _deepcopy_mat(W0)
+        self.d_out, self.d_in = _shape(W0)
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / float(rank)
+
+        # Frozen shared matrices
+        self.B_hat = B_hat
+        self.A_hat = A_hat
+
+        # Trainable 1D scaling vectors: d (size d_out) and b (size rank)
+        # VeRA initializes d to zeros (so initial delta W = 0) and b to ones or small constant
+        self.d: Vector = [init_d_val] * self.d_out
+        self.b: Vector = [init_b_val] * self.rank
+
+    def effective_delta_w(self) -> Matrix:
+        """Computes Delta W = scaling * diag(d) @ B_hat @ diag(b) @ A_hat."""
+        # M = diag(b) @ A_hat -> row r scaled by b[r]
+        M = _zeros(self.rank, self.d_in)
+        for r in range(self.rank):
+            br = self.b[r]
+            for j in range(self.d_in):
+                M[r][j] = br * self.A_hat[r][j]
+
+        # N = B_hat @ M -> shape (d_out, d_in)
+        N = _matmul(self.B_hat, M)
+
+        # Delta W = scaling * diag(d) @ N -> row i scaled by d[i] * scaling
+        delta = _zeros(self.d_out, self.d_in)
+        s = self.scaling
+        for i in range(self.d_out):
+            factor = s * self.d[i]
+            for j in range(self.d_in):
+                delta[i][j] = factor * N[i][j]
+        return delta
+
+    def weight(self) -> Matrix:
+        """Returns effective full weight W = W0 + Delta W."""
+        delta = self.effective_delta_w()
+        return _add(self.W0, delta)
+
+    def forward(self, x: Vector) -> Vector:
+        """Forward pass for single vector x in R^{d_in} -> y in R^{d_out}."""
+        # y = W0 @ x + scaling * (d * (B_hat @ (b * (A_hat @ x))))
+        base_out = _mat_vec(self.W0, x)
+        # 1. z1 = A_hat @ x -> size rank
+        z1 = _mat_vec(self.A_hat, x)
+        # 2. z2 = b * z1 (elementwise)
+        z2 = [self.b[r] * z1[r] for r in range(self.rank)]
+        # 3. z3 = B_hat @ z2 -> size d_out
+        z3 = _mat_vec(self.B_hat, z2)
+        # 4. delta_out = scaling * (d * z3)
+        s = self.scaling
+        out = [base_out[i] + s * self.d[i] * z3[i] for i in range(self.d_out)]
+        return out
+
+    def backward_gradients(
+        self, x_batch: List[Vector], grad_y_batch: List[Vector]
+    ) -> Tuple[Vector, Vector]:
+        """Computes analytical gradients w.r.t trainable vectors d and b over a batch.
+        For batch sample k:
+          y_k = W0 @ x_k + s * d * (B_hat @ (b * (A_hat @ x_k)))
+          z1_k = A_hat @ x_k
+          z2_k = b * z1_k
+          z3_k = B_hat @ z2_k
+
+          dL/dd_i = s * sum_k grad_y[k][i] * z3_k[i]
+          dL/dz3_k = s * grad_y[k] * d
+          dL/dz2_k = B_hat^T @ dL/dz3_k
+          dL/db_r = sum_k dL/dz2_k[r] * z1_k[r]
+        """
+        batch_size = len(x_batch)
+        grad_d = _zeros_vec(self.d_out)
+        grad_b = _zeros_vec(self.rank)
+        s = self.scaling
+        B_hat_T = _transpose(self.B_hat)
+
+        for k in range(batch_size):
+            xk = x_batch[k]
+            gyk = grad_y_batch[k]
+
+            z1_k = _mat_vec(self.A_hat, xk)
+            z2_k = [self.b[r] * z1_k[r] for r in range(self.rank)]
+            z3_k = _mat_vec(self.B_hat, z2_k)
+
+            # grad_d accumulation
+            for i in range(self.d_out):
+                grad_d[i] += s * gyk[i] * z3_k[i]
+
+            # grad_b accumulation
+            dL_dz3 = [s * gyk[i] * self.d[i] for i in range(self.d_out)]
+            dL_dz2 = _mat_vec(B_hat_T, dL_dz3)
+            for r in range(self.rank):
+                grad_b[r] += dL_dz2[r] * z1_k[r]
+
+        # Average over batch
+        inv_b = 1.0 / max(1, batch_size)
+        grad_d = [g * inv_b for g in grad_d]
+        grad_b = [g * inv_b for g in grad_b]
+        return grad_d, grad_b
+
+    def num_trainable(self) -> int:
+        return self.d_out + self.rank
+
+    def num_frozen_lora_equiv(self) -> int:
+        return self.d_out * self.rank + self.rank * self.d_in
+
+
+# ---------------------------------------------------------------------------
+# Optimizer (AdamW for 1D vectors)
+# ---------------------------------------------------------------------------
+
+class AdamWVec:
+    def __init__(self, size: int, lr: float = 0.01, beta1: float = 0.9, beta2: float = 0.999, eps: float = 1e-8, weight_decay: float = 0.0):
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.m = [0.0] * size
+        self.v = [0.0] * size
+        self.t = 0
+
+    def step(self, param: Vector, grad: Vector) -> None:
+        self.t += 1
+        b1 = self.beta1
+        b2 = self.beta2
+        lr = self.lr
+        eps = self.eps
+        wd = self.weight_decay
+        c1 = 1.0 - (b1 ** self.t)
+        c2 = 1.0 - (b2 ** self.t)
+        step_size = lr * math.sqrt(c2) / c1
+
+        for i in range(len(param)):
+            g = grad[i]
+            if wd > 0.0:
+                param[i] -= lr * wd * param[i]
+            self.m[i] = b1 * self.m[i] + (1.0 - b1) * g
+            self.v[i] = b2 * self.v[i] + (1.0 - b2) * (g * g)
+            param[i] -= step_size * self.m[i] / (math.sqrt(self.v[i]) + eps)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Layer VeRA Network Simulator
+# ---------------------------------------------------------------------------
+
+class MultiLayerVeRANetwork:
+    """A sequence of linear layers sharing the SAME frozen random matrices A_hat, B_hat."""
+
+    def __init__(self, layer_dims: List[Tuple[int, int]], rank: int = 16, seed: int = 42, alpha: float = 1.0):
+        self.layer_dims = layer_dims
+        self.rank = rank
+        self.seed = seed
+        self.alpha = alpha
+
+        # Maximum dimension to support slicing
+        max_out = max(d[0] for d in layer_dims)
+        max_in = max(d[1] for d in layer_dims)
+
+        self.shared_generator = SharedRandomMatrices(max_out, max_in, rank, seed=seed)
+
+        self.layers: List[VeRALayer] = []
+        self.optimizers_d: List[AdamWVec] = []
+        self.optimizers_b: List[AdamWVec] = []
+
+        for idx, (d_out, d_in) in enumerate(layer_dims):
+            W0 = _rand_gauss(d_out, d_in, seed=seed + 100 + idx, scale=1.0 / math.sqrt(d_in))
+            B_sub, A_sub = self.shared_generator.slice_for_layer(d_out, d_in)
+            layer = VeRALayer(
+                name=f"layer_{idx}_{d_out}x{d_in}",
+                W0=W0,
+                B_hat=B_sub,
+                A_hat=A_sub,
+                rank=rank,
+                alpha=alpha,
+                init_d_val=0.0,
+                init_b_val=1.0,
+            )
+            self.layers.append(layer)
+            self.optimizers_d.append(AdamWVec(d_out, lr=0.02))
+            self.optimizers_b.append(AdamWVec(rank, lr=0.02))
+
+    def total_trainable_parameters(self) -> int:
+        return sum(layer.num_trainable() for layer in self.layers)
+
+    def total_lora_parameters(self) -> int:
+        return sum(layer.num_frozen_lora_equiv() for layer in self.layers)
+
+    def total_full_parameters(self) -> int:
+        return sum(l.d_out * l.d_in for l in self.layers)
+
+    def parameter_compression_ratio_vs_lora(self) -> float:
+        lora_p = self.total_lora_parameters()
+        vera_p = self.total_trainable_parameters()
+        return lora_p / max(1, vera_p)
+
+
+# ---------------------------------------------------------------------------
+# Benchmarking & Theory Models (LLaMA-3 / Mistral / DeepSeek comparison)
+# ---------------------------------------------------------------------------
+
+ARCHITECTURES = {
+    "llama-7b": {
+        "name": "LLaMA-7B",
+        "n_layers": 32,
+        "layers": [
+            ("q_proj", 4096, 4096),
+            ("k_proj", 4096, 4096),
+            ("v_proj", 4096, 4096),
+            ("o_proj", 4096, 4096),
+            ("gate_proj", 11008, 4096),
+            ("up_proj", 11008, 4096),
+            ("down_proj", 4096, 11008),
+        ],
+    },
+    "llama-3-8b": {
+        "name": "LLaMA-3-8B",
+        "n_layers": 32,
+        "layers": [
+            ("q_proj", 4096, 4096),
+            ("k_proj", 1024, 4096),   # GQA
+            ("v_proj", 1024, 4096),   # GQA
+            ("o_proj", 4096, 4096),
+            ("gate_proj", 14336, 4096),
+            ("up_proj", 14336, 4096),
+            ("down_proj", 4096, 14336),
+        ],
+    },
+    "llama-70b": {
+        "name": "LLaMA-2-70B",
+        "n_layers": 80,
+        "layers": [
+            ("q_proj", 8192, 8192),
+            ("k_proj", 1024, 8192),   # GQA
+            ("v_proj", 1024, 8192),   # GQA
+            ("o_proj", 8192, 8192),
+            ("gate_proj", 28672, 8192),
+            ("up_proj", 28672, 8192),
+            ("down_proj", 8192, 28672),
+        ],
+    },
+}
+
+
+def compute_architecture_peft_ledger(arch_key: str, rank: int = 16, dora_included: bool = True) -> Dict[str, Any]:
+    if arch_key not in ARCHITECTURES:
+        raise ValueError(f"Unknown architecture '{arch_key}'. Choose from: {list(ARCHITECTURES.keys())}")
+    arch = ARCHITECTURES[arch_key]
+    n_layers = arch["n_layers"]
+    
+    total_full_params = 0
+    total_lora_params = 0
+    total_dora_params = 0
+    total_vera_trainable = 0
+    
+    per_layer_breakdown = []
+
+    for name, d_out, d_in in arch["layers"]:
+        full_p = d_out * d_in
+        lora_p = (d_out * rank) + (rank * d_in)
+        dora_p = lora_p + d_out  # DoRA adds per-column/row magnitude vector
+        vera_p = d_out + rank    # VeRA trains ONLY d (d_out) + b (rank)
+
+        total_full_params += full_p * n_layers
+        total_lora_params += lora_p * n_layers
+        total_dora_params += dora_p * n_layers
+        total_vera_trainable += vera_p * n_layers
+
+        per_layer_breakdown.append({
+            "layer": name,
+            "shape": [d_out, d_in],
+            "full_params": full_p,
+            "lora_params": lora_p,
+            "dora_params": dora_p,
+            "vera_trainable": vera_p,
+            "lora_to_vera_ratio": round(lora_p / vera_p, 2),
+        })
+
+    # Frozen shared parameters in VeRA (only stored ONCE across all layers)
+    max_d_out = max(d[1] for d in arch["layers"])
+    max_d_in = max(d[2] for d in arch["layers"])
+    shared_frozen_params = (max_d_out * rank) + (rank * max_d_in)
+
+    bytes_per_param = 2  # FP16 / BF16
+    vera_mib = (total_vera_trainable * bytes_per_param) / (1024 * 1024)
+    lora_mib = (total_lora_params * bytes_per_param) / (1024 * 1024)
+    dora_mib = (total_dora_params * bytes_per_param) / (1024 * 1024)
+    full_gib = (total_full_params * bytes_per_param) / (1024 ** 3)
+
+    return {
+        "architecture": arch["name"],
+        "layers_count": n_layers,
+        "rank": rank,
+        "full_model_params": total_full_params,
+        "full_model_weights_gib": round(full_gib, 2),
+        "lora_trainable_params": total_lora_params,
+        "lora_checkpoint_mib": round(lora_mib, 3),
+        "dora_trainable_params": total_dora_params,
+        "dora_checkpoint_mib": round(dora_mib, 3),
+        "vera_trainable_params": total_vera_trainable,
+        "vera_checkpoint_mib": round(vera_mib, 4),
+        "vera_shared_frozen_params": shared_frozen_params,
+        "compression_vs_lora": round(total_lora_params / total_vera_trainable, 2),
+        "compression_vs_dora": round(total_dora_params / total_vera_trainable, 2),
+        "compression_vs_full": round(total_full_params / total_vera_trainable, 2),
+        "per_layer_breakdown": per_layer_breakdown,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Interactive CLI Interface
+# ---------------------------------------------------------------------------
+
+def cmd_status(args: argparse.Namespace) -> None:
+    reg = compute_architecture_peft_ledger("llama-7b", rank=args.rank)
+    out = {
+        "status": "operational",
+        "engine": "vera-vector-random-adaptation-engine",
+        "paper": "ICLR 2024 (arXiv:2310.11454)",
+        "sample_benchmark": {
+            "architecture": reg["architecture"],
+            "rank": args.rank,
+            "lora_params": reg["lora_trainable_params"],
+            "vera_trainable_params": reg["vera_trainable_params"],
+            "reduction_factor": f"{reg['compression_vs_lora']}x",
+            "checkpoint_size_reduction": f"{reg['lora_checkpoint_mib']} MB -> {reg['vera_checkpoint_mib']} MB",
+        },
+    }
+    print(json.dumps(out, indent=2))
+
+
+def cmd_compare(args: argparse.Namespace) -> None:
+    ledger = compute_architecture_peft_ledger(args.arch, rank=args.rank)
+    if args.json:
+        print(json.dumps(ledger, indent=2))
+    else:
+        print(f"""=================================================================
+VeRA vs LoRA vs DoRA Parameter Audit: {ledger['architecture']} (Rank={args.rank})
+=================================================================
+Full Parameter Count:    {ledger['full_model_params']:,} ({ledger['full_model_weights_gib']} GiB FP16)
+LoRA Trainable Params:   {ledger['lora_trainable_params']:,} ({ledger['lora_checkpoint_mib']} MiB)
+DoRA Trainable Params:   {ledger['dora_trainable_params']:,} ({ledger['dora_checkpoint_mib']} MiB)
+VeRA Trainable Params:   {ledger['vera_trainable_params']:,} ({ledger['vera_checkpoint_mib']} MiB)
+-----------------------------------------------------------------
+Compression vs LoRA:     {ledger['compression_vs_lora']}x fewer parameters!
+Compression vs Full:     {ledger['compression_vs_full']:,}x parameter efficiency!
+Shared Frozen Matrix:    {ledger['vera_shared_frozen_params']:,} params (stored once / generated via PRNG seed)
+================================================================="""
+        )
+
+
+def cmd_simulate(args: argparse.Namespace) -> None:
+    rng = random.Random(args.seed)
+    d_out, d_in = args.out_features, args.in_features
+    rank = args.rank
+
+    # Task: learn synthetic linear mapping Y = W_star @ X
+    W_star = _rand_gauss(d_out, d_in, seed=args.seed + 99, scale=0.5)
+    W0 = _add(W_star, _rand_gauss(d_out, d_in, seed=args.seed + 1, scale=0.2))
+
+    shared = SharedRandomMatrices(d_out, d_in, rank, seed=args.seed)
+    B_sub, A_sub = shared.slice_for_layer(d_out, d_in)
+
+    layer = VeRALayer(
+        name="sim_layer",
+        W0=W0,
+        B_hat=B_sub,
+        A_hat=A_sub,
+        rank=rank,
+        alpha=args.alpha,
+    )
+
+    opt_d = AdamWVec(d_out, lr=args.lr)
+    opt_b = AdamWVec(rank, lr=args.lr)
+
+    # Generate fixed evaluation set
+    eval_X = [[rng.gauss(0.0, 1.0) for _ in range(d_in)] for _ in range(20)]
+    eval_Y = [_mat_vec(W_star, x) for x in eval_X]
+
+    def compute_loss(curr_layer: VeRALayer) -> float:
+        loss = 0.0
+        for x, y_target in zip(eval_X, eval_Y):
+            y_pred = curr_layer.forward(x)
+            for yp, yt in zip(y_pred, y_target):
+                diff = yp - yt
+                loss += 0.5 * diff * diff
+        return loss / len(eval_X)
+
+    init_loss = compute_loss(layer)
+    loss_history = [init_loss]
+
+    # Optimization steps
+    batch_size = args.batch_size
+    for step in range(args.steps):
+        x_batch = [[rng.gauss(0.0, 1.0) for _ in range(d_in)] for _ in range(batch_size)]
+        y_target = [_mat_vec(W_star, x) for x in x_batch]
+
+        # Forward
+        grad_y = []
+        for x, yt in zip(x_batch, y_target):
+            yp = layer.forward(x)
+            grad_y.append([yp[i] - yt[i] for i in range(d_out)])
+
+        # Backward analytical
+        gd, gb = layer.backward_gradients(x_batch, grad_y)
+
+        # Update trainable vectors only
+        opt_d.step(layer.d, gd)
+        opt_b.step(layer.b, gb)
+
+        if (step + 1) % max(1, (args.steps // 5)) == 0 or step == args.steps - 1:
+            loss_history.append(compute_loss(layer))
+
+    final_loss = compute_loss(layer)
+    W_final = layer.weight()
+    err_init = _norm_frob(_sub(W0, W_star))
+    err_final = _norm_frob(_sub(W_final, W_star))
+
+    res = {
+        "experiment": "VeRA adaptation single-layer optimization",
+        "shape": [d_out, d_in],
+        "rank": rank,
+        "steps": args.steps,
+        "trainable_params": layer.num_trainable(),
+        "lora_equivalent_params": layer.num_frozen_lora_equiv(),
+        "param_savings_ratio": round(layer.num_frozen_lora_equiv() / layer.num_trainable(), 2),
+        "initial_mse_loss": round(init_loss, 5),
+        "final_mse_loss": round(final_loss, 5),
+        "loss_reduction_pct": round((init_loss - final_loss) / init_loss * 100.0, 2),
+        "weight_matrix_frobenius_dist_initial": round(err_init, 4),
+        "weight_matrix_frobenius_dist_final": round(err_final, 4),
+        "converged": final_loss < init_loss,
+    }
+    print(json.dumps(res, indent=2))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="VeRA: Vector-based Random Matrix Adaptation Engine (ICLR 2024)")
+    sub = parser.add_subparsers(dest="subcommand")
+
+    p_status = sub.add_parser("status", help="Show engine status & capability summary")
+    p_status.add_argument("--rank", type=int, default=16, help="LoRA / VeRA rank (default: 16)")
+
+    p_compare = sub.add_parser("compare", help="Compare parameter counts between Full FT, LoRA, DoRA, and VeRA")
+    p_compare.add_argument("--arch", type=str, default="llama-7b", choices=list(ARCHITECTURES.keys()), help="Target architecture")
+    p_compare.add_argument("--rank", type=int, default=16, help="Adapter rank")
+    p_compare.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    p_sim = sub.add_parser("simulate", help="Run synthetic gradient adaptation simulation")
+    p_sim.add_argument("--in-features", type=int, default=128, help="Input dimension")
+    p_sim.add_argument("--out-features", type=int, default=128, help="Output dimension")
+    p_sim.add_argument("--rank", type=int, default=8, help="VeRA rank")
+    p_sim.add_argument("--alpha", type=float, default=1.0, help="Scaling factor")
+    p_sim.add_argument("--lr", type=float, default=0.05, help="Learning rate for vectors d and b")
+    p_sim.add_argument("--steps", type=int, default=50, help="Optimization steps")
+    p_sim.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    p_sim.add_argument("--seed", type=int, default=42, help="Random seed")
+
+    args = parser.parse_args()
+    if not args.subcommand or args.subcommand == "status":
+        cmd_status(args if args.subcommand else argparse.Namespace(rank=16))
+    elif args.subcommand == "compare":
+        cmd_compare(args)
+    elif args.subcommand == "simulate":
+        cmd_simulate(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,24 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-121-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-122-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-
-## Recently Evolved
-- `dora-weight-decomposed-adapter` — DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)
-- `galore-gradient-lowrank-projector` — GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)
-- `qtip-trellis-incoherence-engine` — QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)
-- `omniquant-lwc-let-engine` — OmniQuant: LWC + LET Omnidirectional PTQ Calibration Engine (ICLR 2024, arXiv:2308.13137)
-- `aqlm-additive-multi-codebook-engine` — AQLM: Additive Multi-Codebook LLM Quantization Engine (NeurIPS 2024, arXiv:2401.06118)
-- `quip-sharp-incoherence-lattice-engine` — QuIP#: Hadamard Incoherence + E8 Lattice PTQ Engine (ICML 2024, arXiv:2402.04396)
-
-
-## 🚀 Live Capability Registry (121 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (122 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -143,6 +133,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **QTIP: Trellis-Coded Quantization + Incoherence Engine (NeurIPS 2024, arXiv:2406.11235)** | `inference` | `qtip-trellis-incoherence-engine` | Weight-only extreme PTQ via Randomized Hadamard incoherence + Ungerboeck trellis-coded quantization with Viterbi min-MSE path encoding — SOTA-class 2–4 bpw reference (Tseng, Chang, De Sa, Cornell RelaxML). | `Frontier-AI` `QTIP` `Trellis` |
 | **GaLore: Gradient Low-Rank Projection Memory-Efficient Training Engine (ICML 2024, arXiv:2403.03507)** | `research` | `galore-gradient-lowrank-projector` | Full-parameter LLM training with low-rank gradient projection: subspace-iteration SVD, one-sided P/Q projectors, AdamW on rank-r cores, LoRA/full baselines, Lemma 3.1 stable-rank collapse, LLaMA-7B optimizer-state theory (Zhao et al., ICML 2024 Oral). | `Frontier-AI` `GaLore` `LowRank` |
 | **DoRA: Weight-Decomposed Low-Rank Adaptation Engine (ICML 2024, arXiv:2402.09353)** | `research` | `dora-weight-decomposed-adapter` | Weight magnitude/direction decomposition with LoRA on the directional component only: W'=m⊙normalize_cols(W0+BA); analytic sphere-projected grads; DoRA/LoRA/full-FT AdamW ablations; PEFT param ledger + LLaMA-7B adapter footprint theory (NVIDIA DoRA). | `Frontier-AI` `DoRA` `LoRA` |
+| **VeRA: Vector-based Random Matrix Adaptation Engine** | `research` | N/A | VeRA parameter-efficient fine-tuning (ICLR 2024): frozen network-shared random matrices A_hat and B_hat with trainable per-layer diagonal scaling vectors d and b, reducing LoRA trainable parameters by 10x-100x while maintaining downstream accuracy. |  |
 
 ---
 
@@ -169,12 +160,8 @@ ports free 3000
 
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
-
-# Example: DoRA weight-decomposed PEFT reference
-dora-weight-decomposed-adapter verify --trials 3
-dora-weight-decomposed-adapter theory --rank 16
 ```
 
 ---
 
-*Last Evolved: 2026-11-13 02:29:45*
+*Last Evolved: 2026-11-14 06:30:24*

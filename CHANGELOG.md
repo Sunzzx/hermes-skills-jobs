@@ -1024,3 +1024,8 @@
 - **Title**: AWQ: Activation-aware Weight Quantization Engine (MLSys 2024, arXiv:2306.00978)
 - **Category**: inference
 - **Description**: Activation-aware weight quantization: saliency scales s^alpha protect salient channels, group asymmetric RTN + alpha grid search vs RTN baseline — pure-Python INT4 reference (vLLM/AutoAWQ path).
+
+### [2026-11-14 06:30:24] - Evolved `vera-vector-random-adaptation-engine`
+- **Title**: VeRA: Vector-based Random Matrix Adaptation Engine
+- **Category**: research
+- **Description**: VeRA parameter-efficient fine-tuning (ICLR 2024): frozen network-shared random matrices A_hat and B_hat with trainable per-layer diagonal scaling vectors d and b, reducing LoRA trainable parameters by 10x-100x while maintaining downstream accuracy.

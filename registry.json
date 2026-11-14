@@ -2093,5 +2093,17 @@
       "ICML2024",
       "NVIDIA"
     ]
+  },
+  {
+    "id": "vera-vector-random-adaptation-engine",
+    "title": "VeRA: Vector-based Random Matrix Adaptation Engine",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "VeRA parameter-efficient fine-tuning (ICLR 2024): frozen network-shared random matrices A_hat and B_hat with trainable per-layer diagonal scaling vectors d and b, reducing LoRA trainable parameters by 10x-100x while maintaining downstream accuracy.",
+    "cli_cmd": "vera-vector-random-adaptation-engine",
+    "skill_path": "skills/research/vera-vector-random-adaptation-engine/SKILL.md",
+    "tool_path": "bin/vera-vector-random-adaptation-engine",
+    "test_path": "tests/test_vera_vector_random_adaptation_engine.py",
+    "paper": "ICLR 2024 (arXiv:2310.11454)"
   }
 ]
