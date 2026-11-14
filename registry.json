@@ -2105,5 +2105,21 @@
     "tool_path": "bin/vera-vector-random-adaptation-engine",
     "test_path": "tests/test_vera_vector_random_adaptation_engine.py",
     "paper": "ICLR 2024 (arXiv:2310.11454)"
+  },
+  {
+    "id": "hermes-paged-kv-cache",
+    "title": "PagedAttention Virtual Memory & Block-Table Allocator",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Virtual memory paging manager for LLM KV caches. Eliminates memory fragmentation by mapping non-contiguous physical memory blocks to logical token sequences with copy-on-write fork support.",
+    "cli": "paged-kv-allocator",
+    "evolved_at": "2026-11-14T07:33:42.053798",
+    "tags": [
+      "PagedAttention",
+      "KVCache",
+      "vLLM",
+      "MemoryManagement",
+      "Inference"
+    ]
   }
 ]

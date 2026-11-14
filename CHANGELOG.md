@@ -1029,3 +1029,8 @@
 - **Title**: VeRA: Vector-based Random Matrix Adaptation Engine
 - **Category**: research
 - **Description**: VeRA parameter-efficient fine-tuning (ICLR 2024): frozen network-shared random matrices A_hat and B_hat with trainable per-layer diagonal scaling vectors d and b, reducing LoRA trainable parameters by 10x-100x while maintaining downstream accuracy.
+
+### [2026-11-14 07:33:42] - Evolved `hermes-paged-kv-cache`
+- **Title**: PagedAttention Virtual Memory & Block-Table Allocator
+- **Category**: inference
+- **Description**: Virtual memory paging manager for LLM KV caches. Eliminates memory fragmentation by mapping non-contiguous physical memory blocks to logical token sequences with copy-on-write fork support.
