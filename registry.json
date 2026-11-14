@@ -2153,5 +2153,19 @@
       "lmsys",
       "llm-inference"
     ]
+  },
+  {
+    "id": "specinfer-tree-speculation",
+    "title": "SpecInfer: Tree-based Speculative Inference and Verification Engine (ASPLOS 2024, arXiv:2305.01858)",
+    "category": "inference",
+    "tags": [
+      "specinfer",
+      "speculative-decoding",
+      "tree-speculation",
+      "llm-inference",
+      "tree-attention",
+      "asplos"
+    ],
+    "added_at": "2026-11-14 18:55:00"
   }
 ]

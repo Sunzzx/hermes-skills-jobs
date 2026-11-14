@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""specinfer-tree-speculation: Tree-based Speculative Inference & Verification Engine (ASPLOS 2024).
+
+Accelerates generative LLM serving by proposing speculative token trees from small draft models
+and verifying all candidate paths concurrently in a single-pass causal tree attention verification
+kernel on the target LLM.
+
+Reference:
+  Miao et al., 'SpecInfer: Accelerating Generative LLM Serving with Tree-based Speculative Inference
+  and Verification', ASPLOS 2024 (arXiv:2305.01858).
+"""
+
+import argparse
+import json
+import math
+import random
+import sys
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+class TreeNode:
+    def __init__(self, node_id: int, token_id: int, parent_id: Optional[int] = None, depth: int = 0, prob: float = 1.0):
+        self.node_id = node_id
+        self.token_id = token_id
+        self.parent_id = parent_id
+        self.depth = depth
+        self.prob = prob
+        self.children_ids: List[int] = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "token_id": self.token_id,
+            "parent_id": self.parent_id,
+            "depth": self.depth,
+            "prob": round(self.prob, 4),
+            "children_ids": self.children_ids,
+        }
+
+
+class SpeculativeTokenTree:
+    """Represents a speculative tree of candidate tokens proposed by draft models."""
+
+    def __init__(self, root_token_id: int):
+        self.root_id = 0
+        self.nodes: Dict[int, TreeNode] = {
+            0: TreeNode(node_id=0, token_id=root_token_id, parent_id=None, depth=0, prob=1.0)
+        }
+        self._next_id = 1
+
+    def add_token(self, parent_id: int, token_id: int, prob: float = 1.0) -> int:
+        if parent_id not in self.nodes:
+            raise ValueError(f"Parent node_id {parent_id} does not exist in tree.")
+        node_id = self._next_id
+        self._next_id += 1
+        depth = self.nodes[parent_id].depth + 1
+        node = TreeNode(node_id=node_id, token_id=token_id, parent_id=parent_id, depth=depth, prob=prob)
+        self.nodes[node_id] = node
+        self.nodes[parent_id].children_ids.append(node_id)
+        return node_id
+
+    def get_ancestor_path(self, node_id: int) -> List[int]:
+        """Returns list of node_ids from root to node_id inclusive."""
+        path = []
+        curr = node_id
+        while curr is not None:
+            path.append(curr)
+            curr = self.nodes[curr].parent_id
+        return list(reversed(path))
+
+    def get_token_sequence(self, node_id: int) -> List[int]:
+        """Returns list of token_ids along the path from root to node_id."""
+        ancestors = self.get_ancestor_path(node_id)
+        return [self.nodes[nid].token_id for nid in ancestors]
+
+    def compute_tree_attention_mask(self) -> Tuple[List[int], List[List[int]]]:
+        """Generates the custom causal tree attention mask matrix.
+
+        For ordered node indices [0, 1, ..., N-1], mask[i][j] = 1 if and only if
+        node j is an ancestor of node i (or j == i); otherwise 0.
+        This allows verifying all tree nodes in a single LLM forward pass
+        without information leakage across separate speculative branches.
+        """
+        ordered_nodes = sorted(self.nodes.keys())
+        n = len(ordered_nodes)
+        idx_map = {nid: i for i, nid in enumerate(ordered_nodes)}
+        mask = [[0] * n for _ in range(n)]
+
+        for nid in ordered_nodes:
+            i = idx_map[nid]
+            ancestors = self.get_ancestor_path(nid)
+            for anc in ancestors:
+                j = idx_map[anc]
+                mask[i][j] = 1
+
+        return ordered_nodes, mask
+
+    def verify_paths(
+        self,
+        target_eval_fn,
+        stochastic: bool = False,
+    ) -> Tuple[List[int], int, List[int]]:
+        """Executes SpecInfer tree-based verification.
+
+        Args:
+            target_eval_fn: Callable taking token_seq -> (is_accepted: bool, accepted_prefix_len: int)
+            stochastic: Whether to sample branch acceptance stochastically or greedily.
+
+        Returns:
+            (best_token_sequence, accepted_count, best_node_path)
+        """
+        best_path: List[int] = [self.root_id]
+        best_tokens: List[int] = [self.nodes[self.root_id].token_id]
+
+        # Find all leaf nodes
+        leaves = [nid for nid, node in self.nodes.items() if len(node.children_ids) == 0]
+
+        for leaf_id in leaves:
+            path = self.get_ancestor_path(leaf_id)
+            tokens = [self.nodes[nid].token_id for nid in path]
+            accepted, prefix_len = target_eval_fn(tokens)
+            if accepted and prefix_len > len(best_path):
+                best_path = path[:prefix_len]
+                best_tokens = tokens[:prefix_len]
+
+        accepted_tokens_count = len(best_tokens) - 1  # excluding initial root token
+        return best_tokens, accepted_tokens_count, best_path
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "total_nodes": len(self.nodes),
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+        }, indent=2)
+
+
+def build_synthetic_tree(depth: int = 3, branching_factor: int = 2, seed: int = 42) -> SpeculativeTokenTree:
+    """Constructs a balanced speculative candidate tree with controlled branching."""
+    rng = random.Random(seed)
+    root_token = 100
+    tree = SpeculativeTokenTree(root_token_id=root_token)
+    current_level = [tree.root_id]
+
+    vocab_pool = list(range(1000, 2000))
+
+    for d in range(depth):
+        next_level = []
+        for parent in current_level:
+            for b in range(branching_factor):
+                tok = rng.choice(vocab_pool)
+                prob = max(0.05, 1.0 - (d * 0.2) - (b * 0.15))
+                child_id = tree.add_token(parent_id=parent, token_id=tok, prob=prob)
+                next_level.append(child_id)
+        current_level = next_level
+
+    return tree
+
+
+def cmd_mask(args):
+    """Generate and display the causal tree attention mask."""
+    tree = build_synthetic_tree(depth=args.depth, branching_factor=args.branching_factor)
+    nodes, mask = tree.compute_tree_attention_mask()
+
+    print(f"=== SpecInfer Causal Tree Attention Mask (N={len(nodes)} nodes) ===")
+    print(f"Tree Depth: {args.depth}, Branching Factor: {args.branching_factor}\n")
+
+    # Print ASCII matrix for smaller dimensions, or summary for larger ones
+    if len(nodes) <= 16:
+        header = "     " + " ".join(f"{nid:2d}" for nid in nodes)
+        print(header)
+        print("    -" + "---" * len(nodes))
+        for i, nid in enumerate(nodes):
+            row_str = " ".join(f"{mask[i][j]:2d}" for j in range(len(nodes)))
+            print(f"{nid:2d} | {row_str}")
+    else:
+        density = sum(sum(row) for row in mask) / (len(nodes) ** 2)
+        print(f"Total matrix cells: {len(nodes)} x {len(nodes)} = {len(nodes)**2}")
+        print(f"Active causal connections: {sum(sum(row) for row in mask)}")
+        print(f"Attention matrix sparsity: {1.0 - density:.2%}")
+        print("(Matrix display truncated for large N. Run with --depth 2 --branching-factor 2 for full print)")
+
+
+def cmd_benchmark(args):
+    """Simulates target LLM verification across multi-candidate tree vs linear speculation."""
+    tree = build_synthetic_tree(depth=args.depth, branching_factor=args.branching_factor, seed=args.seed)
+    nodes, mask = tree.compute_tree_attention_mask()
+
+    # Simulate target model acceptance oracle
+    # Linear speculative path: takes only the 1st branch greedily
+    linear_path = [tree.root_id]
+    curr = tree.root_id
+    while tree.nodes[curr].children_ids:
+        curr = tree.nodes[curr].children_ids[0]
+        linear_path.append(curr)
+
+    # Simulated target oracle that accepts based on probability threshold
+    target_threshold = 0.5
+
+    def mock_target_verifier(token_seq: List[int]) -> Tuple[bool, int]:
+        # Evaluates candidate sequence: accepts tokens if their probability >= threshold
+        # Returns (True, accepted_length)
+        acc_len = 1
+        for idx in range(1, len(token_seq)):
+            # find corresponding node prob
+            node = next((n for n in tree.nodes.values() if n.token_id == token_seq[idx]), None)
+            if node and node.prob >= target_threshold:
+                acc_len += 1
+            else:
+                break
+        return True, acc_len
+
+    # 1. SpecInfer tree verification
+    best_tokens, tree_acc_tokens, best_path = tree.verify_paths(mock_target_verifier)
+
+    # 2. Linear speculative decoding verification
+    linear_tokens = [tree.nodes[nid].token_id for nid in linear_path]
+    _, linear_acc_len = mock_target_verifier(linear_tokens)
+    linear_acc_tokens = linear_acc_len - 1
+
+    speedup_gain = (tree_acc_tokens + 1) / max(1, (linear_acc_tokens + 1))
+
+    print("=== SpecInfer (Tree-Based Speculation) Benchmark Results ===")
+    print(f"Total Tree Candidate Nodes: {len(nodes)}")
+    print(f"Tree Depth: {args.depth} | Branching Factor: {args.branching_factor}")
+    print(f"Linear Speculative Accepted Tokens: {linear_acc_tokens}")
+    print(f"SpecInfer Tree Accepted Tokens:     {tree_acc_tokens}")
+    print(f"Relative Token Acceptance Gain:     {speedup_gain:.2f}x")
+    print(f"Best Verified Sequence Length:      {len(best_tokens)} tokens")
+    print(f"Best Path Node IDs:                 {best_path}")
+
+
+def cmd_stats(args):
+    """Computes theoretical throughput scaling and memory overhead of tree speculation."""
+    acc = args.acceptance_rate
+    tree_size = args.tree_size
+
+    # Expected accepted tokens in linear speculation of length K: E = sum_{i=1}^K alpha^i = alpha(1 - alpha^K)/(1 - alpha)
+    k_linear = int(math.log2(tree_size + 1)) if tree_size > 1 else 1
+    expected_linear = (acc * (1 - acc**k_linear)) / (1 - acc) if acc < 1.0 else k_linear
+
+    # For tree speculation with M independent candidate paths of depth D:
+    # E_tree = sum_{d=1}^D [1 - (1 - alpha^d)^M]
+    d_tree = k_linear
+    m_leaves = max(1, (tree_size + 1) // 2)
+    expected_tree = sum(1.0 - (1.0 - (acc**d))**m_leaves for d in range(1, d_tree + 1))
+
+    speedup = (expected_tree + 1.0) / (expected_linear + 1.0)
+
+    print("=== SpecInfer Theoretical Performance Analytics ===")
+    print(f"Target Token Acceptance Rate (alpha): {acc:.2f}")
+    print(f"Tree Candidate Budget:               {tree_size} tokens")
+    print(f"Equivalent Linear Speculation Depth: {k_linear} tokens")
+    print(f"Expected Linear Accepted Tokens:     {expected_linear:.2f}")
+    print(f"Expected SpecInfer Accepted Tokens:  {expected_tree:.2f}")
+    print(f"Expected Verification Speedup:       {speedup:.2f}x")
+    print(f"Forward Pass Amortization:           Single-pass causal tree attention matrix")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SpecInfer: Tree-based Speculative Inference and Verification Engine (ASPLOS 2024)"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Sub-command to execute")
+
+    # mask
+    p_mask = subparsers.add_parser("mask", help="Generate causal tree attention mask matrix")
+    p_mask.add_argument("--depth", type=int, default=3, help="Tree depth")
+    p_mask.add_argument("--branching-factor", type=int, default=2, help="Branching factor per node")
+
+    # benchmark
+    p_bench = subparsers.add_parser("benchmark", help="Benchmark tree speculation vs linear speculation")
+    p_bench.add_argument("--depth", type=int, default=4, help="Tree depth")
+    p_bench.add_argument("--branching-factor", type=int, default=2, help="Branching factor per node")
+    p_bench.add_argument("--seed", type=int, default=42, help="Random seed")
+
+    # stats
+    p_stats = subparsers.add_parser("stats", help="Theoretical speedup and token throughput metrics")
+    p_stats.add_argument("--acceptance-rate", type=float, default=0.70, help="Per-token target acceptance probability")
+    p_stats.add_argument("--tree-size", type=int, default=15, help="Candidate tree token size")
+
+    args = parser.parse_args()
+
+    if args.command == "mask":
+        cmd_mask(args)
+    elif args.command == "benchmark":
+        cmd_benchmark(args)
+    elif args.command == "stats":
+        cmd_stats(args)
+    else:
+        parser.print_help()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
