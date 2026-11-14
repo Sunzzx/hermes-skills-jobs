@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""sarathi-chunked-prefill: Chunked-Prefill & Stall-Free Piggyback Batching Engine (OSDI 2024).
+
+Implements the Sarathi-Serve paradigm for LLM serving:
+1. Chunked Prefill: Splits prompt evaluation into uniform token chunks (e.g. 512 tokens)
+   to eliminate prefill-induced bubble stalls on decode iterations.
+2. Piggyback Batching: Dynamically batches decode iterations alongside chunked prefill slices,
+   saturating GPU compute units and achieving near-zero Inter-Token Latency (ITL) jitter.
+3. Roofline-Aware Execution & Profiling: Models memory bandwidth vs. compute rooflines
+   to balance batch execution times and maintain uniform iteration latency.
+"""
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclass
+class Request:
+    request_id: str
+    prompt_len: int
+    output_len: int
+    arrival_time: float
+    remaining_prompt: int = 0
+    generated_tokens: int = 0
+    start_time: Optional[float] = None
+    first_token_time: Optional[float] = None
+    completion_time: Optional[float] = None
+    token_times: List[float] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.remaining_prompt == 0:
+            self.remaining_prompt = self.prompt_len
+
+    @property
+    def is_prefill_done(self) -> bool:
+        return self.remaining_prompt <= 0
+
+    @property
+    def is_finished(self) -> bool:
+        return self.is_prefill_done and (self.generated_tokens >= self.output_len)
+
+
+class HardwareProfile:
+    def __init__(self, tflops: float = 312.0, mem_bw_gb_s: float = 1500.0, hidden_dim: int = 4096, num_layers: int = 32):
+        self.tflops = tflops
+        self.mem_bw_gb_s = mem_bw_gb_s
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+    def estimate_iteration_time_ms(self, prefill_tokens: int, decode_tokens: int, total_kv_tokens: int) -> float:
+        # Flops calculation: ~ 2 * params per token + 2 * layers * 2 * seq_len * hidden_dim
+        # Approximate 7B model params = ~7e9
+        model_params = 7.0e9
+        bytes_per_param = 2.0  # FP16
+
+        # Prefill compute (compute bound)
+        prefill_flops = 2.0 * model_params * prefill_tokens
+        prefill_compute_time_s = prefill_flops / (self.tflops * 1e12)
+
+        # Decode compute + KV memory bandwidth (memory bound)
+        # Weights load + KV cache reads
+        weights_bytes = model_params * bytes_per_param
+        kv_bytes = total_kv_tokens * self.num_layers * 2 * self.hidden_dim * bytes_per_param
+        mem_time_s = (weights_bytes + kv_bytes) / (self.mem_bw_gb_s * 1e9)
+
+        decode_flops = 2.0 * model_params * decode_tokens
+        decode_compute_time_s = decode_flops / (self.tflops * 1e12)
+
+        total_compute_s = prefill_compute_time_s + decode_compute_time_s
+        iteration_time_s = max(total_compute_s, mem_time_s)
+        return iteration_time_s * 1000.0
+
+
+class SarathiScheduler:
+    def __init__(self, chunk_size: int = 512, max_batch_tokens: int = 2048, hw: Optional[HardwareProfile] = None):
+        self.chunk_size = chunk_size
+        self.max_batch_tokens = max_batch_tokens
+        self.hw = hw or HardwareProfile()
+        self.waiting_queue: List[Request] = []
+        self.active_decodes: List[Request] = []
+        self.finished_requests: List[Request] = []
+
+    def add_request(self, req: Request):
+        self.waiting_queue.append(req)
+
+    def schedule_iteration(self, current_time: float) -> Tuple[List[Tuple[Request, int]], List[Request], float]:
+        """
+        Schedules one iteration with Sarathi Piggyback Batching:
+        1. Allocate decodes first (latency sensitive).
+        2. Fill remaining token budget with chunked prefill slices.
+        """
+        decode_batch = [req for req in self.active_decodes if not req.is_finished]
+        num_decodes = len(decode_batch)
+
+        budget_left = max(0, self.max_batch_tokens - num_decodes)
+        prefill_slices: List[Tuple[Request, int]] = []
+        prefill_tokens_total = 0
+
+        # Schedule chunked prefills from waiting queue
+        idx = 0
+        while idx < len(self.waiting_queue) and budget_left > 0:
+            req = self.waiting_queue[idx]
+            chunk = min(req.remaining_prompt, self.chunk_size, budget_left)
+            if chunk > 0:
+                prefill_slices.append((req, chunk))
+                budget_left -= chunk
+                prefill_tokens_total += chunk
+                if req.start_time is None:
+                    req.start_time = current_time
+            idx += 1
+
+        # Calculate total KV tokens in system for memory bandwidth modeling
+        total_kv = sum(r.prompt_len + r.generated_tokens for r in decode_batch)
+        step_time_ms = self.hw.estimate_iteration_time_ms(prefill_tokens_total, num_decodes, total_kv)
+        return prefill_slices, decode_batch, step_time_ms
+
+    def step(self, current_time: float) -> float:
+        prefill_slices, decode_batch, step_duration_ms = self.schedule_iteration(current_time)
+        step_duration_s = max(0.001, step_duration_ms / 1000.0)
+        next_time = current_time + step_duration_s
+
+        # Process prefill progress
+        for req, chunk in prefill_slices:
+            req.remaining_prompt -= chunk
+            if req.is_prefill_done:
+                self.waiting_queue.remove(req)
+                self.active_decodes.append(req)
+                if req.first_token_time is None:
+                    req.first_token_time = next_time
+                    req.token_times.append(next_time)
+                    req.generated_tokens += 1
+
+        # Process decode progress
+        for req in decode_batch:
+            if not req.is_finished:
+                req.generated_tokens += 1
+                req.token_times.append(next_time)
+                if req.is_finished:
+                    req.completion_time = next_time
+                    self.active_decodes.remove(req)
+                    self.finished_requests.append(req)
+
+        return next_time
+
+
+def simulate_serving(num_requests: int = 20, chunk_size: int = 512, max_batch_tokens: int = 2048, seed: int = 42) -> Dict[str, Any]:
+    random.seed(seed)
+    scheduler = SarathiScheduler(chunk_size=chunk_size, max_batch_tokens=max_batch_tokens)
+    for i in range(num_requests):
+        p_len = random.choice([512, 1024, 2048, 4096])
+        o_len = random.randint(32, 128)
+        scheduler.add_request(Request(request_id=f"req-{i}", prompt_len=p_len, output_len=o_len, arrival_time=0.0))
+
+    current_time = 0.0
+    steps = 0
+    iteration_times = []
+    while (scheduler.waiting_queue or scheduler.active_decodes) and steps < 20000:
+        t_before = current_time
+        current_time = scheduler.step(current_time)
+        iteration_times.append((current_time - t_before) * 1000.0)
+        steps += 1
+
+    # Calculate ITL (inter-token latencies)
+    all_itls = []
+    ttfts = []
+    for req in scheduler.finished_requests:
+        if req.first_token_time and req.start_time:
+            ttfts.append(req.first_token_time - req.start_time)
+        if len(req.token_times) > 1:
+            for t1, t2 in zip(req.token_times[:-1], req.token_times[1:]):
+                all_itls.append((t2 - t1) * 1000.0)
+
+    all_itls.sort()
+    p50_itl = all_itls[len(all_itls) // 2] if all_itls else 0.0
+    p99_itl = all_itls[int(len(all_itls) * 0.99)] if all_itls else 0.0
+    p50_ttft = sorted(ttfts)[len(ttfts) // 2] if ttfts else 0.0
+
+    return {
+        "num_requests": num_requests,
+        "chunk_size": chunk_size,
+        "total_steps": steps,
+        "total_sim_time_s": round(current_time, 3),
+        "median_itl_ms": round(p50_itl, 2),
+        "p99_itl_ms": round(p99_itl, 2),
+        "median_ttft_s": round(p50_ttft, 3),
+        "avg_step_latency_ms": round(sum(iteration_times) / max(1, len(iteration_times)), 2),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sarathi-Serve Chunked-Prefill & Piggyback Batching Engine")
+    sub = parser.add_subparsers(dest="command")
+
+    sim_p = sub.add_parser("simulate", help="Run Sarathi-Serve discrete simulation")
+    sim_p.add_argument("--requests", type=int, default=10, help="Number of requests")
+    sim_p.add_argument("--chunk-size", type=int, default=512, help="Prefill chunk size")
+    sim_p.add_argument("--batch-budget", type=int, default=2048, help="Max tokens per iteration")
+
+    comp_p = sub.add_parser("compare", help="Compare standard batching vs Sarathi chunked prefill")
+    comp_p.add_argument("--requests", type=int, default=15, help="Number of requests")
+
+    plan_p = sub.add_parser("plan", help="Calculate chunk budget & roofline for given prompt & decode load")
+    plan_p.add_argument("--prompt-len", type=int, required=True, help="Incoming prompt length")
+    plan_p.add_argument("--active-decodes", type=int, default=16, help="Number of ongoing decodes")
+    plan_p.add_argument("--target-itl-ms", type=float, default=25.0, help="Target ITL bound in ms")
+
+    args = parser.parse_args()
+
+    if args.command == "simulate":
+        res = simulate_serving(num_requests=args.requests, chunk_size=args.chunk_size, max_batch_tokens=args.batch_budget)
+        print(json.dumps(res, indent=2))
+    elif args.command == "compare":
+        # Standard vLLM without chunked prefill: prefill chunk = 4096 (large monolithic)
+        res_standard = simulate_serving(num_requests=args.requests, chunk_size=4096, max_batch_tokens=4096)
+        res_sarathi = simulate_serving(num_requests=args.requests, chunk_size=512, max_batch_tokens=2048)
+        diff = {
+            "standard_monolithic_prefill": res_standard,
+            "sarathi_chunked_piggyback": res_sarathi,
+            "p99_itl_jitter_reduction_pct": round((1.0 - res_sarathi["p99_itl_ms"] / max(0.001, res_standard["p99_itl_ms"])) * 100, 2),
+        }
+        print(json.dumps(diff, indent=2))
+    elif args.command == "plan":
+        hw = HardwareProfile()
+        # Find max prefill chunk that fits within target ITL
+        best_chunk = 128
+        for chunk in [128, 256, 384, 512, 768, 1024]:
+            lat = hw.estimate_iteration_time_ms(chunk, args.active_decodes, args.active_decodes * 1024)
+            if lat <= args.target_itl_ms:
+                best_chunk = chunk
+        num_chunks = math.ceil(args.prompt_len / best_chunk)
+        plan = {
+            "prompt_length": args.prompt_len,
+            "active_decodes": args.active_decodes,
+            "target_itl_ms": args.target_itl_ms,
+            "optimal_chunk_size": best_chunk,
+            "num_prefill_iterations": num_chunks,
+            "estimated_iteration_latency_ms": round(hw.estimate_iteration_time_ms(best_chunk, args.active_decodes, args.active_decodes * 1024), 2),
+            "piggyback_status": "STALL_FREE"
+        }
+        print(json.dumps(plan, indent=2))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

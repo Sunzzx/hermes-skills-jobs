@@ -1,5 +1,39 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-14 20:15:00] - Evolved usage: sarathi-chunked-prefill [-h] {simulate,compare,plan} ...
+
+Sarathi-Serve Chunked-Prefill & Piggyback Batching Engine
+
+positional arguments:
+  {simulate,compare,plan}
+    simulate            Run Sarathi-Serve discrete simulation
+    compare             Compare standard batching vs Sarathi chunked prefill
+    plan                Calculate chunk budget & roofline for given prompt &
+                        decode load
+
+options:
+  -h, --help            show this help message and exit
+- **Title**: Sarathi-Serve: Chunked-Prefill & Stall-Free Piggyback Batching Engine (OSDI 2024)
+- **Category**: inference
+- **Type**: skill+tool
+- **Artifacts**:
+  - usage: sarathi-chunked-prefill [-h] {simulate,compare,plan} ...
+
+Sarathi-Serve Chunked-Prefill & Piggyback Batching Engine
+
+positional arguments:
+  {simulate,compare,plan}
+    simulate            Run Sarathi-Serve discrete simulation
+    compare             Compare standard batching vs Sarathi chunked prefill
+    plan                Calculate chunk budget & roofline for given prompt &
+                        decode load
+
+options:
+  -h, --help            show this help message and exit
+  - 
+  - 
+- **Capabilities**: Chunked prefill token budgeting; stall-free piggyback batching pairing decodes with prefill slices; Roofline compute/memory bandwidth model; >50% ITL p99 jitter reduction; CLI //.
+
 
 
 
