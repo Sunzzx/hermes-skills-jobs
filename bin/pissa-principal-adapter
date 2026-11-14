@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""PiSSA: Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971).
+
+Decomposes pre-trained weight W ∈ ℝ^{m×n} via thin SVD:
+    W = W_res + S_init
+    S_init = U_r Σ_r V_rᵀ = A_init B_init
+where:
+    A_init = U_r Σ_r^{1/2}  ∈ ℝ^{m×r}
+    B_init = Σ_r^{1/2} V_rᵀ  ∈ ℝ^{r×n}
+    W_res  = W - A_init B_init  (frozen)
+
+During fine-tuning, A and B are trained directly from their principal singular components
+(unlike LoRA which initializes A ~ N(0, σ²) and B = 0, discarding principal structure).
+At inference / deployment, W_final = W_res + A B with zero inference latency overhead.
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+Matrix = List[List[float]]
+Vector = List[float]
+
+
+def _shape(M: Matrix) -> Tuple[int, int]:
+    return len(M), len(M[0]) if M else 0
+
+
+def _zeros(m: int, n: int) -> Matrix:
+    return [[0.0 for _ in range(n)] for _ in range(m)]
+
+
+def _eye(n: int) -> Matrix:
+    M = _zeros(n, n)
+    for i in range(n):
+        M[i][i] = 1.0
+    return M
+
+
+def _rand_gauss(m: int, n: int, mean: float = 0.0, std: float = 1.0, seed: Optional[int] = None) -> Matrix:
+    rng = random.Random(seed)
+    return [[rng.gauss(mean, std) for _ in range(n)] for _ in range(m)]
+
+
+def _transpose(M: Matrix) -> Matrix:
+    m, n = _shape(M)
+    return [[M[i][j] for i in range(m)] for j in range(n)]
+
+
+def _matmul(A: Matrix, B: Matrix) -> Matrix:
+    m, k = _shape(A)
+    k2, n = _shape(B)
+    assert k == k2, f"Dimension mismatch: {k} != {k2}"
+    out = _zeros(m, n)
+    for i in range(m):
+        Ai = A[i]
+        for p in range(k):
+            a_ip = Ai[p]
+            if a_ip == 0.0:
+                continue
+            Bp = B[p]
+            for j in range(n):
+                out[i][j] += a_ip * Bp[j]
+    return out
+
+
+def _matvec(M: Matrix, v: Vector) -> Vector:
+    m, n = _shape(M)
+    assert n == len(v)
+    return [sum(M[i][j] * v[j] for j in range(n)) for i in range(m)]
+
+
+def _dot(u: Vector, v: Vector) -> float:
+    return sum(a * b for a, b in zip(u, v))
+
+
+def _l2(v: Vector) -> float:
+    return math.sqrt(max(sum(x * x for x in v), 0.0))
+
+
+def _add(A: Matrix, B: Matrix) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] + B[i][j] for j in range(n)] for i in range(m)]
+
+
+def _sub(A: Matrix, B: Matrix) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] - B[i][j] for j in range(n)] for i in range(m)]
+
+
+def _scale(A: Matrix, s: float) -> Matrix:
+    m, n = _shape(A)
+    return [[A[i][j] * s for j in range(n)] for i in range(m)]
+
+
+def _frob_sq(M: Matrix) -> float:
+    return sum(x * x for row in M for x in row)
+
+
+def _frobenius(M: Matrix) -> float:
+    return math.sqrt(max(_frob_sq(M), 0.0))
+
+
+def _gram_schmidt(vectors: List[Vector]) -> List[Vector]:
+    """Modified Gram-Schmidt orthonormalization for columns."""
+    ortho: List[Vector] = []
+    for v in vectors:
+        w = list(v)
+        for u in ortho:
+            proj = _dot(w, u)
+            w = [wi - proj * ui for wi, ui in zip(w, u)]
+        norm = _l2(w)
+        if norm > 1e-12:
+            ortho.append([x / norm for x in w])
+        else:
+            # Perturb if degenerate
+            ortho.append([1.0 / math.sqrt(len(w)) for _ in w])
+    return ortho
+
+
+def thin_svd_subspace(
+    W: Matrix,
+    rank: int,
+    n_iter: int = 15,
+    seed: int = 42,
+) -> Tuple[Matrix, Vector, Matrix]:
+    """Randomized block power / subspace iteration for thin SVD.
+
+    Computes top-`rank` singular triplet (U, S, V) such that W ≈ U diag(S) Vᵀ.
+    Returns:
+      U: m x r (columns are left singular vectors)
+      S: length-r descending singular values
+      V: n x r (columns are right singular vectors)
+    """
+    m, n = _shape(W)
+    r = max(1, min(rank, m, n))
+    rng = random.Random(seed)
+
+    # Initialize random test matrix Y0 of dimension n x r
+    Y = [[rng.gauss(0.0, 1.0) for _ in range(r)] for _ in range(n)]
+    cols = [[Y[i][k] for i in range(n)] for k in range(r)]
+    cols = _gram_schmidt(cols)
+    Y = [[cols[k][i] for k in range(r)] for i in range(n)]
+
+    WT = _transpose(W)
+    for _ in range(n_iter):
+        # Z = W * Y  (m x r)
+        Z = _matmul(W, Y)
+        zcols = [[Z[i][k] for i in range(m)] for k in range(r)]
+        zcols = _gram_schmidt(zcols)
+        U = [[zcols[k][i] for k in range(r)] for i in range(m)]
+
+        # Y = Wᵀ * U (n x r)
+        Yraw = _matmul(WT, U)
+        ycols = [[Yraw[i][k] for i in range(n)] for k in range(r)]
+        ycols = _gram_schmidt(ycols)
+        Y = [[ycols[k][i] for k in range(r)] for i in range(n)]
+
+    # One final pass to form U
+    Z = _matmul(W, Y)
+    zcols = [[Z[i][k] for i in range(m)] for k in range(r)]
+    zcols = _gram_schmidt(zcols)
+    U = [[zcols[k][i] for k in range(r)] for i in range(m)]
+
+    # Extract singular values s_k = u_kᵀ W v_k
+    S: Vector = []
+    for k in range(r):
+        vk = [Y[i][k] for i in range(n)]
+        Wvk = _matvec(W, vk)
+        uk = [U[i][k] for i in range(m)]
+        s = _dot(uk, Wvk)
+        if s < 0:
+            s = -s
+            for i in range(m):
+                U[i][k] = -U[i][k]
+        S.append(s)
+
+    # Sort components descending if needed
+    indexed = sorted(enumerate(S), key=lambda x: x[1], reverse=True)
+    sorted_S = [x[1] for x in indexed]
+    sorted_U = [[U[i][orig] for orig, _ in indexed] for i in range(m)]
+    sorted_V = [[Y[j][orig] for orig, _ in indexed] for j in range(n)]
+
+    return sorted_U, sorted_S, sorted_V
+
+
+@dataclass
+class PiSSAComponents:
+    W_res: Matrix        # Frozen residual matrix: W - A_init B_init (m x n)
+    A: Matrix            # Adaptable adapter A: U_r Σ_r^{1/2} (m x r)
+    B: Matrix            # Adaptable adapter B: Σ_r^{1/2} V_rᵀ (r x n)
+    singular_values: Vector
+    energy_explained: float
+    rank: int
+
+
+def decompose_pissa(W: Matrix, rank: int, n_iter: int = 15, seed: int = 42) -> PiSSAComponents:
+    """Perform exact PiSSA decomposition:
+        W = W_res + A_init * B_init
+    where A_init = U_r Σ_r^{0.5}, B_init = Σ_r^{0.5} V_rᵀ.
+    """
+    m, n = _shape(W)
+    U, S, V = thin_svd_subspace(W, rank=rank, n_iter=n_iter, seed=seed)
+    r = len(S)
+
+    # Construct A_init (m x r) and B_init (r x n)
+    sqrt_S = [math.sqrt(max(s, 0.0)) for s in S]
+    A = _zeros(m, r)
+    for i in range(m):
+        for k in range(r):
+            A[i][k] = U[i][k] * sqrt_S[k]
+
+    B = _zeros(r, n)
+    for k in range(r):
+        for j in range(n):
+            B[k][j] = sqrt_S[k] * V[j][k]  # V is n x r, so V[j][k] is row j col k
+
+    # Principal approximation S_init = A * B
+    S_init = _matmul(A, B)
+    W_res = _sub(W, S_init)
+
+    frob_total = _frob_sq(W)
+    frob_init = _frob_sq(S_init)
+    energy = frob_init / max(frob_total, 1e-15)
+
+    return PiSSAComponents(
+        W_res=W_res,
+        A=A,
+        B=B,
+        singular_values=S,
+        energy_explained=min(1.0, energy),
+        rank=r,
+    )
+
+
+def effective_weight(components: PiSSAComponents) -> Matrix:
+    """Reconstruct effective weight: W_eff = W_res + A * B."""
+    AB = _matmul(components.A, components.B)
+    return _add(components.W_res, AB)
+
+
+class PiSSATrainer:
+    """Lightweight SGD/Adam trainer comparing PiSSA vs Standard LoRA convergence."""
+
+    def __init__(
+        self,
+        W_base: Matrix,
+        rank: int = 4,
+        mode: str = "pissa",
+        lr: float = 0.05,
+        seed: int = 42,
+    ):
+        self.m, self.n = _shape(W_base)
+        self.rank = rank
+        self.mode = mode
+        self.lr = lr
+        self.rng = random.Random(seed)
+
+        if mode == "pissa":
+            self.decomp = decompose_pissa(W_base, rank=rank, seed=seed)
+            self.W_res = self.decomp.W_res
+            self.A = [row[:] for row in self.decomp.A]
+            self.B = [row[:] for row in self.decomp.B]
+        elif mode == "lora":
+            # Standard LoRA: W_res = W_base, A ~ N(0, 0.02), B = 0
+            self.W_res = [row[:] for row in W_base]
+            self.A = _rand_gauss(self.m, rank, std=0.02, seed=seed)
+            self.B = _zeros(rank, self.n)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    def forward(self, X: Matrix) -> Matrix:
+        """Y = X (W_res + A B)ᵀ  where X is (batch x in_features), W is (out x in)"""
+        AB = _matmul(self.A, self.B)
+        W_eff = _add(self.W_res, AB)
+        WT = _transpose(W_eff)
+        return _matmul(X, WT)
+
+    def step(self, X: Matrix, Y_target: Matrix) -> float:
+        """Compute MSE loss and backprop gradients into A and B only."""
+        batch_size = len(X)
+        # Prediction Y = X W_effᵀ
+        AB = _matmul(self.A, self.B)
+        W_eff = _add(self.W_res, AB)
+        WT = _transpose(W_eff)
+        Y_pred = _matmul(X, WT)
+
+        # Loss = (1 / 2N) ||Y_pred - Y_target||_F^2
+        diff = _sub(Y_pred, Y_target)
+        loss = (0.5 / batch_size) * _frob_sq(diff)
+
+        # Gradient dL/d(Y_pred) = (1/N) * diff  (batch x out)
+        dY = _scale(diff, 1.0 / batch_size)
+
+        # dL/dW_eff = dYᵀ * X  (out x in)
+        dY_T = _transpose(dY)
+        dW = _matmul(dY_T, X)
+
+        # dW is backpropagated to A and B: W_eff = W_res + A B
+        # dL/dA = dW * Bᵀ  (m x r)
+        BT = _transpose(self.B)
+        dA = _matmul(dW, BT)
+
+        # dL/dB = Aᵀ * dW  (r x n)
+        AT = _transpose(self.A)
+        dB = _matmul(AT, dW)
+
+        # Gradient step
+        for i in range(self.m):
+            for k in range(self.rank):
+                self.A[i][k] -= self.lr * dA[i][k]
+        for k in range(self.rank):
+            for j in range(self.n):
+                self.B[k][j] -= self.lr * dB[k][j]
+
+        return loss
+
+
+def peft_parameter_comparison(
+    model_dim: int = 4096,
+    hidden_dim: int = 14336,
+    num_layers: int = 32,
+    rank: int = 16,
+) -> Dict[str, Any]:
+    """Compares full fine-tuning vs LoRA vs PiSSA parameter footprints."""
+    # Q, K, V, O, Gate, Up, Down projections per layer
+    # Attention: 4 * (model_dim * model_dim)
+    # MLP: 3 * (model_dim * hidden_dim)
+    attn_params_per_layer = 4 * (model_dim * model_dim)
+    mlp_params_per_layer = 3 * (model_dim * hidden_dim)
+    total_weights_per_layer = attn_params_per_layer + mlp_params_per_layer
+    full_trainable = total_weights_per_layer * num_layers
+
+    # Adapters on Q, V, Gate, Up:
+    num_adapted_matrices = 4 * num_layers
+    params_per_adapter = rank * (model_dim + model_dim)
+    trainable_adapter_params = num_adapted_matrices * params_per_adapter
+
+    compression_ratio = full_trainable / max(trainable_adapter_params, 1)
+
+    return {
+        "architecture": f"LLaMA-3-8B / Mistral-7B Scale ({num_layers} layers, dim {model_dim})",
+        "full_model_params": full_trainable,
+        "trainable_pissa_params": trainable_adapter_params,
+        "compression_ratio_x": round(compression_ratio, 1),
+        "param_savings_pct": round(100.0 * (1.0 - trainable_adapter_params / full_trainable), 3),
+        "inference_latency_overhead_ms": 0.0,  # Zero extra cost post-merge
+    }
+
+
+def run_convergence_benchmark(steps: int = 30) -> Dict[str, Any]:
+    """Simulates head-to-head training convergence: PiSSA vs Standard LoRA."""
+    m, n, r = 32, 32, 4
+    seed = 1337
+
+    # Generate target pre-trained weights and synthetic task data
+    W_base = _rand_gauss(m, n, mean=0.0, std=1.0 / math.sqrt(n), seed=seed)
+    W_target = _rand_gauss(m, n, mean=0.0, std=1.0 / math.sqrt(n), seed=seed + 1)
+
+    batch_size = 16
+    X = _rand_gauss(batch_size, n, seed=seed + 2)
+    Y_target = _matmul(X, _transpose(W_target))
+
+    trainer_pissa = PiSSATrainer(W_base, rank=r, mode="pissa", lr=0.08, seed=seed)
+    trainer_lora = PiSSATrainer(W_base, rank=r, mode="lora", lr=0.08, seed=seed)
+
+    pissa_losses = []
+    lora_losses = []
+
+    for _ in range(steps):
+        loss_p = trainer_pissa.step(X, Y_target)
+        loss_l = trainer_lora.step(X, Y_target)
+        pissa_losses.append(loss_p)
+        lora_losses.append(loss_l)
+
+    return {
+        "steps": steps,
+        "pissa_initial_loss": round(pissa_losses[0], 5),
+        "pissa_final_loss": round(pissa_losses[-1], 5),
+        "pissa_loss_reduction_pct": round(100.0 * (1.0 - pissa_losses[-1] / pissa_losses[0]), 2),
+        "lora_initial_loss": round(lora_losses[0], 5),
+        "lora_final_loss": round(lora_losses[-1], 5),
+        "lora_loss_reduction_pct": round(100.0 * (1.0 - lora_losses[-1] / lora_losses[0]), 2),
+        "speedup_factor_to_same_loss": round(lora_losses[-1] / max(pissa_losses[-1], 1e-10), 2),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="PiSSA: Principal Singular values and Singular vectors Adaptation")
+    subparsers = parser.add_subparsers(dest="subcommand")
+
+    # Decompose command
+    decomp_parser = subparsers.add_parser("decompose", help="Decompose a weight matrix into PiSSA residual + principal adapters")
+    decomp_parser.add_argument("--rows", type=int, default=16, help="Matrix row dimension (output)")
+    decomp_parser.add_argument("--cols", type=int, default=16, help="Matrix column dimension (input)")
+    decomp_parser.add_argument("--rank", type=int, default=4, help="Adapter rank r")
+    decomp_parser.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # Benchmark command
+    bench_parser = subparsers.add_parser("bench", help="Run head-to-head convergence benchmark: PiSSA vs LoRA")
+    bench_parser.add_argument("--steps", type=int, default=35, help="Training steps")
+    bench_parser.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # Stats command
+    stats_parser = subparsers.add_parser("stats", help="Show parameter scaling comparison for 7B/8B foundation models")
+    stats_parser.add_argument("--rank", type=int, default=16, help="Target adapter rank")
+    stats_parser.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    args = parser.parse_args()
+
+    if args.subcommand == "decompose":
+        W = _rand_gauss(args.rows, args.cols, seed=42)
+        comp = decompose_pissa(W, rank=args.rank)
+        W_eff = effective_weight(comp)
+        recon_err = _frobenius(_sub(W, W_eff))
+
+        res = {
+            "matrix_shape": [args.rows, args.cols],
+            "rank": args.rank,
+            "singular_values": [round(s, 4) for s in comp.singular_values],
+            "energy_explained_pct": round(comp.energy_explained * 100.0, 2),
+            "residual_matrix_frob": round(_frobenius(comp.W_res), 4),
+            "reconstruction_error": round(recon_err, 8),
+        }
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"⚡ PiSSA SVD Decomposition ({args.rows}x{args.cols}, Rank {args.rank})")
+            print(f"  • Principal Energy Captured: {res['energy_explained_pct']}%")
+            print(f"  • Top Singular Values: {res['singular_values']}")
+            print(f"  • Exact SVD Reconstruction Error: {res['reconstruction_error']}")
+
+    elif args.subcommand == "bench":
+        bench_res = run_convergence_benchmark(steps=args.steps)
+        if args.json:
+            print(json.dumps(bench_res, indent=2))
+        else:
+            print(f"⚡ PiSSA vs Standard LoRA Convergence Benchmark ({args.steps} steps)")
+            print(f"  • PiSSA Initial Loss: {bench_res['pissa_initial_loss']} -> Final: {bench_res['pissa_final_loss']} (-{bench_res['pissa_loss_reduction_pct']}%)")
+            print(f"  • LoRA Initial Loss:  {bench_res['lora_initial_loss']} -> Final: {bench_res['lora_final_loss']} (-{bench_res['lora_loss_reduction_pct']}%)")
+            print(f"  • Final Loss Advantage Factor: {bench_res['speedup_factor_to_same_loss']}x lower error")
+
+    elif args.subcommand == "stats":
+        stats_res = peft_parameter_comparison(rank=args.rank)
+        if args.json:
+            print(json.dumps(stats_res, indent=2))
+        else:
+            print(f"⚡ PiSSA Parameter Efficiency Profile: {stats_res['architecture']}")
+            print(f"  • Full Weights:      {stats_res['full_model_params']:,} parameters")
+            print(f"  • Trainable PiSSA:   {stats_res['trainable_pissa_params']:,} parameters")
+            print(f"  • Parameter Ratio:   {stats_res['compression_ratio_x']}x reduction ({stats_res['param_savings_pct']}% frozen)")
+            print(f"  • Inference Latency: {stats_res['inference_latency_overhead_ms']} ms overhead")
+    else:
+        # Default demo behavior
+        bench_res = run_convergence_benchmark(steps=20)
+        print(json.dumps(bench_res, indent=2))
+
+
+if __name__ == "__main__":
+    main()
