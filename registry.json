@@ -2136,5 +2136,19 @@
       "llm"
     ],
     "added_at": "2026-11-14 08:42:49"
+  },
+  {
+    "id": "radix-attention-cache",
+    "title": "RadixAttention: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS, arXiv:2312.07104)",
+    "category": "inference",
+    "tags": [
+      "radix-attention",
+      "sglang",
+      "kv-cache",
+      "prefix-caching",
+      "lmsys",
+      "llm-inference"
+    ],
+    "added_at": "2026-11-14 09:48:00"
   }
 ]

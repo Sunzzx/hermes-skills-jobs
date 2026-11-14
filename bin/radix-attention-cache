@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""radix-attention-cache: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS).
+
+Enables automatic, zero-redundancy KV cache reuse across multi-turn chats,
+few-shot exemplars, parallel sampling branches, and tree-of-thought exploration
+via an exact-prefix Radix Tree with LRU page eviction and memory-budget tracking.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
+
+
+@dataclass
+class TreeNode:
+    token_subsequence: List[int]
+    value: Optional[str] = None
+    children: Dict[int, "TreeNode"] = field(default_factory=dict)
+    parent: Optional["TreeNode"] = None
+    last_accessed: float = field(default_factory=time.time)
+    ref_count: int = 0
+    memory_pages: int = 0
+
+    @property
+    def length(self) -> int:
+        return len(self.token_subsequence)
+
+
+class RadixAttentionCache:
+    """Radix Tree with LRU cache eviction and prefix KV reuse."""
+
+    def __init__(self, page_size: int = 16, max_pages: int = 1024):
+        self.page_size = max(1, page_size)
+        self.max_pages = max_pages
+        self.root = TreeNode(token_subsequence=[], memory_pages=0)
+        self.total_pages_used = 0
+        self.total_tokens_cached = 0
+        self.hits = 0
+        self.misses = 0
+        self.total_queries = 0
+        self.evicted_nodes = 0
+        self.evicted_pages = 0
+
+    def _tokens_to_pages(self, num_tokens: int) -> int:
+        return (num_tokens + self.page_size - 1) // self.page_size
+
+    def _find_longest_common_prefix(self, seq_a: List[int], seq_b: List[int]) -> int:
+        common = 0
+        limit = min(len(seq_a), len(seq_b))
+        while common < limit and seq_a[common] == seq_b[common]:
+            common += 1
+        return common
+
+    def match_prefix(self, tokens: List[int]) -> Tuple[List[TreeNode], int]:
+        """Traverses tree to find the longest matching prefix for given token sequence."""
+        current = self.root
+        path = [current]
+        idx = 0
+        now = time.time()
+        current.last_accessed = now
+
+        while idx < len(tokens):
+            first_tok = tokens[idx]
+            if first_tok not in current.children:
+                break
+            child = current.children[first_tok]
+            child.last_accessed = now
+            rem_tokens = tokens[idx:]
+            common_len = self._find_longest_common_prefix(child.token_subsequence, rem_tokens)
+            if common_len == len(child.token_subsequence):
+                path.append(child)
+                idx += common_len
+                current = child
+            else:
+                # Partial match inside an edge
+                idx += common_len
+                path.append(child)
+                break
+
+        return path, idx
+
+    def lookup(self, tokens: List[int]) -> Dict[str, object]:
+        """Check KV cache reuse for prompt tokens."""
+        self.total_queries += 1
+        path, matched_tokens = self.match_prefix(tokens)
+        prompt_len = len(tokens)
+        hit_ratio = (matched_tokens / prompt_len) if prompt_len > 0 else 0.0
+
+        if matched_tokens > 0:
+            self.hits += 1
+        else:
+            self.misses += 1
+
+        saved_pages = matched_tokens // self.page_size
+        new_tokens_to_compute = prompt_len - matched_tokens
+        new_pages_required = self._tokens_to_pages(new_tokens_to_compute)
+
+        return {
+            "prompt_tokens": prompt_len,
+            "matched_prefix_tokens": matched_tokens,
+            "cache_hit_ratio": round(hit_ratio, 4),
+            "new_tokens_to_compute": new_tokens_to_compute,
+            "saved_kv_pages": saved_pages,
+            "new_kv_pages_required": new_pages_required,
+            "traversed_nodes": len(path) - 1,
+        }
+
+    def insert(self, tokens: List[int], value: Optional[str] = None) -> int:
+        """Insert a token sequence into the Radix Tree, splitting nodes if necessary."""
+        if not tokens:
+            return 0
+
+        current = self.root
+        idx = 0
+        inserted_tokens = 0
+        now = time.time()
+        current.last_accessed = now
+
+        while idx < len(tokens):
+            first_tok = tokens[idx]
+            if first_tok not in current.children:
+                # Add full remaining tail as a new child
+                rem_tokens = tokens[idx:]
+                pages = self._tokens_to_pages(len(rem_tokens))
+                self._ensure_capacity(pages)
+                new_node = TreeNode(
+                    token_subsequence=rem_tokens,
+                    value=value if idx + len(rem_tokens) == len(tokens) else None,
+                    parent=current,
+                    last_accessed=now,
+                    ref_count=1,
+                    memory_pages=pages,
+                )
+                current.children[first_tok] = new_node
+                self.total_pages_used += pages
+                self.total_tokens_cached += len(rem_tokens)
+                inserted_tokens += len(rem_tokens)
+                break
+
+            child = current.children[first_tok]
+            child.last_accessed = now
+            child.ref_count += 1
+            rem_tokens = tokens[idx:]
+            common_len = self._find_longest_common_prefix(child.token_subsequence, rem_tokens)
+
+            if common_len == len(child.token_subsequence):
+                # Full edge match; traverse down
+                idx += common_len
+                current = child
+                if idx == len(tokens):
+                    child.value = value
+            else:
+                # Split existing child edge at common_len
+                split_prefix = child.token_subsequence[:common_len]
+                split_suffix = child.token_subsequence[common_len:]
+
+                # Old child becomes suffix child
+                child.token_subsequence = split_suffix
+                old_child_pages = child.memory_pages
+                child.memory_pages = self._tokens_to_pages(len(split_suffix))
+
+                # Create intermediate split node
+                split_node_pages = self._tokens_to_pages(len(split_prefix))
+                split_node = TreeNode(
+                    token_subsequence=split_prefix,
+                    parent=current,
+                    last_accessed=now,
+                    ref_count=child.ref_count + 1,
+                    memory_pages=split_node_pages,
+                )
+                current.children[first_tok] = split_node
+                split_node.children[split_suffix[0]] = child
+                child.parent = split_node
+
+                # Adjust pages count for the split
+                delta_pages = (split_node_pages + child.memory_pages) - old_child_pages
+                self.total_pages_used += delta_pages
+
+                idx += common_len
+                rem_new_tokens = tokens[idx:]
+
+                if rem_new_tokens:
+                    new_pages = self._tokens_to_pages(len(rem_new_tokens))
+                    self._ensure_capacity(new_pages)
+                    new_branch = TreeNode(
+                        token_subsequence=rem_new_tokens,
+                        value=value,
+                        parent=split_node,
+                        last_accessed=now,
+                        ref_count=1,
+                        memory_pages=new_pages,
+                    )
+                    split_node.children[rem_new_tokens[0]] = new_branch
+                    self.total_pages_used += new_pages
+                    self.total_tokens_cached += len(rem_new_tokens)
+                    inserted_tokens += len(rem_new_tokens)
+                else:
+                    split_node.value = value
+
+                break
+
+        return inserted_tokens
+
+    def _collect_evictable_leaves(self, node: TreeNode, leaves: List[TreeNode]):
+        if not node.children and node != self.root:
+            leaves.append(node)
+        for child in node.children.values():
+            self._collect_evictable_leaves(child, leaves)
+
+    def evict_lru(self, target_pages: int = 1) -> int:
+        """Evict least recently used leaf nodes until target_pages are freed."""
+        freed_pages = 0
+        while freed_pages < target_pages and self.total_pages_used > 0:
+            leaves: List[TreeNode] = []
+            self._collect_evictable_leaves(self.root, leaves)
+            if not leaves:
+                break
+            # Sort by least recently accessed
+            leaves.sort(key=lambda n: n.last_accessed)
+            victim = leaves[0]
+            parent = victim.parent
+            if not parent:
+                break
+
+            first_tok = victim.token_subsequence[0]
+            if first_tok in parent.children:
+                del parent.children[first_tok]
+
+            pages = victim.memory_pages
+            tokens_freed = len(victim.token_subsequence)
+            self.total_pages_used = max(0, self.total_pages_used - pages)
+            self.total_tokens_cached = max(0, self.total_tokens_cached - tokens_freed)
+            self.evicted_nodes += 1
+            self.evicted_pages += pages
+            freed_pages += pages
+
+            # If parent now has only 1 child and no value, merge with its child
+            if parent != self.root and len(parent.children) == 1 and parent.value is None:
+                only_child = next(iter(parent.children.values()))
+                merged_tokens = parent.token_subsequence + only_child.token_subsequence
+                parent.token_subsequence = merged_tokens
+                parent.value = only_child.value
+                parent.children = only_child.children
+                for gc in parent.children.values():
+                    gc.parent = parent
+                parent.memory_pages = self._tokens_to_pages(len(merged_tokens))
+
+        return freed_pages
+
+    def _ensure_capacity(self, needed_pages: int):
+        if self.total_pages_used + needed_pages > self.max_pages:
+            to_free = (self.total_pages_used + needed_pages) - self.max_pages
+            self.evict_lru(to_free)
+
+    def get_stats(self) -> Dict[str, object]:
+        total = max(1, self.total_queries)
+        hit_rate = self.hits / total
+        mem_utilization = self.total_pages_used / max(1, self.max_pages)
+        return {
+            "total_queries": self.total_queries,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": round(hit_rate, 4),
+            "total_pages_used": self.total_pages_used,
+            "max_pages": self.max_pages,
+            "total_tokens_cached": self.total_tokens_cached,
+            "memory_utilization": round(mem_utilization, 4),
+            "evicted_nodes": self.evicted_nodes,
+            "evicted_pages": self.evicted_pages,
+        }
+
+
+def tokenize_synthetic(text: str) -> List[int]:
+    """Deterministic zero-dependency tokenizer for prompts/text."""
+    words = text.strip().split()
+    tokens = []
+    for w in words:
+        # Map word to a consistent 16-bit integer token
+        h = int(hashlib.md5(w.encode("utf-8")).hexdigest()[:4], 16)
+        tokens.append(h)
+    return tokens
+
+
+def run_benchmark(page_size: int = 16, max_pages: int = 256) -> Dict[str, object]:
+    """Simulates multi-turn conversation and few-shot reasoning with Radix Cache."""
+    cache = RadixAttentionCache(page_size=page_size, max_pages=max_pages)
+
+    system_prompt = "You are an autonomous AI research engineer specializing in distributed systems."
+    sys_tokens = tokenize_synthetic(system_prompt)
+    cache.insert(sys_tokens, value="sys_prompt")
+
+    # Scenario 1: Multi-turn chat sharing system prompt
+    turn1 = system_prompt + " How do we optimize GPU KV cache allocation?"
+    t1_tokens = tokenize_synthetic(turn1)
+    lookup1 = cache.lookup(t1_tokens)
+    cache.insert(t1_tokens, value="turn1")
+
+    turn2 = turn1 + " Furthermore, compare PagedAttention with SGLang Radix Tree."
+    t2_tokens = tokenize_synthetic(turn2)
+    lookup2 = cache.lookup(t2_tokens)
+    cache.insert(t2_tokens, value="turn2")
+
+    # Scenario 2: Parallel branch (Tree of Thoughts) with same prefix
+    branch_b = turn1 + " Alternatively, explore quantized FP8 cache compression."
+    bb_tokens = tokenize_synthetic(branch_b)
+    lookup_b = cache.lookup(bb_tokens)
+    cache.insert(bb_tokens, value="branch_b")
+
+    stats = cache.get_stats()
+    return {
+        "system_tokens_count": len(sys_tokens),
+        "turn1_lookup": lookup1,
+        "turn2_lookup": lookup2,
+        "branch_b_lookup": lookup_b,
+        "final_cache_stats": stats,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="radix-attention-cache: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS)"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # benchmark command
+    bench_p = subparsers.add_parser("benchmark", help="Run multi-turn & branching benchmark")
+    bench_p.add_argument("--page-size", type=int, default=16, help="Tokens per KV page")
+    bench_p.add_argument("--max-pages", type=int, default=256, help="Max KV pages allowed in memory")
+
+    # stats command
+    stat_p = subparsers.add_parser("stats", help="Theoretical memory and speedup scaling analysis")
+    stat_p.add_argument("--model-dim", type=int, default=4096, help="Hidden size")
+    stat_p.add_argument("--num-layers", type=int, default=32, help="Number of attention layers")
+    stat_p.add_argument("--kv-heads", type=int, default=8, help="Number of GQA KV heads")
+    stat_p.add_argument("--seq-len", type=int, default=4096, help="Context length")
+
+    args = parser.parse_args()
+
+    if args.command == "benchmark":
+        res = run_benchmark(page_size=args.page_size, max_pages=args.max_pages)
+        print(json.dumps(res, indent=2))
+
+    elif args.command == "stats":
+        # 2 bytes per half-precision element (FP16/BF16), 2 for K and V
+        head_dim = args.model_dim // (args.kv_heads * 4)  # approx standard ratio
+        bytes_per_token_per_layer = 2 * 2 * args.kv_heads * head_dim
+        total_kv_bytes_per_token = bytes_per_token_per_layer * args.num_layers
+        total_kv_mb = (total_kv_bytes_per_token * args.seq_len) / (1024 * 1024)
+
+        # Radix cache reuse savings for 70% shared prompt
+        shared_ratio = 0.70
+        saved_mb = total_kv_mb * shared_ratio
+        tflops_saved_prefill = (2 * args.model_dim * args.model_dim * (args.seq_len * shared_ratio) * args.num_layers) / 1e12
+
+        out = {
+            "model_parameters": {
+                "hidden_dim": args.model_dim,
+                "num_layers": args.num_layers,
+                "kv_heads": args.kv_heads,
+                "seq_len": args.seq_len,
+            },
+            "kv_cache_footprint_full_seq_mb": round(total_kv_mb, 2),
+            "shared_prefix_ratio": shared_ratio,
+            "memory_saved_per_branch_mb": round(saved_mb, 2),
+            "prefill_tflops_saved": round(tflops_saved_prefill, 3),
+            "expected_speedup_x": round(1.0 / (1.0 - shared_ratio * 0.85), 2),
+        }
+        print(json.dumps(out, indent=2))
+
+
+if __name__ == "__main__":
+    main()
