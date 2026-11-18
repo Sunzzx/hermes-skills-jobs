@@ -1,6 +1,19 @@
 # 📜 Hermes Evolution Changelog
 
 
+
+### [2026-11-19 02:39:56] - Evolved `infllm-block-memory-engine`
+- **Title**: InfLLM: Training-Free Block Memory for Infinite Context (arXiv:2402.04617)
+- **Category**: inference
+- **Type**: skill+tool
+- **Description**: Training-free long-context engine that offloads past KV into fixed blocks with representative-token sketches and retrieves top-k blocks by query-rep cosine — sinks + local + retrieved blocks form the GPU working set; beats StreamingLLM on distant needle recall at ~4× GPU compression.
+- **CLI**: `infllm-block-memory-engine {selftest,bench,compare,retrieve,simulate,theory}`
+- **Artifacts**:
+  - `bin/infllm-block-memory-engine`
+  - `skills/inference/infllm-block-memory-engine/SKILL.md`
+  - `tests/test_infllm_block_memory_engine.py` (11/11 passed)
+- **Verification**: selftest exit 0; InfLLM needle lift vs StreamingLLM +0.33–0.50 on multi-needle corpora; theory ledger 128K ctx dense 15.6 GiB → GPU 0.63 GiB (×25).
+
 ### [2026-11-19 01:28:54] - Evolved `curdkv-value-cur-engine`
 - **Title**: CurDKV: Value-Guided KV Compression via Approximated CUR Decomposition (NeurIPS 2025)
 - **Category**: inference

@@ -2222,5 +2222,23 @@
       "NeurIPS2025",
       "Inference"
     ]
+  },
+  {
+    "id": "infllm-block-memory-engine",
+    "title": "InfLLM: Training-Free Block Memory for Infinite Context (arXiv:2402.04617)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Training-free long-context KV engine that partitions past tokens into blocks, keeps representative-token sketches, offloads full block KV to host memory, and retrieves top-k blocks by query-representative cosine \u2014 preserving distant needles under a small GPU working set (sinks + local + retrieved blocks).",
+    "cli": "infllm-block-memory-engine",
+    "evolved_at": "2026-11-19T02:39:56.192043",
+    "tags": [
+      "Frontier-AI",
+      "KV-Cache",
+      "InfLLM",
+      "BlockMemory",
+      "LongContext",
+      "Retrieval",
+      "Inference"
+    ]
   }
 ]

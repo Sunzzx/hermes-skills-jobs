@@ -1,0 +1,1146 @@
+#!/usr/bin/env python3
+"""infllm-block-memory-engine: InfLLM Training-Free Block Memory (arXiv:2402.04617).
+
+Training-free long-context extrapolation that *offloads* past KV into block-level
+external memory and *retrieves* only the blocks whose representative tokens match
+the current query — instead of permanently evicting tokens (StreamingLLM/H2O) or
+keeping a dense GPU cache.
+
+Core ideas (InfLLM / context memory):
+1. Partition the past sequence into fixed-size blocks of length L.
+2. For each block, select r representative tokens by intra-block importance
+   (self-attention mass + key distinctiveness), forming a compact sketch.
+3. GPU working set = attention sinks ∪ local window ∪ top-k retrieved blocks.
+4. Block relevance = mean cosine(query, rep_key) over the block's representatives
+   (optionally hybridized with a block-centroid key).
+5. Oracle metrics: distant needle recall, block hit-rate, working-set size,
+   and attention-output reconstruction vs full dense cache.
+
+References:
+  - InfLLM: Unveiling the Intrinsic Capacity of LLMs for Understanding Extremely
+    Long Sequences with Training-Free Memory (arXiv:2402.04617)
+  - StreamingLLM attention sinks (Xiao et al.); H2O heavy-hitter eviction
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Linear algebra (stdlib only)
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _norm(a: Sequence[float]) -> float:
+    return math.sqrt(max(_dot(a, a), 1e-18))
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    return _dot(a, b) / (_norm(a) * _norm(b))
+
+
+def _scale(v: Sequence[float], s: float) -> List[float]:
+    return [x * s for x in v]
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x - y for x, y in zip(a, b)]
+
+
+def _softmax(logits: Sequence[float]) -> List[float]:
+    m = max(logits) if logits else 0.0
+    ex = [math.exp(x - m) for x in logits]
+    s = sum(ex) or 1.0
+    return [e / s for e in ex]
+
+
+def _mean_vec(vecs: Sequence[Sequence[float]]) -> List[float]:
+    if not vecs:
+        return []
+    d = len(vecs[0])
+    acc = [0.0] * d
+    for v in vecs:
+        for i in range(d):
+            acc[i] += v[i]
+    inv = 1.0 / len(vecs)
+    return [x * inv for x in acc]
+
+
+def _randn(rng: random.Random, d: int, scale: float = 1.0) -> List[float]:
+    return [rng.gauss(0.0, scale) for _ in range(d)]
+
+
+def _unit(rng: random.Random, d: int) -> List[float]:
+    v = _randn(rng, d)
+    n = _norm(v)
+    return [x / n for x in v]
+
+
+# ---------------------------------------------------------------------------
+# Corpus / block structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TokenKV:
+    index: int
+    key: List[float]
+    value: List[float]
+    label: str  # sink | local | needle | noise | filler
+
+
+@dataclass
+class Block:
+    block_id: int
+    start: int
+    end: int  # exclusive
+    token_indices: List[int]
+    keys: List[List[float]]
+    values: List[List[float]]
+    labels: List[str]
+    rep_indices_local: List[int] = field(default_factory=list)  # local offsets
+    rep_keys: List[List[float]] = field(default_factory=list)
+    centroid_key: List[float] = field(default_factory=list)
+    offloaded: bool = True
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+
+@dataclass
+class LongContextCorpus:
+    n: int
+    dim: int
+    keys: List[List[float]]
+    values: List[List[float]]
+    labels: List[str]
+    needle_positions: List[int]
+    sink_len: int
+    local_window: int
+    block_size: int
+
+
+@dataclass
+class WorkingSet:
+    policy: str
+    keep_idx: List[int]
+    retrieved_block_ids: List[int]
+    n_gpu_tokens: int
+    n_offloaded_tokens: int
+    n_blocks_total: int
+    n_blocks_retrieved: int
+    score_map: Dict[int, float] = field(default_factory=dict)
+
+    @property
+    def keep_set(self) -> set:
+        return set(self.keep_idx)
+
+
+@dataclass
+class EvalReport:
+    policy: str
+    needle_recall: float
+    block_hit_rate: float
+    output_mse: float
+    output_cosine: float
+    n_gpu_tokens: int
+    n_blocks_retrieved: int
+    latency_ms: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Synthetic long-context generator
+# ---------------------------------------------------------------------------
+
+def generate_long_context(
+    seq_len: int = 1024,
+    dim: int = 32,
+    n_needles: int = 6,
+    sink_len: int = 4,
+    local_window: int = 64,
+    block_size: int = 32,
+    seed: int = 42,
+) -> LongContextCorpus:
+    """Multi-cluster long context with distant needles buried in middle blocks."""
+    rng = random.Random(seed)
+    assert seq_len > sink_len + local_window + block_size
+    assert block_size >= 4
+
+    keys: List[List[float]] = [[0.0] * dim for _ in range(seq_len)]
+    values: List[List[float]] = [[0.0] * dim for _ in range(seq_len)]
+    labels: List[str] = ["filler"] * seq_len
+
+    # Attention sinks — high-norm shared direction
+    sink_dir = _unit(rng, dim)
+    for i in range(sink_len):
+        keys[i] = _add(_scale(sink_dir, 3.0), _randn(rng, dim, 0.05))
+        values[i] = _add(_scale(sink_dir, 1.5), _randn(rng, dim, 0.05))
+        labels[i] = "sink"
+
+    # Local window at the end
+    local_start = seq_len - local_window
+    local_dir = _unit(rng, dim)
+    for i in range(local_start, seq_len):
+        keys[i] = _add(_scale(local_dir, 1.2), _randn(rng, dim, 0.15))
+        values[i] = _add(_scale(local_dir, 1.0), _randn(rng, dim, 0.15))
+        labels[i] = "local"
+
+    # Middle region: topic clusters + needles + noise
+    mid_lo, mid_hi = sink_len, local_start
+    n_clusters = max(4, (mid_hi - mid_lo) // (block_size * 2))
+    cluster_dirs = [_unit(rng, dim) for _ in range(n_clusters)]
+
+    for i in range(mid_lo, mid_hi):
+        c = ((i - mid_lo) * n_clusters) // max(mid_hi - mid_lo, 1)
+        c = min(c, n_clusters - 1)
+        keys[i] = _add(_scale(cluster_dirs[c], 1.0), _randn(rng, dim, 0.25))
+        values[i] = _add(_scale(cluster_dirs[c], 0.9), _randn(rng, dim, 0.25))
+        labels[i] = "noise"
+
+    # Place needles in distant middle blocks (not sink, not local)
+    candidate = list(range(mid_lo + block_size, mid_hi - block_size))
+    rng.shuffle(candidate)
+    needle_positions: List[int] = []
+    needle_dirs = [_unit(rng, dim) for _ in range(n_needles)]
+    # Spread needles across different blocks
+    used_blocks: set = set()
+    for j, pos in enumerate(candidate):
+        if len(needle_positions) >= n_needles:
+            break
+        b = (pos - sink_len) // block_size if pos >= sink_len else -1
+        # map absolute index to block later; just enforce spacing
+        blk = pos // block_size
+        if blk in used_blocks:
+            continue
+        used_blocks.add(blk)
+        nd = needle_dirs[len(needle_positions)]
+        keys[pos] = _add(_scale(nd, 2.5), _randn(rng, dim, 0.05))
+        values[pos] = _add(_scale(nd, 2.0), _randn(rng, dim, 0.05))
+        labels[pos] = "needle"
+        needle_positions.append(pos)
+
+    # Fallback if spacing was too aggressive
+    while len(needle_positions) < n_needles and candidate:
+        pos = candidate.pop()
+        if labels[pos] == "needle":
+            continue
+        nd = _unit(rng, dim)
+        keys[pos] = _add(_scale(nd, 2.5), _randn(rng, dim, 0.05))
+        values[pos] = _add(_scale(nd, 2.0), _randn(rng, dim, 0.05))
+        labels[pos] = "needle"
+        needle_positions.append(pos)
+
+    return LongContextCorpus(
+        n=seq_len,
+        dim=dim,
+        keys=keys,
+        values=values,
+        labels=labels,
+        needle_positions=sorted(needle_positions),
+        sink_len=sink_len,
+        local_window=local_window,
+        block_size=block_size,
+    )
+
+
+def make_queries(
+    corpus: LongContextCorpus,
+    n_queries: int = 8,
+    needle_frac: float = 0.6,
+    seed: int = 0,
+) -> List[List[float]]:
+    """Queries that target needles and local context (retrieval probes)."""
+    rng = random.Random(seed)
+    qs: List[List[float]] = []
+    n_needle_q = max(1, int(n_queries * needle_frac))
+    for j in range(n_queries):
+        if j < n_needle_q and corpus.needle_positions:
+            pos = corpus.needle_positions[j % len(corpus.needle_positions)]
+            base = corpus.keys[pos]
+            qs.append(_add(base, _randn(rng, corpus.dim, 0.08)))
+        else:
+            # local-ish probe
+            pos = corpus.n - 1 - (j % max(corpus.local_window, 1))
+            qs.append(_add(corpus.keys[pos], _randn(rng, corpus.dim, 0.1)))
+    return qs
+
+
+# ---------------------------------------------------------------------------
+# Block memory construction
+# ---------------------------------------------------------------------------
+
+def partition_blocks(
+    corpus: LongContextCorpus,
+    offload_past: bool = True,
+) -> List[Block]:
+    """Partition [sink_len, n - local_window) into fixed blocks; sinks/local stay hot."""
+    blocks: List[Block] = []
+    start = corpus.sink_len
+    end_excl = corpus.n - corpus.local_window
+    bid = 0
+    bs = corpus.block_size
+    while start < end_excl:
+        end = min(start + bs, end_excl)
+        idxs = list(range(start, end))
+        keys = [corpus.keys[i] for i in idxs]
+        vals = [corpus.values[i] for i in idxs]
+        labs = [corpus.labels[i] for i in idxs]
+        blocks.append(
+            Block(
+                block_id=bid,
+                start=start,
+                end=end,
+                token_indices=idxs,
+                keys=keys,
+                values=vals,
+                labels=labs,
+                offloaded=offload_past,
+            )
+        )
+        bid += 1
+        start = end
+    return blocks
+
+
+def select_representatives(
+    block: Block,
+    n_rep: int = 4,
+    seed: int = 0,
+) -> None:
+    """Pick r representative tokens inside a block.
+
+    Score = 0.55 * self-attention centrality + 0.45 * key-norm distinctiveness
+    (farthest from already-chosen reps). Matches InfLLM's "representative tokens
+    that summarize the block for later retrieval".
+    """
+    n = block.length
+    if n == 0:
+        block.rep_indices_local = []
+        block.rep_keys = []
+        block.centroid_key = []
+        return
+
+    n_rep = max(1, min(n_rep, n))
+    # Self-attention centrality: row-sum of softmax(KK^T/sqrt(d))
+    d = len(block.keys[0])
+    scale = 1.0 / math.sqrt(d)
+    centrality = [0.0] * n
+    for i in range(n):
+        logits = [_dot(block.keys[i], block.keys[j]) * scale for j in range(n)]
+        attn = _softmax(logits)
+        for j, a in enumerate(attn):
+            centrality[j] += a
+    # normalize centrality
+    cmax = max(centrality) or 1.0
+    centrality = [c / cmax for c in centrality]
+
+    key_norms = [_norm(k) for k in block.keys]
+    nmax = max(key_norms) or 1.0
+    key_norms = [x / nmax for x in key_norms]
+
+    chosen: List[int] = []
+    remaining = set(range(n))
+    rng = random.Random(seed + block.block_id * 17)
+
+    for _ in range(n_rep):
+        best_i, best_s = -1, -1e18
+        for i in remaining:
+            # distinctiveness vs already chosen
+            if chosen:
+                min_dist = min(
+                    _norm(_sub(block.keys[i], block.keys[c])) for c in chosen
+                )
+            else:
+                min_dist = 1.0
+            score = 0.55 * centrality[i] + 0.25 * key_norms[i] + 0.20 * min_dist
+            # slight jitter for ties
+            score += rng.random() * 1e-9
+            if score > best_s:
+                best_s, best_i = score, i
+        chosen.append(best_i)
+        remaining.discard(best_i)
+
+    chosen.sort()
+    block.rep_indices_local = chosen
+    block.rep_keys = [block.keys[i] for i in chosen]
+    block.centroid_key = _mean_vec(block.keys)
+
+
+def build_block_memory(
+    corpus: LongContextCorpus,
+    n_rep: int = 4,
+    seed: int = 0,
+) -> List[Block]:
+    blocks = partition_blocks(corpus)
+    for b in blocks:
+        select_representatives(b, n_rep=n_rep, seed=seed)
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Retrieval policies
+# ---------------------------------------------------------------------------
+
+def score_block(
+    query: Sequence[float],
+    block: Block,
+    mode: str = "rep_mean",
+) -> float:
+    """Relevance of a block to a query via representative keys."""
+    if mode == "centroid":
+        if not block.centroid_key:
+            return -1e18
+        return _cosine(query, block.centroid_key)
+    if mode == "rep_max":
+        if not block.rep_keys:
+            return -1e18
+        return max(_cosine(query, rk) for rk in block.rep_keys)
+    # default: mean cosine over representatives
+    if not block.rep_keys:
+        return -1e18
+    return sum(_cosine(query, rk) for rk in block.rep_keys) / len(block.rep_keys)
+
+
+def retrieve_topk_blocks(
+    queries: Sequence[Sequence[float]],
+    blocks: Sequence[Block],
+    top_k: int,
+    mode: str = "rep_mean",
+) -> Tuple[List[int], Dict[int, float]]:
+    """Aggregate multi-query scores and return top-k block ids.
+
+    Uses sum-of-positive-cosines across probes so multi-needle query batches
+    surface several relevant blocks, not only the single max match.
+    """
+    if not blocks or top_k <= 0:
+        return [], {}
+    scores = {b.block_id: 0.0 for b in blocks}
+    peak = {b.block_id: -1e18 for b in blocks}
+    for q in queries:
+        for b in blocks:
+            s = score_block(q, b, mode=mode)
+            # accumulate evidence; clamp tiny negatives so noise doesn't cancel hits
+            scores[b.block_id] += max(s, 0.0)
+            if s > peak[b.block_id]:
+                peak[b.block_id] = s
+    # final rank key: sum evidence, tie-break on peak cosine
+    ranked = sorted(
+        scores.items(),
+        key=lambda kv: (-kv[1], -peak[kv[0]], kv[0]),
+    )
+    top = ranked[: min(top_k, len(ranked))]
+    return [bid for bid, _ in top], {bid: sc for bid, sc in top}
+
+
+def working_set_infllm(
+    corpus: LongContextCorpus,
+    blocks: Sequence[Block],
+    queries: Sequence[Sequence[float]],
+    top_k: int = 4,
+    score_mode: str = "rep_mean",
+) -> WorkingSet:
+    """InfLLM GPU working set: sinks + local + tokens from top-k retrieved blocks."""
+    retrieved, score_map = retrieve_topk_blocks(queries, blocks, top_k, mode=score_mode)
+    keep: List[int] = list(range(corpus.sink_len))  # sinks
+    # local window
+    local_start = corpus.n - corpus.local_window
+    keep.extend(range(local_start, corpus.n))
+    # retrieved blocks (full block tokens — loaded from external memory)
+    block_by_id = {b.block_id: b for b in blocks}
+    for bid in retrieved:
+        b = block_by_id[bid]
+        keep.extend(b.token_indices)
+    # unique stable order
+    seen = set()
+    ordered: List[int] = []
+    for i in keep:
+        if i not in seen:
+            seen.add(i)
+            ordered.append(i)
+    ordered.sort()
+    n_off = sum(b.length for b in blocks if b.block_id not in set(retrieved))
+    return WorkingSet(
+        policy="infllm",
+        keep_idx=ordered,
+        retrieved_block_ids=retrieved,
+        n_gpu_tokens=len(ordered),
+        n_offloaded_tokens=n_off,
+        n_blocks_total=len(blocks),
+        n_blocks_retrieved=len(retrieved),
+        score_map=score_map,
+    )
+
+
+def working_set_streaming_llm(corpus: LongContextCorpus) -> WorkingSet:
+    """StreamingLLM: sinks + local only (no retrieval)."""
+    keep = list(range(corpus.sink_len))
+    local_start = corpus.n - corpus.local_window
+    keep.extend(range(local_start, corpus.n))
+    mid = corpus.n - corpus.sink_len - corpus.local_window
+    return WorkingSet(
+        policy="streaming_llm",
+        keep_idx=sorted(keep),
+        retrieved_block_ids=[],
+        n_gpu_tokens=len(keep),
+        n_offloaded_tokens=max(mid, 0),
+        n_blocks_total=0,
+        n_blocks_retrieved=0,
+    )
+
+
+def working_set_sliding_window(corpus: LongContextCorpus, window: Optional[int] = None) -> WorkingSet:
+    w = window or (corpus.sink_len + corpus.local_window)
+    w = min(w, corpus.n)
+    start = corpus.n - w
+    keep = list(range(start, corpus.n))
+    return WorkingSet(
+        policy="sliding_window",
+        keep_idx=keep,
+        retrieved_block_ids=[],
+        n_gpu_tokens=len(keep),
+        n_offloaded_tokens=start,
+        n_blocks_total=0,
+        n_blocks_retrieved=0,
+    )
+
+
+def working_set_random_blocks(
+    corpus: LongContextCorpus,
+    blocks: Sequence[Block],
+    top_k: int,
+    seed: int = 0,
+) -> WorkingSet:
+    rng = random.Random(seed)
+    ids = [b.block_id for b in blocks]
+    rng.shuffle(ids)
+    retrieved = ids[: min(top_k, len(ids))]
+    keep = list(range(corpus.sink_len))
+    local_start = corpus.n - corpus.local_window
+    keep.extend(range(local_start, corpus.n))
+    block_by_id = {b.block_id: b for b in blocks}
+    for bid in retrieved:
+        keep.extend(block_by_id[bid].token_indices)
+    ordered = sorted(set(keep))
+    return WorkingSet(
+        policy="random_blocks",
+        keep_idx=ordered,
+        retrieved_block_ids=retrieved,
+        n_gpu_tokens=len(ordered),
+        n_offloaded_tokens=sum(b.length for b in blocks if b.block_id not in set(retrieved)),
+        n_blocks_total=len(blocks),
+        n_blocks_retrieved=len(retrieved),
+    )
+
+
+def working_set_dense(corpus: LongContextCorpus) -> WorkingSet:
+    return WorkingSet(
+        policy="dense",
+        keep_idx=list(range(corpus.n)),
+        retrieved_block_ids=[],
+        n_gpu_tokens=corpus.n,
+        n_offloaded_tokens=0,
+        n_blocks_total=0,
+        n_blocks_retrieved=0,
+    )
+
+
+def working_set_h2o_approx(
+    corpus: LongContextCorpus,
+    queries: Sequence[Sequence[float]],
+    budget: int,
+) -> WorkingSet:
+    """Attention-score top tokens + sinks + local (H2O-style heavy hitters)."""
+    budget = max(budget, corpus.sink_len + corpus.local_window)
+    scale = 1.0 / math.sqrt(corpus.dim)
+    scores = [0.0] * corpus.n
+    for q in queries:
+        logits = [_dot(q, k) * scale for k in corpus.keys]
+        attn = _softmax(logits)
+        for i, a in enumerate(attn):
+            scores[i] += a
+    forced = set(range(corpus.sink_len)) | set(range(corpus.n - corpus.local_window, corpus.n))
+    remaining_budget = budget - len(forced)
+    cand = [i for i in range(corpus.n) if i not in forced]
+    cand.sort(key=lambda i: -scores[i])
+    keep = sorted(forced | set(cand[: max(0, remaining_budget)]))
+    return WorkingSet(
+        policy="h2o_approx",
+        keep_idx=keep,
+        retrieved_block_ids=[],
+        n_gpu_tokens=len(keep),
+        n_offloaded_tokens=corpus.n - len(keep),
+        n_blocks_total=0,
+        n_blocks_retrieved=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+def attention_output(
+    query: Sequence[float],
+    keys: Sequence[Sequence[float]],
+    values: Sequence[Sequence[float]],
+    keep_idx: Sequence[int],
+) -> List[float]:
+    if not keep_idx:
+        return [0.0] * (len(values[0]) if values else 0)
+    d = len(keys[0])
+    scale = 1.0 / math.sqrt(d)
+    logits = [_dot(query, keys[i]) * scale for i in keep_idx]
+    attn = _softmax(logits)
+    out = [0.0] * len(values[0])
+    for a, i in zip(attn, keep_idx):
+        v = values[i]
+        for j in range(len(out)):
+            out[j] += a * v[j]
+    return out
+
+
+def evaluate_working_set(
+    corpus: LongContextCorpus,
+    ws: WorkingSet,
+    queries: Sequence[Sequence[float]],
+    blocks: Optional[Sequence[Block]] = None,
+) -> EvalReport:
+    t0 = time.perf_counter()
+    # Needle recall: fraction of needles present in working set
+    if corpus.needle_positions:
+        hit = sum(1 for p in corpus.needle_positions if p in ws.keep_set)
+        needle_recall = hit / len(corpus.needle_positions)
+    else:
+        needle_recall = 1.0
+
+    # Block hit-rate: among blocks that contain needles, fraction retrieved
+    block_hit = 0.0
+    if blocks and corpus.needle_positions:
+        needle_blocks = set()
+        for p in corpus.needle_positions:
+            for b in blocks:
+                if b.start <= p < b.end:
+                    needle_blocks.add(b.block_id)
+        if needle_blocks:
+            retrieved = set(ws.retrieved_block_ids)
+            block_hit = len(needle_blocks & retrieved) / len(needle_blocks)
+        else:
+            block_hit = 1.0
+    elif ws.policy in ("dense",):
+        block_hit = 1.0
+
+    # Output reconstruction vs dense
+    mses = []
+    cosines = []
+    dense_idx = list(range(corpus.n))
+    for q in queries:
+        y_hat = attention_output(q, corpus.keys, corpus.values, ws.keep_idx)
+        y = attention_output(q, corpus.keys, corpus.values, dense_idx)
+        diff = _sub(y_hat, y)
+        mses.append(_dot(diff, diff) / max(len(diff), 1))
+        cosines.append(_cosine(y_hat, y))
+    mse = sum(mses) / max(len(mses), 1)
+    cos = sum(cosines) / max(len(cosines), 1)
+    latency = (time.perf_counter() - t0) * 1000.0
+    return EvalReport(
+        policy=ws.policy,
+        needle_recall=needle_recall,
+        block_hit_rate=block_hit,
+        output_mse=mse,
+        output_cosine=cos,
+        n_gpu_tokens=ws.n_gpu_tokens,
+        n_blocks_retrieved=ws.n_blocks_retrieved,
+        latency_ms=latency,
+    )
+
+
+def run_benchmark(
+    seq_len: int = 768,
+    dim: int = 32,
+    n_needles: int = 6,
+    block_size: int = 32,
+    n_rep: int = 4,
+    top_k: int = 4,
+    sink_len: int = 4,
+    local_window: int = 64,
+    seed: int = 42,
+) -> Dict:
+    corpus = generate_long_context(
+        seq_len=seq_len,
+        dim=dim,
+        n_needles=n_needles,
+        sink_len=sink_len,
+        local_window=local_window,
+        block_size=block_size,
+        seed=seed,
+    )
+    blocks = build_block_memory(corpus, n_rep=n_rep, seed=seed)
+    queries = make_queries(corpus, n_queries=10, seed=seed + 1)
+
+    # Match InfLLM GPU budget approx for fair H2O baseline
+    # estimate: sinks + local + top_k * block_size
+    budget = corpus.sink_len + corpus.local_window + top_k * block_size
+
+    policies = [
+        working_set_infllm(corpus, blocks, queries, top_k=top_k),
+        working_set_streaming_llm(corpus),
+        working_set_sliding_window(corpus, window=budget),
+        working_set_random_blocks(corpus, blocks, top_k=top_k, seed=seed),
+        working_set_h2o_approx(corpus, queries, budget=budget),
+        working_set_dense(corpus),
+    ]
+
+    reports = []
+    for ws in policies:
+        rep = evaluate_working_set(corpus, ws, queries, blocks=blocks)
+        reports.append(
+            {
+                "policy": rep.policy,
+                "needle_recall": round(rep.needle_recall, 4),
+                "block_hit_rate": round(rep.block_hit_rate, 4),
+                "output_mse": round(rep.output_mse, 6),
+                "output_cosine": round(rep.output_cosine, 4),
+                "n_gpu_tokens": rep.n_gpu_tokens,
+                "n_blocks_retrieved": rep.n_blocks_retrieved,
+                "latency_ms": round(rep.latency_ms, 3),
+            }
+        )
+
+    # Winner: highest needle recall, then lowest mse
+    def key(r):
+        return (r["needle_recall"], -r["output_mse"], r["output_cosine"])
+
+    winner = max(reports, key=key)["policy"]
+    by = {r["policy"]: r for r in reports}
+    return {
+        "seq_len": seq_len,
+        "dim": dim,
+        "n_needles": n_needles,
+        "block_size": block_size,
+        "n_rep": n_rep,
+        "top_k": top_k,
+        "n_blocks": len(blocks),
+        "budget_tokens_approx": budget,
+        "winner": winner,
+        "infllm_needle_recall": by["infllm"]["needle_recall"],
+        "streaming_llm_needle_recall": by["streaming_llm"]["needle_recall"],
+        "infllm_block_hit_rate": by["infllm"]["block_hit_rate"],
+        "infllm_output_mse": by["infllm"]["output_mse"],
+        "reports": reports,
+    }
+
+
+def run_compare(
+    seq_len: int = 768,
+    dim: int = 32,
+    top_k: int = 4,
+    block_size: int = 32,
+    n_rep: int = 4,
+    seed: int = 7,
+) -> Dict:
+    bench = run_benchmark(
+        seq_len=seq_len,
+        dim=dim,
+        top_k=top_k,
+        block_size=block_size,
+        n_rep=n_rep,
+        seed=seed,
+    )
+    by = {r["policy"]: r for r in bench["reports"]}
+    inf, sllm, rnd, h2o = by["infllm"], by["streaming_llm"], by["random_blocks"], by["h2o_approx"]
+    return {
+        "seq_len": seq_len,
+        "top_k": top_k,
+        "block_size": block_size,
+        "needle_lift_vs_streaming": round(inf["needle_recall"] - sllm["needle_recall"], 4),
+        "needle_lift_vs_random_blocks": round(inf["needle_recall"] - rnd["needle_recall"], 4),
+        "needle_lift_vs_h2o": round(inf["needle_recall"] - h2o["needle_recall"], 4),
+        "mse_lift_vs_streaming": round(sllm["output_mse"] - inf["output_mse"], 6),
+        "block_hit_rate": inf["block_hit_rate"],
+        "gpu_tokens_infllm": inf["n_gpu_tokens"],
+        "gpu_tokens_dense": by["dense"]["n_gpu_tokens"],
+        "compression_ratio": round(by["dense"]["n_gpu_tokens"] / max(inf["n_gpu_tokens"], 1), 3),
+        "winner": bench["winner"],
+        "reports": bench["reports"],
+    }
+
+
+def theory_ledger(
+    seq_len: int = 128_000,
+    dim: int = 128,
+    layers: int = 32,
+    kv_heads: int = 8,
+    block_size: int = 128,
+    n_rep: int = 4,
+    top_k: int = 8,
+    sink_len: int = 4,
+    local_window: int = 4096,
+    bytes_per: int = 2,
+) -> Dict:
+    """7B-class FP16 KV footprint: dense vs InfLLM working set."""
+    # per token per layer: 2 (K,V) * kv_heads * dim * bytes
+    per_tok_layer = 2 * kv_heads * dim * bytes_per
+    dense_bytes = seq_len * layers * per_tok_layer
+    n_blocks = max(0, (seq_len - sink_len - local_window + block_size - 1) // block_size)
+    # GPU: sinks + local + top_k blocks; CPU sketch: n_blocks * n_rep keys only
+    gpu_tokens = sink_len + local_window + top_k * block_size
+    gpu_bytes = gpu_tokens * layers * per_tok_layer
+    # external full blocks offloaded (CPU) still store full KV for retrieved loads
+    offload_tokens = max(seq_len - sink_len - local_window, 0)
+    cpu_kv_bytes = offload_tokens * layers * per_tok_layer
+    sketch_bytes = n_blocks * n_rep * kv_heads * dim * bytes_per * layers  # rep keys only approx
+    return {
+        "model": f"~7B-class GQA kv_heads={kv_heads} d={dim} L={layers}",
+        "seq_len": seq_len,
+        "block_size": block_size,
+        "n_blocks": n_blocks,
+        "n_rep": n_rep,
+        "top_k": top_k,
+        "dense_kv_gib": round(dense_bytes / (1024**3), 4),
+        "infllm_gpu_kv_gib": round(gpu_bytes / (1024**3), 4),
+        "infllm_cpu_offload_gib": round(cpu_kv_bytes / (1024**3), 4),
+        "infllm_sketch_mib": round(sketch_bytes / (1024**2), 3),
+        "gpu_compression_vs_dense": round(dense_bytes / max(gpu_bytes, 1), 2),
+        "gpu_tokens": gpu_tokens,
+        "notes": "GPU holds sinks+local+top-k blocks; full past KV lives in host memory; sketch indexes reps only.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI commands
+# ---------------------------------------------------------------------------
+
+def cmd_selftest(_args: argparse.Namespace) -> int:
+    failures: List[str] = []
+
+    corpus = generate_long_context(
+        seq_len=512, dim=24, n_needles=6, sink_len=4, local_window=48, block_size=32, seed=0
+    )
+    blocks = build_block_memory(corpus, n_rep=4, seed=0)
+    queries = make_queries(corpus, n_queries=8, seed=1)
+
+    # 1. partition covers middle exactly, no overlap
+    covered = []
+    for b in blocks:
+        covered.extend(range(b.start, b.end))
+        if b.end <= b.start:
+            failures.append(f"empty block {b.block_id}")
+        if not b.rep_keys or len(b.rep_indices_local) < 1:
+            failures.append(f"block {b.block_id} missing reps")
+        if len(b.rep_indices_local) != len(set(b.rep_indices_local)):
+            failures.append(f"block {b.block_id} dup reps")
+    expected = list(range(corpus.sink_len, corpus.n - corpus.local_window))
+    if covered != expected:
+        failures.append(f"partition mismatch len {len(covered)} vs {len(expected)}")
+
+    # 2. InfLLM keeps sinks + local
+    ws = working_set_infllm(corpus, blocks, queries, top_k=3)
+    for i in range(corpus.sink_len):
+        if i not in ws.keep_set:
+            failures.append(f"sink {i} missing")
+    for i in range(corpus.n - corpus.local_window, corpus.n):
+        if i not in ws.keep_set:
+            failures.append(f"local {i} missing")
+
+    # 3. top_k cardinality
+    if ws.n_blocks_retrieved != min(3, len(blocks)):
+        failures.append(f"retrieved count {ws.n_blocks_retrieved}")
+
+    # 4. dense mse ~ 0
+    dense = evaluate_working_set(corpus, working_set_dense(corpus), queries, blocks)
+    if dense.output_mse > 1e-8:
+        failures.append(f"dense mse {dense.output_mse}")
+    if abs(dense.needle_recall - 1.0) > 1e-9:
+        failures.append("dense needle recall != 1")
+
+    # 5. InfLLM should beat StreamingLLM on needle recall for distant needles
+    inf = evaluate_working_set(corpus, ws, queries, blocks)
+    sllm = evaluate_working_set(corpus, working_set_streaming_llm(corpus), queries, blocks)
+    if inf.needle_recall + 1e-9 < sllm.needle_recall:
+        failures.append(
+            f"infllm needle {inf.needle_recall:.3f} < streaming {sllm.needle_recall:.3f}"
+        )
+
+    # 6. InfLLM should beat random blocks on needle OR block_hit (most seeds)
+    rnd = evaluate_working_set(
+        corpus, working_set_random_blocks(corpus, blocks, top_k=3, seed=0), queries, blocks
+    )
+    if (
+        inf.needle_recall + 1e-9 < rnd.needle_recall
+        and inf.block_hit_rate + 1e-9 < rnd.block_hit_rate
+        and inf.output_cosine + 1e-9 < rnd.output_cosine
+    ):
+        failures.append("infllm dominated by random_blocks on all axes")
+
+    # 7. benchmark schema
+    bench = run_benchmark(seq_len=384, dim=20, n_needles=4, block_size=24, top_k=3, seed=3)
+    for k in ("winner", "infllm_needle_recall", "reports", "n_blocks"):
+        if k not in bench:
+            failures.append(f"bench missing {k}")
+    policies = {r["policy"] for r in bench["reports"]}
+    need = {"infllm", "streaming_llm", "random_blocks", "h2o_approx", "dense", "sliding_window"}
+    if not need <= policies:
+        failures.append(f"missing policies {need - policies}")
+
+    # 8. theory monotonic compression
+    th = theory_ledger(seq_len=65536, top_k=4)
+    if th["infllm_gpu_kv_gib"] >= th["dense_kv_gib"]:
+        failures.append("theory: gpu not smaller than dense")
+    if th["gpu_compression_vs_dense"] < 1.0:
+        failures.append("theory compression < 1")
+
+    if failures:
+        print("❌ infllm-block-memory-engine selftest FAILED:")
+        for f in failures:
+            print("  -", f)
+        return 1
+
+    print("✅ infllm-block-memory-engine selftest passed (8 invariant groups)")
+    print(
+        f"  • infllm   needle={inf.needle_recall:.3f} block_hit={inf.block_hit_rate:.3f} "
+        f"mse={inf.output_mse:.6f} gpu_tok={inf.n_gpu_tokens}"
+    )
+    print(
+        f"  • stream   needle={sllm.needle_recall:.3f} mse={sllm.output_mse:.6f} "
+        f"gpu_tok={sllm.n_gpu_tokens}"
+    )
+    print(
+        f"  • random   needle={rnd.needle_recall:.3f} block_hit={rnd.block_hit_rate:.3f}"
+    )
+    print(f"  • blocks={len(blocks)} needles={corpus.needle_positions}")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    out = run_benchmark(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        n_needles=args.n_needles,
+        block_size=args.block_size,
+        n_rep=args.n_rep,
+        top_k=args.top_k,
+        sink_len=args.sink_len,
+        local_window=args.local_window,
+        seed=args.seed,
+    )
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    print(f"⚡ InfLLM Block Memory Benchmark  seq={out['seq_len']} blocks={out['n_blocks']} top_k={out['top_k']}")
+    print(f"  winner: {out['winner']}")
+    hdr = f"{'policy':<16} {'needle':>8} {'blk_hit':>8} {'mse':>10} {'cos':>8} {'gpu_tok':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in out["reports"]:
+        print(
+            f"{r['policy']:<16} {r['needle_recall']:>8.3f} {r['block_hit_rate']:>8.3f} "
+            f"{r['output_mse']:>10.6f} {r['output_cosine']:>8.4f} {r['n_gpu_tokens']:>8d}"
+        )
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    out = run_compare(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        top_k=args.top_k,
+        block_size=args.block_size,
+        n_rep=args.n_rep,
+        seed=args.seed,
+    )
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    print("📊 InfLLM vs baselines")
+    print(f"  • needle_lift_vs_streaming:      {out['needle_lift_vs_streaming']:+.3f}")
+    print(f"  • needle_lift_vs_random_blocks:  {out['needle_lift_vs_random_blocks']:+.3f}")
+    print(f"  • needle_lift_vs_h2o:            {out['needle_lift_vs_h2o']:+.3f}")
+    print(f"  • mse_lift_vs_streaming:         {out['mse_lift_vs_streaming']:+.6f}")
+    print(f"  • block_hit_rate:                {out['block_hit_rate']:.3f}")
+    print(f"  • GPU tokens:                    {out['gpu_tokens_infllm']} / dense {out['gpu_tokens_dense']}  (×{out['compression_ratio']})")
+    print(f"  • winner:                        {out['winner']}")
+    return 0
+
+
+def cmd_retrieve(args: argparse.Namespace) -> int:
+    corpus = generate_long_context(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        n_needles=args.n_needles,
+        block_size=args.block_size,
+        sink_len=args.sink_len,
+        local_window=args.local_window,
+        seed=args.seed,
+    )
+    blocks = build_block_memory(corpus, n_rep=args.n_rep, seed=args.seed)
+    queries = make_queries(corpus, n_queries=args.n_queries, seed=args.seed + 3)
+    ws = working_set_infllm(corpus, blocks, queries, top_k=args.top_k, score_mode=args.score_mode)
+    rep = evaluate_working_set(corpus, ws, queries, blocks)
+    payload = {
+        "retrieved_block_ids": ws.retrieved_block_ids,
+        "score_map": {str(k): round(v, 4) for k, v in ws.score_map.items()},
+        "keep_count": len(ws.keep_idx),
+        "needle_positions": corpus.needle_positions,
+        "needle_blocks": sorted(
+            {
+                b.block_id
+                for b in blocks
+                for p in corpus.needle_positions
+                if b.start <= p < b.end
+            }
+        ),
+        "eval": asdict(rep),
+        "n_blocks": len(blocks),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"🔍 Retrieved blocks: {ws.retrieved_block_ids}")
+        print(f"   scores: {payload['score_map']}")
+        print(f"   needle_pos={corpus.needle_positions} needle_blocks={payload['needle_blocks']}")
+        print(
+            f"   needle_recall={rep.needle_recall:.3f} block_hit={rep.block_hit_rate:.3f} "
+            f"mse={rep.output_mse:.6f} gpu_tok={rep.n_gpu_tokens}"
+        )
+    return 0
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    """Step through decode positions and show which blocks get pulled in."""
+    corpus = generate_long_context(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        n_needles=args.n_needles,
+        block_size=args.block_size,
+        sink_len=args.sink_len,
+        local_window=args.local_window,
+        seed=args.seed,
+    )
+    blocks = build_block_memory(corpus, n_rep=args.n_rep, seed=args.seed)
+    # Simulate several decode queries (use needle-targeted + drifting)
+    steps = []
+    for t in range(args.steps):
+        qlist = make_queries(corpus, n_queries=1, needle_frac=1.0 if t % 2 == 0 else 0.0, seed=100 + t)
+        ws = working_set_infllm(corpus, blocks, qlist, top_k=args.top_k)
+        steps.append(
+            {
+                "step": t,
+                "retrieved": ws.retrieved_block_ids,
+                "gpu_tokens": ws.n_gpu_tokens,
+                "top_score": round(max(ws.score_map.values()) if ws.score_map else 0.0, 4),
+            }
+        )
+    out = {"steps": steps, "n_blocks": len(blocks), "seq_len": corpus.n}
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"🎬 InfLLM decode simulation  steps={args.steps} blocks={len(blocks)}")
+        for s in steps:
+            print(f"  t={s['step']:>3d}  retrieved={s['retrieved']}  gpu_tok={s['gpu_tokens']}  top_score={s['top_score']}")
+    return 0
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    out = theory_ledger(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        layers=args.layers,
+        kv_heads=args.heads,
+        block_size=args.block_size,
+        n_rep=args.n_rep,
+        top_k=args.top_k,
+        sink_len=args.sink_len,
+        local_window=args.local_window,
+    )
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 0
+    print("📐 InfLLM memory theory ledger")
+    for k, v in out.items():
+        print(f"  • {k}: {v}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="infllm-block-memory-engine",
+        description="InfLLM: training-free block memory for infinite context (arXiv:2402.04617)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--seq-len", type=int, default=768)
+        sp.add_argument("--dim", type=int, default=32)
+        sp.add_argument("--n-needles", type=int, default=6)
+        sp.add_argument("--block-size", type=int, default=32)
+        sp.add_argument("--n-rep", type=int, default=4)
+        sp.add_argument("--top-k", type=int, default=4)
+        sp.add_argument("--sink-len", type=int, default=4)
+        sp.add_argument("--local-window", type=int, default=64)
+        sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--json", action="store_true")
+
+    b = sub.add_parser("bench", help="multi-policy long-context retrieval benchmark")
+    add_common(b)
+    b.set_defaults(func=cmd_bench)
+
+    c = sub.add_parser("compare", help="InfLLM lift vs StreamingLLM / random / H2O")
+    add_common(c)
+    c.set_defaults(func=cmd_compare)
+
+    r = sub.add_parser("retrieve", help="dump retrieved blocks + needle alignment")
+    add_common(r)
+    r.add_argument("--n-queries", type=int, default=8)
+    r.add_argument(
+        "--score-mode",
+        default="rep_mean",
+        choices=["rep_mean", "rep_max", "centroid"],
+    )
+    r.set_defaults(func=cmd_retrieve)
+
+    s = sub.add_parser("simulate", help="stepwise decode block-pull trace")
+    add_common(s)
+    s.add_argument("--steps", type=int, default=8)
+    s.set_defaults(func=cmd_simulate)
+
+    th = sub.add_parser("theory", help="7B-class dense vs InfLLM KV footprint ledger")
+    th.add_argument("--seq-len", type=int, default=128000)
+    th.add_argument("--dim", type=int, default=128)
+    th.add_argument("--layers", type=int, default=32)
+    th.add_argument("--heads", type=int, default=8)
+    th.add_argument("--block-size", type=int, default=128)
+    th.add_argument("--n-rep", type=int, default=4)
+    th.add_argument("--top-k", type=int, default=8)
+    th.add_argument("--sink-len", type=int, default=4)
+    th.add_argument("--local-window", type=int, default=4096)
+    th.add_argument("--json", action="store_true")
+    th.set_defaults(func=cmd_theory)
+
+    st = sub.add_parser("selftest", help="deterministic invariant gate")
+    st.set_defaults(func=cmd_selftest)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
