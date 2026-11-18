@@ -2203,5 +2203,24 @@
       "NeurIPS2025",
       "Inference"
     ]
+  },
+  {
+    "id": "curdkv-value-cur-engine",
+    "title": "CurDKV: Value-Guided KV Compression via Approximated CUR Decomposition (NeurIPS 2025)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Training-free value-centric KV cache compression using approximated CUR column leverage scores on the attention-output contribution matrix \u2014 preserves Y=softmax(QK^T)V under hard budgets while rejecting high-attention near-zero value decoys that SnapKV/H2O retain.",
+    "cli": "curdkv-value-cur-engine",
+    "evolved_at": "2026-11-19T01:28:54.994930",
+    "tags": [
+      "Frontier-AI",
+      "KV-Cache",
+      "CurDKV",
+      "CUR",
+      "LeverageScores",
+      "ValueGuided",
+      "NeurIPS2025",
+      "Inference"
+    ]
   }
 ]

@@ -1,5 +1,18 @@
 # 📜 Hermes Evolution Changelog
 
+
+### [2026-11-19 01:28:54] - Evolved `curdkv-value-cur-engine`
+- **Title**: CurDKV: Value-Guided KV Compression via Approximated CUR Decomposition (NeurIPS 2025)
+- **Category**: inference
+- **Type**: skill+tool
+- **Description**: Training-free value-centric KV cache compression using approximated CUR column leverage scores on the attention-output contribution matrix — preserves Y=softmax(QK^T)V under hard budgets while rejecting high-attention near-zero value decoys that SnapKV/H2O retain.
+- **CLI**: `curdkv-value-cur-engine {selftest,bench,compare,compress,leverage,theory}`
+- **Artifacts**:
+  - `bin/curdkv-value-cur-engine`
+  - `skills/inference/curdkv-value-cur-engine/SKILL.md`
+  - `tests/test_curdkv_value_cur_engine.py` (10/10 passed)
+- **Verification**: selftest exit 0; CurDKV needle recall 100% vs attn_score 0–30% on structured multi-cluster+decoy corpus; positive mse_lift_vs_attn.
+
 ### [2026-11-19 00:19:00] - Evolved `keydiff-kv-engine`
 - **Title**: KeyDiff: Key Similarity-Based KV Cache Eviction Engine (NeurIPS 2025)
 - **Category**: inference

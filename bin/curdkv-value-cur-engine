@@ -1,0 +1,1054 @@
+#!/usr/bin/env python3
+"""curdkv-value-cur-engine: CurDKV Value-Guided KV Compression via Approximated CUR (NeurIPS 2025).
+
+Training-free KV cache compression that selects tokens by *value-centric leverage
+scores* from an approximate CUR decomposition of the attention-output subspace —
+not by query-key attention mass alone.
+
+Core ideas (CurDKV / value-guided CUR, NeurIPS 2025):
+1. Attention-score heuristics (SnapKV, H2O) ignore that values write the output:
+   Y = softmax(Q K^T / sqrt(d)) V. High attention on a near-zero value is wasted.
+2. CUR column selection with leverage scores on the value (or contribution) matrix
+   preserves the dominant subspace of Y under a hard token budget.
+3. Randomized / power-iteration sketch approximates top-r right singular structure
+   without materializing a full SVD — FlashAttention-compatible offline ranking.
+4. Oracle metric is end-to-end attention *output* reconstruction (MSE / cosine),
+   which attention-mass recovery does not guarantee.
+
+References:
+  - Value-Guided KV Compression via Approximated CUR Decomposition (NeurIPS 2025)
+  - Classical CUR: Drineas, Mahoney, Muthukrishnan; Mahoney & Drineas leverage scores
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python linear algebra
+# ---------------------------------------------------------------------------
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _norm(a: Sequence[float]) -> float:
+    return math.sqrt(max(_dot(a, a), 1e-18))
+
+
+def _scale(v: Sequence[float], s: float) -> List[float]:
+    return [x * s for x in v]
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x - y for x, y in zip(a, b)]
+
+
+def _axpy(y: List[float], a: float, x: Sequence[float]) -> None:
+    for i, xi in enumerate(x):
+        y[i] += a * xi
+
+
+def _matvec_cols(cols: Sequence[Sequence[float]], x: Sequence[float]) -> List[float]:
+    """y = sum_j x[j] * cols[j]  (cols are length-d vectors, len(x)=n)."""
+    if not cols:
+        return []
+    d = len(cols[0])
+    y = [0.0] * d
+    for j, c in enumerate(cols):
+        xj = x[j]
+        if xj == 0.0:
+            continue
+        for i in range(d):
+            y[i] += c[i] * xj
+    return y
+
+
+def _matT_vec(cols: Sequence[Sequence[float]], y: Sequence[float]) -> List[float]:
+    """x = M^T y where columns of M are `cols`."""
+    return [_dot(c, y) for c in cols]
+
+
+def _normalize(v: Sequence[float]) -> List[float]:
+    n = _norm(v)
+    return [x / n for x in v]
+
+
+def _project_out(v: List[float], basis: Sequence[Sequence[float]]) -> List[float]:
+    out = list(v)
+    for b in basis:
+        _axpy(out, -_dot(out, b), b)
+    return out
+
+
+def power_iteration_right_singular(
+    cols: Sequence[Sequence[float]],
+    rank: int = 4,
+    n_iter: int = 12,
+    seed: int = 0,
+) -> Tuple[List[List[float]], List[float]]:
+    """Approximate top-`rank` right singular directions of M (cols = M's columns).
+
+    Returns (V_hat [rank x n], singular_value_estimates).
+    Uses subspace / block power iteration on M^T M without forming it explicitly.
+    """
+    n = len(cols)
+    if n == 0:
+        return [], []
+    rng = random.Random(seed)
+    rank = max(1, min(rank, n))
+    # Initialize orthonormal-ish random block in R^n
+    block: List[List[float]] = []
+    for _ in range(rank):
+        v = [rng.gauss(0.0, 1.0) for _ in range(n)]
+        v = _project_out(v, block)
+        nrm = _norm(v)
+        if nrm < 1e-12:
+            v = [0.0] * n
+            v[rng.randrange(n)] = 1.0
+            v = _project_out(v, block)
+            nrm = _norm(v) or 1.0
+        block.append([x / nrm for x in v])
+
+    for _ in range(n_iter):
+        # W = M^T M V  (each column)
+        new_block: List[List[float]] = []
+        for v in block:
+            mv = _matvec_cols(cols, v)          # M v  in R^d
+            mtv = _matT_vec(cols, mv)           # M^T M v in R^n
+            new_block.append(mtv)
+        # Modified Gram-Schmidt
+        ortho: List[List[float]] = []
+        for v in new_block:
+            v = _project_out(v, ortho)
+            nrm = _norm(v)
+            if nrm < 1e-14:
+                # re-seed
+                v = [rng.gauss(0.0, 1.0) for _ in range(n)]
+                v = _project_out(v, ortho)
+                nrm = _norm(v) or 1.0
+            ortho.append([x / nrm for x in v])
+        block = ortho
+
+    # Rayleigh quotients for singular-value estimates: ||M v||
+    svals: List[float] = []
+    for v in block:
+        mv = _matvec_cols(cols, v)
+        svals.append(_norm(mv))
+    return block, svals
+
+
+def column_leverage_scores(
+    cols: Sequence[Sequence[float]],
+    rank: int = 4,
+    n_iter: int = 12,
+    seed: int = 0,
+) -> List[float]:
+    """Statistical leverage scores ℓ_j ≈ ||V_r[j, :]||^2 for column selection.
+
+    For matrix M with columns cols[j], leverage of column j is the squared row-norm
+    of the top-r right singular matrix V_r (Mahoney & Drineas).
+    """
+    n = len(cols)
+    if n == 0:
+        return []
+    V_hat, _ = power_iteration_right_singular(cols, rank=rank, n_iter=n_iter, seed=seed)
+    # V_hat is list of rank vectors each length n; leverage[j] = sum_r V_hat[r][j]^2
+    lev = [0.0] * n
+    for v in V_hat:
+        for j, x in enumerate(v):
+            lev[j] += x * x
+    # numerical hygiene
+    s = sum(lev) or 1.0
+    # Expected sum of leverages ≈ rank; renormalize softly
+    target = float(len(V_hat))
+    if s > 0:
+        scale = target / s
+        lev = [x * scale for x in lev]
+    return lev
+
+
+# ---------------------------------------------------------------------------
+# Synthetic long-context KV corpus
+# ---------------------------------------------------------------------------
+
+@dataclass
+class KVCorpus:
+    """Synthetic multi-cluster K/V sequence with needles, sinks, and local tail."""
+
+    keys: List[List[float]]
+    values: List[List[float]]
+    labels: List[str]  # sink | local | cluster_k | needle | filler
+    dim: int
+    n_clusters: int
+    n_needles: int
+
+    @property
+    def n(self) -> int:
+        return len(self.keys)
+
+
+def generate_kv_corpus(
+    seq_len: int = 512,
+    dim: int = 48,
+    n_clusters: int = 6,
+    n_needles: int = 10,
+    sink_len: int = 4,
+    local_window: int = 64,
+    seed: int = 42,
+    value_noise: float = 0.05,
+) -> KVCorpus:
+    """Build K/V tensors where:
+    - sinks share a direction (attention anchors)
+    - clusters are redundant near-duplicates (high attention, low unique value)
+    - needles have distinctive keys AND high-norm unique values (must keep)
+    - local window = recent decode tail
+    - some 'decoy' tokens: high attention-ish keys but near-zero values
+    """
+    if seq_len < sink_len + local_window + n_needles + n_clusters + 4:
+        raise ValueError("seq_len too small for requested structure")
+    rng = random.Random(seed)
+
+    def rand_unit() -> List[float]:
+        v = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+        return _normalize(v)
+
+    sink_dir = rand_unit()
+    cluster_k_dirs = [rand_unit() for _ in range(n_clusters)]
+    cluster_v_dirs = [rand_unit() for _ in range(n_clusters)]
+    needle_k_dirs = [rand_unit() for _ in range(n_needles)]
+    needle_v_dirs = [rand_unit() for _ in range(n_needles)]
+    # decoy: strong key magnitude, weak value
+    decoy_k = rand_unit()
+
+    keys: List[List[float]] = []
+    values: List[List[float]] = []
+    labels: List[str] = []
+
+    def push(k: List[float], v: List[float], lab: str) -> None:
+        kn = [x + rng.gauss(0.0, 0.03) for x in k]
+        vn = [x + rng.gauss(0.0, value_noise) for x in v]
+        keys.append(kn)
+        values.append(vn)
+        labels.append(lab)
+
+    for _ in range(sink_len):
+        push(sink_dir, _scale(sink_dir, 0.4), "sink")
+
+    mid = seq_len - sink_len - local_window
+    needle_pos: set = set()
+    if n_needles > 0 and mid > 0:
+        step = max(mid // (n_needles + 1), 1)
+        for i in range(n_needles):
+            needle_pos.add(sink_len + min(mid - 1, (i + 1) * step))
+
+    decoy_budget = max(4, mid // 12)
+    decoy_pos = set()
+    while len(decoy_pos) < decoy_budget and mid > 0:
+        t = sink_len + rng.randrange(mid)
+        if t not in needle_pos:
+            decoy_pos.add(t)
+
+    for t in range(sink_len, sink_len + mid):
+        if t in needle_pos:
+            ni = sum(1 for L in labels if L == "needle")
+            ni = min(ni, n_needles - 1)
+            # high-norm distinctive values
+            push(needle_k_dirs[ni], _scale(needle_v_dirs[ni], 2.2), "needle")
+        elif t in decoy_pos:
+            # high key energy, near-zero value → attention heuristics waste budget
+            push(_scale(decoy_k, 1.5), _scale(rand_unit(), 0.02), "decoy")
+        else:
+            c = rng.randrange(n_clusters)
+            push(cluster_k_dirs[c], _scale(cluster_v_dirs[c], 0.7), f"cluster_{c}")
+
+    for _ in range(local_window):
+        c = rng.randrange(n_clusters)
+        push(cluster_k_dirs[c], _scale(cluster_v_dirs[c], 0.85), "local")
+
+    assert len(keys) == seq_len
+    return KVCorpus(
+        keys=keys,
+        values=values,
+        labels=labels,
+        dim=dim,
+        n_clusters=n_clusters,
+        n_needles=n_needles,
+    )
+
+
+def make_probe_queries(
+    corpus: KVCorpus,
+    n_queries: int = 24,
+    seed: int = 7,
+) -> List[List[float]]:
+    """Retrieval-like probes biased to needles + cluster centroids."""
+    rng = random.Random(seed)
+    needle_idx = [i for i, L in enumerate(corpus.labels) if L == "needle"]
+    cluster_idx = [i for i, L in enumerate(corpus.labels) if L.startswith("cluster_")]
+    queries: List[List[float]] = []
+    for _ in range(n_queries):
+        if needle_idx and rng.random() < 0.5:
+            base = corpus.keys[rng.choice(needle_idx)]
+        elif cluster_idx:
+            base = corpus.keys[rng.choice(cluster_idx)]
+        else:
+            base = corpus.keys[rng.randrange(corpus.n)]
+        noise = [rng.gauss(0.0, 0.12) for _ in range(corpus.dim)]
+        queries.append(_add(base, noise))
+    return queries
+
+
+# ---------------------------------------------------------------------------
+# Attention helpers
+# ---------------------------------------------------------------------------
+
+def softmax_attn_row(
+    query: Sequence[float],
+    keys: Sequence[Sequence[float]],
+    temperature: float = 1.0,
+) -> List[float]:
+    d = len(query) or 1
+    scale = 1.0 / (math.sqrt(d) * max(temperature, 1e-6))
+    logits = [_dot(query, k) * scale for k in keys]
+    m = max(logits) if logits else 0.0
+    exps = [math.exp(l - m) for l in logits]
+    s = sum(exps) or 1.0
+    return [e / s for e in exps]
+
+
+def attention_output(
+    query: Sequence[float],
+    keys: Sequence[Sequence[float]],
+    values: Sequence[Sequence[float]],
+    keep_idx: Optional[Sequence[int]] = None,
+) -> List[float]:
+    """Y = softmax(q K^T) V, optionally restricted to keep_idx (renormalized)."""
+    if keep_idx is None:
+        keep_idx = list(range(len(keys)))
+    sub_k = [keys[i] for i in keep_idx]
+    sub_v = [values[i] for i in keep_idx]
+    if not sub_k:
+        return [0.0] * (len(values[0]) if values else 0)
+    w = softmax_attn_row(query, sub_k)
+    d = len(sub_v[0])
+    y = [0.0] * d
+    for wi, vi in zip(w, sub_v):
+        _axpy(y, wi, vi)
+    return y
+
+
+def mean_attention_mass(
+    keys: Sequence[Sequence[float]],
+    queries: Sequence[Sequence[float]],
+) -> List[float]:
+    n = len(keys)
+    mass = [0.0] * n
+    if not queries:
+        return mass
+    for q in queries:
+        w = softmax_attn_row(q, keys)
+        for i, wi in enumerate(w):
+            mass[i] += wi
+    inv = 1.0 / len(queries)
+    return [m * inv for m in mass]
+
+
+# ---------------------------------------------------------------------------
+# Compression / eviction policies
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CompressResult:
+    keep_idx: List[int]
+    policy: str
+    budget: int
+    elapsed_ms: float
+    leverage: List[float] = field(default_factory=list)
+    meta: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def keep_set(self) -> set:
+        return set(self.keep_idx)
+
+
+def _forced_anchors(n: int, sink_len: int, local_window: int) -> List[int]:
+    sinks = list(range(min(sink_len, n)))
+    local = list(range(max(0, n - local_window), n))
+    seen = set()
+    out: List[int] = []
+    for i in sinks + local:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def _fill_budget(ranked: Sequence[int], anchors: Sequence[int], budget: int, n: int) -> List[int]:
+    keep: List[int] = []
+    seen = set()
+    for i in list(anchors) + list(ranked):
+        if i < 0 or i >= n:
+            continue
+        if i in seen:
+            continue
+        keep.append(i)
+        seen.add(i)
+        if len(keep) >= budget:
+            break
+    # pad if needed
+    if len(keep) < budget:
+        for i in range(n):
+            if i not in seen:
+                keep.append(i)
+                seen.add(i)
+                if len(keep) >= budget:
+                    break
+    return sorted(keep[:budget])
+
+
+def compress_streaming_llm(
+    n: int,
+    budget: int,
+    sink_len: int = 4,
+) -> CompressResult:
+    t0 = time.perf_counter()
+    budget = min(budget, n)
+    keep = list(range(min(sink_len, budget)))
+    need = budget - len(keep)
+    start = max(0, n - need)
+    for i in range(start, n):
+        if i not in keep:
+            keep.append(i)
+        if len(keep) >= budget:
+            break
+    keep = sorted(set(keep))[:budget]
+    return CompressResult(keep, "streaming_llm", budget, (time.perf_counter() - t0) * 1000.0)
+
+
+def compress_random(n: int, budget: int, seed: int = 0) -> CompressResult:
+    t0 = time.perf_counter()
+    budget = min(budget, n)
+    rng = random.Random(seed)
+    keep = sorted(rng.sample(range(n), budget))
+    return CompressResult(keep, "random", budget, (time.perf_counter() - t0) * 1000.0)
+
+
+def compress_value_magnitude(
+    values: Sequence[Sequence[float]],
+    budget: int,
+    sink_len: int = 4,
+    local_window: int = 64,
+) -> CompressResult:
+    t0 = time.perf_counter()
+    n = len(values)
+    budget = min(budget, n)
+    anchors = _fit_anchors(n, budget, sink_len, local_window)
+    scored = sorted(((_norm(v), i) for i, v in enumerate(values)), reverse=True)
+    ranked = [i for _, i in scored]
+    keep = _fill_budget(ranked, anchors, budget, n)
+    return CompressResult(keep, "value_magnitude", budget, (time.perf_counter() - t0) * 1000.0)
+
+
+def compress_attn_score(
+    keys: Sequence[Sequence[float]],
+    queries: Sequence[Sequence[float]],
+    budget: int,
+    sink_len: int = 4,
+    local_window: int = 64,
+) -> CompressResult:
+    """SnapKV/H2O-style: rank by mean attention mass over probe/obs queries."""
+    t0 = time.perf_counter()
+    n = len(keys)
+    budget = min(budget, n)
+    mass = mean_attention_mass(keys, queries)
+    anchors = _fit_anchors(n, budget, sink_len, local_window)
+    ranked = sorted(range(n), key=lambda i: mass[i], reverse=True)
+    keep = _fill_budget(ranked, anchors, budget, n)
+    return CompressResult(
+        keep,
+        "attn_score",
+        budget,
+        (time.perf_counter() - t0) * 1000.0,
+        meta={"mass_sum": float(sum(mass))},
+    )
+
+
+def _contribution_columns(
+    keys: Sequence[Sequence[float]],
+    values: Sequence[Sequence[float]],
+    queries: Sequence[Sequence[float]],
+) -> List[List[float]]:
+    """Build per-token contribution vectors c_i = sqrt(mass_i) * v_i  (or mass-weighted).
+
+    CurDKV insight: columns that span the range of E[A] V matter. We form
+    C with c_i = m_i^{1/2} v_i so Gram C^T C ≈ contribution energy.
+    """
+    mass = mean_attention_mass(keys, queries) if queries else [1.0 / max(len(keys), 1)] * len(keys)
+    cols: List[List[float]] = []
+    for m, v in zip(mass, values):
+        w = math.sqrt(max(m, 0.0))
+        # blend pure value geometry with mass weighting (alpha=0.65 value-centric)
+        alpha = 0.65
+        scale = alpha * w + (1.0 - alpha) * 1.0
+        # also emphasize value norm so near-zero decoys collapse
+        vn = _norm(v)
+        scale *= 0.25 + 0.75 * min(vn, 3.0) / 3.0
+        cols.append(_scale(v, scale))
+    return cols
+
+
+def _fit_anchors(n: int, budget: int, sink_len: int, local_window: int) -> List[int]:
+    """Shrink local window so anchors never consume the entire budget.
+
+    Reserve at least ~40% of the budget for leverage-ranked diversity picks when
+    possible; always keep a non-empty sink prefix if budget allows.
+    """
+    sink_len = min(sink_len, max(budget, 0), n)
+    # leave room for CUR picks
+    max_anchor = max(sink_len, min(budget, max(budget * 2 // 5, sink_len + 1)))
+    local_cap = max(0, max_anchor - sink_len)
+    local_window = min(local_window, local_cap, max(0, n - sink_len))
+    return _forced_anchors(n, sink_len, local_window)
+
+
+def compress_curdkv(
+    keys: Sequence[Sequence[float]],
+    values: Sequence[Sequence[float]],
+    queries: Sequence[Sequence[float]],
+    budget: int,
+    rank: int = 6,
+    n_iter: int = 10,
+    sink_len: int = 4,
+    local_window: int = 64,
+    seed: int = 0,
+    mode: str = "contribution",
+) -> CompressResult:
+    """CurDKV: select tokens with highest CUR leverage on value/contribution matrix."""
+    t0 = time.perf_counter()
+    n = len(values)
+    budget = min(budget, n)
+    anchors = _fit_anchors(n, budget, sink_len, local_window)
+
+    if mode == "value":
+        cols = list(values)
+    else:
+        cols = _contribution_columns(keys, values, queries)
+
+    rank = max(1, min(rank, n, budget))
+    lev = column_leverage_scores(cols, rank=rank, n_iter=n_iter, seed=seed)
+    ranked = sorted(range(n), key=lambda i: lev[i], reverse=True)
+    keep = _fill_budget(ranked, anchors, budget, n)
+    elapsed = (time.perf_counter() - t0) * 1000.0
+    return CompressResult(
+        keep_idx=keep,
+        policy="curdkv" if mode == "contribution" else "curdkv_value",
+        budget=budget,
+        elapsed_ms=elapsed,
+        leverage=lev,
+        meta={
+            "rank": float(rank),
+            "lev_sum": float(sum(lev)),
+            "lev_max": float(max(lev) if lev else 0.0),
+            "anchors": float(len(anchors)),
+        },
+    )
+
+
+def compress_curdkv_hybrid(
+    keys: Sequence[Sequence[float]],
+    values: Sequence[Sequence[float]],
+    queries: Sequence[Sequence[float]],
+    budget: int,
+    rank: int = 6,
+    sink_len: int = 4,
+    local_window: int = 64,
+    seed: int = 0,
+) -> CompressResult:
+    """Hybrid: 70% CurDKV leverage + 30% attention mass (re-rank)."""
+    t0 = time.perf_counter()
+    n = len(values)
+    budget = min(budget, n)
+    base = compress_curdkv(
+        keys, values, queries, budget=n, rank=rank, sink_len=0, local_window=0, seed=seed
+    )
+    mass = mean_attention_mass(keys, queries)
+    mmax = max(mass) or 1.0
+    lmax = max(base.leverage) or 1.0
+    score = [
+        0.70 * (base.leverage[i] / lmax) + 0.30 * (mass[i] / mmax) for i in range(n)
+    ]
+    anchors = _fit_anchors(n, budget, sink_len, local_window)
+    ranked = sorted(range(n), key=lambda i: score[i], reverse=True)
+    keep = _fill_budget(ranked, anchors, budget, n)
+    return CompressResult(
+        keep,
+        "curdkv_hybrid",
+        budget,
+        (time.perf_counter() - t0) * 1000.0,
+        leverage=base.leverage,
+        meta={"hybrid_alpha_cur": 0.70, "anchors": float(len(anchors))},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EvalReport:
+    policy: str
+    budget: int
+    seq_len: int
+    output_mse: float
+    output_cosine: float
+    mass_recovery: float
+    needle_recall: float
+    decoy_rate: float
+    sink_recall: float
+    elapsed_ms: float
+    keep_count: int
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+def evaluate_policy(
+    corpus: KVCorpus,
+    result: CompressResult,
+    queries: Sequence[Sequence[float]],
+) -> EvalReport:
+    # output reconstruction
+    mse_acc = 0.0
+    cos_acc = 0.0
+    for q in queries:
+        y_full = attention_output(q, corpus.keys, corpus.values, None)
+        y_hat = attention_output(q, corpus.keys, corpus.values, result.keep_idx)
+        diff = _sub(y_full, y_hat)
+        mse_acc += _dot(diff, diff) / max(len(diff), 1)
+        cos_acc += _dot(y_full, y_hat) / (_norm(y_full) * _norm(y_hat))
+    nq = max(len(queries), 1)
+    output_mse = mse_acc / nq
+    output_cosine = cos_acc / nq
+
+    mass = mean_attention_mass(corpus.keys, queries)
+    total_mass = sum(mass) or 1.0
+    mass_recovery = sum(mass[i] for i in result.keep_idx) / total_mass
+
+    def recall(pred) -> float:
+        idxs = [i for i, L in enumerate(corpus.labels) if pred(L)]
+        if not idxs:
+            return 1.0
+        return sum(1 for i in idxs if i in result.keep_set) / len(idxs)
+
+    needle_recall = recall(lambda L: L == "needle")
+    sink_recall = recall(lambda L: L == "sink")
+    decoys = [i for i, L in enumerate(corpus.labels) if L == "decoy"]
+    decoy_rate = (
+        sum(1 for i in decoys if i in result.keep_set) / len(decoys) if decoys else 0.0
+    )
+
+    return EvalReport(
+        policy=result.policy,
+        budget=result.budget,
+        seq_len=corpus.n,
+        output_mse=output_mse,
+        output_cosine=output_cosine,
+        mass_recovery=mass_recovery,
+        needle_recall=needle_recall,
+        decoy_rate=decoy_rate,
+        sink_recall=sink_recall,
+        elapsed_ms=result.elapsed_ms,
+        keep_count=len(result.keep_idx),
+    )
+
+
+def run_benchmark(
+    seq_len: int = 384,
+    dim: int = 40,
+    budget_ratio: float = 0.25,
+    seed: int = 42,
+    rank: int = 6,
+) -> Dict:
+    corpus = generate_kv_corpus(seq_len=seq_len, dim=dim, seed=seed)
+    budget = max(16, int(seq_len * budget_ratio))
+    queries = make_probe_queries(corpus, n_queries=20, seed=seed + 1)
+    # observation queries for attn_score / curdkv (same distribution)
+    obs = make_probe_queries(corpus, n_queries=12, seed=seed + 2)
+
+    policies = [
+        compress_curdkv(corpus.keys, corpus.values, obs, budget, rank=rank, seed=seed),
+        compress_curdkv(
+            corpus.keys, corpus.values, obs, budget, rank=rank, seed=seed, mode="value"
+        ),
+        compress_curdkv_hybrid(corpus.keys, corpus.values, obs, budget, rank=rank, seed=seed),
+        compress_attn_score(corpus.keys, obs, budget),
+        compress_value_magnitude(corpus.values, budget),
+        compress_streaming_llm(corpus.n, budget),
+        compress_random(corpus.n, budget, seed=seed),
+    ]
+    reports = [evaluate_policy(corpus, p, queries) for p in policies]
+    # lower MSE is better; higher cosine / needle better
+    ranking = sorted(
+        reports,
+        key=lambda r: (-r.output_mse, r.output_cosine, r.needle_recall),
+        reverse=True,
+    )
+    by = {r.policy: r for r in reports}
+    return {
+        "seq_len": seq_len,
+        "dim": dim,
+        "budget": budget,
+        "budget_ratio": budget_ratio,
+        "rank": rank,
+        "n_needles": corpus.n_needles,
+        "reports": [r.to_dict() for r in reports],
+        "winner": ranking[0].policy,
+        "curdkv_output_mse": by["curdkv"].output_mse,
+        "attn_score_output_mse": by["attn_score"].output_mse,
+        "streaming_output_mse": by["streaming_llm"].output_mse,
+        "curdkv_needle_recall": by["curdkv"].needle_recall,
+        "attn_score_needle_recall": by["attn_score"].needle_recall,
+        "curdkv_decoy_rate": by["curdkv"].decoy_rate,
+        "attn_score_decoy_rate": by["attn_score"].decoy_rate,
+        "curdkv_output_cosine": by["curdkv"].output_cosine,
+    }
+
+
+def run_compare(seq_len: int = 320, budget_ratio: float = 0.22, seed: int = 3) -> Dict:
+    bench = run_benchmark(seq_len=seq_len, budget_ratio=budget_ratio, seed=seed)
+    bench["mse_lift_vs_attn"] = (
+        bench["attn_score_output_mse"] - bench["curdkv_output_mse"]
+    )  # positive => CurDKV better
+    bench["mse_lift_vs_streaming"] = (
+        bench["streaming_output_mse"] - bench["curdkv_output_mse"]
+    )
+    bench["needle_lift_vs_attn"] = (
+        bench["curdkv_needle_recall"] - bench["attn_score_needle_recall"]
+    )
+    bench["decoy_avoidance_lift"] = (
+        bench["attn_score_decoy_rate"] - bench["curdkv_decoy_rate"]
+    )
+    return bench
+
+
+def theory_ledger(seq_len: int = 8192, dim: int = 128, layers: int = 32, heads: int = 32) -> Dict:
+    """Footprint theory for 7B-class FP16 KV vs CurDKV budget ratios."""
+    bytes_per = 2  # fp16
+    full = seq_len * layers * heads * dim * 2 * bytes_per  # K+V
+    rows = []
+    for ratio in (1.0, 0.5, 0.25, 0.125, 0.1):
+        kept = int(seq_len * ratio)
+        sz = kept * layers * heads * dim * 2 * bytes_per
+        rows.append(
+            {
+                "budget_ratio": ratio,
+                "tokens_kept": kept,
+                "kv_bytes": sz,
+                "kv_mib": round(sz / (1024 * 1024), 2),
+                "vs_full": round(sz / full, 4),
+            }
+        )
+    return {
+        "model_sketch": f"L={layers} H={heads} d={dim} T={seq_len} FP16",
+        "full_kv_mib": round(full / (1024 * 1024), 2),
+        "cur_note": (
+            "CUR leverage rank r≪d; selection cost O(T d r n_iter) offline or "
+            "on prefill; decode uses dense attention over kept tokens only."
+        ),
+        "budgets": rows,
+        "why_value_centric": (
+            "Attention mass on near-zero values wastes budget; CurDKV column "
+            "leverage on contribution matrix prefers tokens that span Y=AV."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI commands
+# ---------------------------------------------------------------------------
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    out = run_benchmark(
+        seq_len=args.seq_len,
+        dim=args.dim,
+        budget_ratio=args.budget_ratio if args.budget <= 0 else args.budget / max(args.seq_len, 1),
+        seed=args.seed,
+        rank=args.rank,
+    )
+    if args.budget > 0:
+        out["budget"] = args.budget
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"CurDKV bench  seq={out['seq_len']} dim={out['dim']} budget={out['budget']} rank={out['rank']}")
+        print(f"{'policy':<18} {'mse':>10} {'cos':>8} {'needle':>8} {'decoy':>8} {'ms':>8}")
+        for r in out["reports"]:
+            print(
+                f"{r['policy']:<18} {r['output_mse']:10.6f} {r['output_cosine']:8.4f} "
+                f"{r['needle_recall']:8.3f} {r['decoy_rate']:8.3f} {r['elapsed_ms']:8.2f}"
+            )
+        print(f"winner={out['winner']}  curdkv_mse={out['curdkv_output_mse']:.6f}  "
+              f"attn_mse={out['attn_score_output_mse']:.6f}")
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    out = run_compare(seq_len=args.seq_len, budget_ratio=args.budget_ratio, seed=args.seed)
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print("CurDKV vs attention-score / StreamingLLM")
+        print(f"  mse_lift_vs_attn      = {out['mse_lift_vs_attn']:+.6f}  (>0 CurDKV better)")
+        print(f"  mse_lift_vs_streaming = {out['mse_lift_vs_streaming']:+.6f}")
+        print(f"  needle_lift_vs_attn   = {out['needle_lift_vs_attn']:+.3f}")
+        print(f"  decoy_avoidance_lift  = {out['decoy_avoidance_lift']:+.3f}  (>0 fewer decoys kept)")
+        print(f"  curdkv_cosine         = {out['curdkv_output_cosine']:.4f}")
+        print(f"  winner                = {out['winner']}")
+    return 0
+
+
+def cmd_compress(args: argparse.Namespace) -> int:
+    corpus = generate_kv_corpus(seq_len=args.seq_len, dim=args.dim, seed=args.seed)
+    budget = args.budget if args.budget > 0 else max(16, int(args.seq_len * args.budget_ratio))
+    obs = make_probe_queries(corpus, n_queries=12, seed=args.seed + 2)
+    policy = args.policy
+    if policy == "curdkv":
+        res = compress_curdkv(corpus.keys, corpus.values, obs, budget, rank=args.rank, seed=args.seed)
+    elif policy == "curdkv_value":
+        res = compress_curdkv(
+            corpus.keys, corpus.values, obs, budget, rank=args.rank, seed=args.seed, mode="value"
+        )
+    elif policy == "curdkv_hybrid":
+        res = compress_curdkv_hybrid(corpus.keys, corpus.values, obs, budget, rank=args.rank, seed=args.seed)
+    elif policy == "attn_score":
+        res = compress_attn_score(corpus.keys, obs, budget)
+    elif policy == "value_magnitude":
+        res = compress_value_magnitude(corpus.values, budget)
+    elif policy == "streaming_llm":
+        res = compress_streaming_llm(corpus.n, budget)
+    else:
+        res = compress_random(corpus.n, budget, seed=args.seed)
+    queries = make_probe_queries(corpus, seed=args.seed + 1)
+    report = evaluate_policy(corpus, res, queries)
+    payload = {
+        "policy": res.policy,
+        "budget": res.budget,
+        "keep_idx_head": res.keep_idx[:40],
+        "keep_count": len(res.keep_idx),
+        "elapsed_ms": res.elapsed_ms,
+        "meta": res.meta,
+        "eval": report.to_dict(),
+    }
+    print(json.dumps(payload, indent=2 if args.json else None))
+    return 0
+
+
+def cmd_leverage(args: argparse.Namespace) -> int:
+    corpus = generate_kv_corpus(seq_len=args.seq_len, dim=args.dim, seed=args.seed)
+    obs = make_probe_queries(corpus, n_queries=10, seed=args.seed + 2)
+    cols = _contribution_columns(corpus.keys, corpus.values, obs)
+    lev = column_leverage_scores(cols, rank=args.rank, n_iter=args.n_iter, seed=args.seed)
+    # top-k by label mix
+    order = sorted(range(len(lev)), key=lambda i: lev[i], reverse=True)
+    top = order[: min(20, len(order))]
+    summary = {
+        "seq_len": corpus.n,
+        "rank": args.rank,
+        "lev_sum": sum(lev),
+        "top20": [
+            {"idx": i, "lev": lev[i], "label": corpus.labels[i], "vnorm": _norm(corpus.values[i])}
+            for i in top
+        ],
+        "needle_mean_lev": _mean_label(lev, corpus.labels, "needle"),
+        "decoy_mean_lev": _mean_label(lev, corpus.labels, "decoy"),
+        "cluster_mean_lev": _mean_label_prefix(lev, corpus.labels, "cluster_"),
+    }
+    print(json.dumps(summary, indent=2 if args.json else None))
+    return 0
+
+
+def _mean_label(lev: Sequence[float], labels: Sequence[str], lab: str) -> float:
+    idxs = [i for i, L in enumerate(labels) if L == lab]
+    if not idxs:
+        return 0.0
+    return sum(lev[i] for i in idxs) / len(idxs)
+
+
+def _mean_label_prefix(lev: Sequence[float], labels: Sequence[str], prefix: str) -> float:
+    idxs = [i for i, L in enumerate(labels) if L.startswith(prefix)]
+    if not idxs:
+        return 0.0
+    return sum(lev[i] for i in idxs) / len(idxs)
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    out = theory_ledger(seq_len=args.seq_len, dim=args.dim, layers=args.layers, heads=args.heads)
+    print(json.dumps(out, indent=2 if args.json else None))
+    return 0
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    failures: List[str] = []
+
+    corpus = generate_kv_corpus(seq_len=240, dim=28, n_needles=8, sink_len=4, local_window=32, seed=0)
+    obs = make_probe_queries(corpus, n_queries=10, seed=1)
+    queries = make_probe_queries(corpus, n_queries=12, seed=2)
+    budget = 48
+
+    # 1. budget cardinality + uniqueness
+    policies = [
+        compress_curdkv(corpus.keys, corpus.values, obs, budget, rank=5, seed=0),
+        compress_curdkv(corpus.keys, corpus.values, obs, budget, rank=5, seed=0, mode="value"),
+        compress_curdkv_hybrid(corpus.keys, corpus.values, obs, budget, rank=5, seed=0),
+        compress_attn_score(corpus.keys, obs, budget),
+        compress_value_magnitude(corpus.values, budget),
+        compress_streaming_llm(corpus.n, budget),
+        compress_random(corpus.n, budget, seed=0),
+    ]
+    for r in policies:
+        if len(r.keep_idx) != budget:
+            failures.append(f"{r.policy} keep_count={len(r.keep_idx)} != {budget}")
+        if len(set(r.keep_idx)) != len(r.keep_idx):
+            failures.append(f"{r.policy} duplicate indices")
+        if any(i < 0 or i >= corpus.n for i in r.keep_idx):
+            failures.append(f"{r.policy} OOB index")
+
+    # 2. sinks retained by curdkv
+    r = compress_curdkv(corpus.keys, corpus.values, obs, budget, sink_len=4, local_window=16, seed=0)
+    for i in range(4):
+        if i not in r.keep_set:
+            failures.append(f"sink {i} dropped by curdkv")
+
+    # 3. leverage scores finite non-negative, sum ~ rank
+    lev = column_leverage_scores(
+        _contribution_columns(corpus.keys, corpus.values, obs), rank=4, n_iter=8, seed=0
+    )
+    if any(x < -1e-9 or math.isnan(x) or math.isinf(x) for x in lev):
+        failures.append("leverage non-finite or negative")
+    if abs(sum(lev) - 4.0) > 0.75:
+        failures.append(f"leverage sum {sum(lev):.3f} not near rank=4")
+
+    # 4. CurDKV should beat attn_score on output MSE *or* decoy avoidance on decoy corpus
+    cur = evaluate_policy(corpus, policies[0], queries)
+    attn = evaluate_policy(corpus, compress_attn_score(corpus.keys, obs, budget), queries)
+    if cur.output_mse > attn.output_mse * 1.15 and cur.decoy_rate >= attn.decoy_rate - 1e-9:
+        # allow small slack; fail only if strictly worse on both axes
+        if cur.needle_recall + 1e-9 < attn.needle_recall and cur.output_cosine < attn.output_cosine:
+            failures.append(
+                f"curdkv dominated by attn_score (mse {cur.output_mse:.4f} vs {attn.output_mse:.4f})"
+            )
+
+    # 5. output cosine in [-1,1], mse >= 0
+    if not (-1.0 - 1e-6 <= cur.output_cosine <= 1.0 + 1e-6):
+        failures.append(f"cosine out of range {cur.output_cosine}")
+    if cur.output_mse < -1e-9:
+        failures.append("negative mse")
+
+    # 6. full keep → near-zero reconstruction error
+    full = CompressResult(list(range(corpus.n)), "full", corpus.n, 0.0)
+    full_rep = evaluate_policy(corpus, full, queries)
+    if full_rep.output_mse > 1e-8:
+        failures.append(f"full-cache mse not ~0: {full_rep.output_mse}")
+
+    # 7. benchmark dict keys
+    bench = run_benchmark(seq_len=160, dim=24, budget_ratio=0.3, seed=5, rank=4)
+    for k in ("winner", "curdkv_output_mse", "attn_score_output_mse", "reports"):
+        if k not in bench:
+            failures.append(f"bench missing {k}")
+
+    if failures:
+        print("❌ curdkv-value-cur-engine selftest FAILED:")
+        for f in failures:
+            print("  -", f)
+        return 1
+
+    print("✅ curdkv-value-cur-engine selftest passed (7 invariant groups)")
+    print(f"  • curdkv  mse={cur.output_mse:.6f} cos={cur.output_cosine:.4f} "
+          f"needle={cur.needle_recall:.3f} decoy={cur.decoy_rate:.3f}")
+    print(f"  • attn    mse={attn.output_mse:.6f} cos={attn.output_cosine:.4f} "
+          f"needle={attn.needle_recall:.3f} decoy={attn.decoy_rate:.3f}")
+    print(f"  • leverage_sum≈rank: {sum(lev):.3f}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="curdkv-value-cur-engine",
+        description="CurDKV: value-guided KV compression via approximated CUR (NeurIPS 2025)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--seq-len", type=int, default=384)
+        sp.add_argument("--dim", type=int, default=40)
+        sp.add_argument("--budget-ratio", type=float, default=0.25)
+        sp.add_argument("--budget", type=int, default=0)
+        sp.add_argument("--seed", type=int, default=42)
+        sp.add_argument("--rank", type=int, default=6)
+        sp.add_argument("--json", action="store_true")
+
+    b = sub.add_parser("bench", help="multi-policy output-reconstruction benchmark")
+    add_common(b)
+    b.set_defaults(func=cmd_bench)
+
+    c = sub.add_parser("compare", help="CurDKV lift vs attn-score and StreamingLLM")
+    add_common(c)
+    c.set_defaults(func=cmd_compare)
+
+    k = sub.add_parser("compress", help="run one policy and dump keep set + eval")
+    add_common(k)
+    k.add_argument(
+        "--policy",
+        default="curdkv",
+        choices=[
+            "curdkv",
+            "curdkv_value",
+            "curdkv_hybrid",
+            "attn_score",
+            "value_magnitude",
+            "streaming_llm",
+            "random",
+        ],
+    )
+    k.set_defaults(func=cmd_compress)
+
+    lev = sub.add_parser("leverage", help="dump CUR leverage scores + label means")
+    add_common(lev)
+    lev.add_argument("--n-iter", type=int, default=10)
+    lev.set_defaults(func=cmd_leverage)
+
+    th = sub.add_parser("theory", help="7B-class KV footprint ledger under CurDKV budgets")
+    th.add_argument("--seq-len", type=int, default=8192)
+    th.add_argument("--dim", type=int, default=128)
+    th.add_argument("--layers", type=int, default=32)
+    th.add_argument("--heads", type=int, default=32)
+    th.add_argument("--json", action="store_true")
+    th.set_defaults(func=cmd_theory)
+
+    s = sub.add_parser("selftest", help="deterministic invariant gate")
+    s.set_defaults(func=cmd_selftest)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
