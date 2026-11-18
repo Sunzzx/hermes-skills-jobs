@@ -2240,5 +2240,24 @@
       "Retrieval",
       "Inference"
     ]
+  },
+  {
+    "id": "sph-hydrodynamics",
+    "title": "SPH 2D Smoothed Particle Hydrodynamics Fluid Engine (Monaghan WCSPH)",
+    "category": "computational-science",
+    "type": "skill+tool",
+    "description": "Mesh-free Lagrangian WCSPH: cubic-spline + Wendland C2 kernels, density summation, Tait EOS (\u03b3=7), Monaghan artificial viscosity, XSPH, leapfrog/Verlet, spatial-hash neighbours, dam-break/hydrostatic/droplet/shear scenarios \u2014 pure-Python stdlib CFD companion to LBM and Eulerian NS.",
+    "cli": "sph-hydrodynamics",
+    "evolved_at": "2026-11-19T03:48:14.297280",
+    "tags": [
+      "ComputationalPhysics",
+      "FluidDynamics",
+      "SPH",
+      "Lagrangian",
+      "CFD",
+      "WCSPH",
+      "Monaghan",
+      "TaitEOS"
+    ]
   }
 ]

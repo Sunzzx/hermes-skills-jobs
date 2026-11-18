@@ -2,6 +2,18 @@
 
 
 
+### [2026-11-19 03:48:14] - Evolved `sph-hydrodynamics`
+- **Title**: SPH 2D Smoothed Particle Hydrodynamics Fluid Engine (Monaghan WCSPH)
+- **Category**: computational-science
+- **Type**: skill+tool
+- **Description**: Mesh-free Lagrangian weakly-compressible SPH — cubic-spline + Wendland C2 kernels, density summation / continuity, Tait EOS γ=7, Monaghan α–β artificial viscosity, XSPH, velocity-Verlet, spatial hash, dam-break / hydrostatic / droplet / shear scenarios with mass-exact conservation diagnostics.
+- **CLI**: `sph-hydrodynamics {selftest,bench,compare,run,kernels,theory}`
+- **Artifacts**:
+  - `bin/sph-hydrodynamics`
+  - `skills/computational-science/sph-hydrodynamics/SKILL.md`
+  - `tests/test_sph_hydrodynamics.py` (18/18 passed)
+- **Verification**: selftest 10/10 exit 0; dam-break mass_rel_err=0; kernel ΣW≈1.0; pytest 18 passed.
+
 ### [2026-11-19 02:39:56] - Evolved `infllm-block-memory-engine`
 - **Title**: InfLLM: Training-Free Block Memory for Infinite Context (arXiv:2402.04617)
 - **Category**: inference

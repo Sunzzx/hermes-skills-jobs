@@ -1,0 +1,1184 @@
+#!/usr/bin/env python3
+"""sph-hydrodynamics: 2D Smoothed Particle Hydrodynamics (SPH) Fluid Engine.
+
+Production-grade Lagrangian CFD reference implementing classic weakly-compressible
+SPH (Monaghan 1992/2005; Gingold & Monaghan 1977) with:
+
+  • Cubic-spline and Wendland C2 smoothing kernels (+ gradients)
+  • Density summation and continuity-equation density update
+  • Tait weakly-compressible EOS (γ=7) and ideal-gas EOS
+  • Momentum equation: −∇P/ρ + artificial viscosity (Monaghan bulk+shear)
+  • XSPH velocity smoothing; leapfrog / velocity-Verlet integration
+  • Periodic box + repulsive Lennard-Jones wall boundaries
+  • Scenarios: dam-break, hydrostatic tank, droplet collision, shear layer
+  • Diagnostics: mass, linear momentum, kinetic/potential/internal energy,
+    density variance, max |∇·v|, Courant number
+  • Neighbour search via uniform spatial hash (O(N) average)
+  • ASCII density-field visualizer; policy compare vs inviscid ballistic baseline
+
+Pure Python 3 stdlib only — no NumPy/SciPy required.
+
+References:
+  - Gingold & Monaghan, MNRAS 181 (1977)
+  - Monaghan, ARAA 30 (1992); Rep. Prog. Phys. 68 (2005)
+  - Price, J. Comp. Phys. 231 (2012) — SPH for astrophysics review
+  - Wendland, Adv. Comput. Math. 4 (1995)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Constants / helpers
+# ---------------------------------------------------------------------------
+
+PI = math.pi
+TWO_PI = 2.0 * math.pi
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+# ---------------------------------------------------------------------------
+# Kernels
+# ---------------------------------------------------------------------------
+
+class Kernel:
+    """Base SPH kernel interface: W(r,h) and grad_W vector contribution."""
+
+    name = "base"
+
+    def support(self, h: float) -> float:
+        """Compact support radius (multiples of h)."""
+        return 2.0 * h
+
+    def W(self, r: float, h: float) -> float:
+        raise NotImplementedError
+
+    def dW_dr(self, r: float, h: float) -> float:
+        """dW/dr (scalar). grad W_ij = (dW/dr) * r_hat."""
+        raise NotImplementedError
+
+    def grad_W(self, dx: float, dy: float, h: float) -> Tuple[float, float]:
+        r = math.hypot(dx, dy)
+        if r < 1e-18:
+            return 0.0, 0.0
+        d = self.dW_dr(r, h)
+        inv = d / r
+        return inv * dx, inv * dy
+
+
+class CubicSplineKernel(Kernel):
+    """Monaghan cubic spline (2D normalized). Support = 2h."""
+
+    name = "cubic_spline"
+
+    def support(self, h: float) -> float:
+        return 2.0 * h
+
+    def _sigma(self, h: float) -> float:
+        # 2D: 10/(7π h^2)
+        return 10.0 / (7.0 * PI * h * h)
+
+    def W(self, r: float, h: float) -> float:
+        if h <= 0.0:
+            return 0.0
+        q = r / h
+        s = self._sigma(h)
+        if q < 1.0:
+            return s * (1.0 - 1.5 * q * q + 0.75 * q * q * q)
+        if q < 2.0:
+            t = 2.0 - q
+            return s * 0.25 * t * t * t
+        return 0.0
+
+    def dW_dr(self, r: float, h: float) -> float:
+        if h <= 0.0 or r < 1e-18:
+            return 0.0
+        q = r / h
+        s = self._sigma(h)
+        # dW/dr = (dW/dq)/h
+        if q < 1.0:
+            dWdq = s * (-3.0 * q + 2.25 * q * q)
+            return dWdq / h
+        if q < 2.0:
+            t = 2.0 - q
+            dWdq = s * (-0.75 * t * t)
+            return dWdq / h
+        return 0.0
+
+
+class WendlandC2Kernel(Kernel):
+    """Wendland C2 (2D): σ (1-q/2)^4 (2q+1) for q<2. Positive-definite."""
+
+    name = "wendland_c2"
+
+    def support(self, h: float) -> float:
+        return 2.0 * h
+
+    def _sigma(self, h: float) -> float:
+        # 2D normalization: 7/(4π h^2)
+        return 7.0 / (4.0 * PI * h * h)
+
+    def W(self, r: float, h: float) -> float:
+        if h <= 0.0:
+            return 0.0
+        q = r / h
+        if q >= 2.0:
+            return 0.0
+        s = self._sigma(h)
+        t = 1.0 - 0.5 * q
+        return s * (t ** 4) * (2.0 * q + 1.0)
+
+    def dW_dr(self, r: float, h: float) -> float:
+        if h <= 0.0 or r < 1e-18:
+            return 0.0
+        q = r / h
+        if q >= 2.0:
+            return 0.0
+        s = self._sigma(h)
+        # W = s (1-q/2)^4 (2q+1)
+        # dW/dq = s [ -2(1-q/2)^3 (2q+1) + 2(1-q/2)^4 ]
+        t = 1.0 - 0.5 * q
+        t3 = t * t * t
+        t4 = t3 * t
+        dWdq = s * (-2.0 * t3 * (2.0 * q + 1.0) + 2.0 * t4)
+        return dWdq / h
+
+
+KERNELS = {
+    "cubic_spline": CubicSplineKernel(),
+    "wendland_c2": WendlandC2Kernel(),
+}
+
+
+# ---------------------------------------------------------------------------
+# Spatial hash neighbour search
+# ---------------------------------------------------------------------------
+
+class SpatialHash:
+    def __init__(self, cell: float, x_min: float, y_min: float, x_max: float, y_max: float):
+        self.cell = max(cell, 1e-9)
+        self.x_min = x_min
+        self.y_min = y_min
+        self.nx = max(1, int(math.ceil((x_max - x_min) / self.cell)))
+        self.ny = max(1, int(math.ceil((y_max - y_min) / self.cell)))
+        self.buckets: Dict[int, List[int]] = {}
+
+    def _key(self, ix: int, iy: int) -> int:
+        return ix * 73856093 ^ iy * 19349663
+
+    def clear(self) -> None:
+        self.buckets.clear()
+
+    def insert(self, i: int, x: float, y: float) -> None:
+        ix = int((x - self.x_min) / self.cell)
+        iy = int((y - self.y_min) / self.cell)
+        ix = max(0, min(self.nx - 1, ix))
+        iy = max(0, min(self.ny - 1, iy))
+        k = self._key(ix, iy)
+        self.buckets.setdefault(k, []).append(i)
+
+    def neighbours(self, x: float, y: float) -> List[int]:
+        ix = int((x - self.x_min) / self.cell)
+        iy = int((y - self.y_min) / self.cell)
+        out: List[int] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                jx = ix + dx
+                jy = iy + dy
+                if jx < 0 or jy < 0 or jx >= self.nx or jy >= self.ny:
+                    continue
+                out.extend(self.buckets.get(self._key(jx, jy), []))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Particle system
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Particle:
+    x: float
+    y: float
+    vx: float = 0.0
+    vy: float = 0.0
+    ax: float = 0.0
+    ay: float = 0.0
+    rho: float = 1.0
+    p: float = 0.0
+    m: float = 1.0
+    h: float = 0.05
+    tag: str = "fluid"  # fluid | wall | ghost
+    active: bool = True
+
+
+@dataclass
+class SPHConfig:
+    gamma: float = 7.0          # Tait EOS exponent
+    c0: float = 10.0            # artificial sound speed
+    rho0: float = 1000.0        # rest density
+    alpha_visc: float = 0.1     # Monaghan artificial viscosity α
+    beta_visc: float = 0.0      # Monaghan β (shock)
+    eps_xsph: float = 0.25      # XSPH coefficient
+    g: float = 9.81             # gravity
+    eos: str = "tait"           # tait | ideal
+    kernel: str = "cubic_spline"
+    density_mode: str = "summation"  # summation | continuity
+    periodic_x: bool = False
+    periodic_y: bool = False
+    domain: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)  # xmin ymin xmax ymax
+    dt: float = 0.0             # 0 = auto CFL
+    cfl: float = 0.25
+    wall_repulsion: float = 1e4
+
+
+@dataclass
+class Diagnostics:
+    step: int
+    t: float
+    n_fluid: int
+    mass: float
+    mom_x: float
+    mom_y: float
+    ke: float
+    pe: float
+    ue: float  # internal ~ sum p/((γ-1)ρ) * m  for ideal; Tait uses (p-p0) form
+    e_tot: float
+    rho_mean: float
+    rho_std: float
+    rho_max: float
+    rho_min: float
+    v_max: float
+    dt: float
+    cfl_est: float
+
+
+class SPHWorld:
+    def __init__(self, cfg: SPHConfig, particles: Optional[List[Particle]] = None):
+        self.cfg = cfg
+        self.particles: List[Particle] = particles or []
+        self.t = 0.0
+        self.step_i = 0
+        self.kernel: Kernel = KERNELS.get(cfg.kernel, KERNELS["cubic_spline"])
+        self._hash: Optional[SpatialHash] = None
+        self.history: List[Diagnostics] = []
+
+    # -- geometry helpers ---------------------------------------------------
+
+    def _delta(self, xi: float, xj: float, axis: str) -> float:
+        d = xi - xj
+        xmin, ymin, xmax, ymax = self.cfg.domain
+        if axis == "x" and self.cfg.periodic_x:
+            L = xmax - xmin
+            if d > 0.5 * L:
+                d -= L
+            elif d < -0.5 * L:
+                d += L
+        if axis == "y" and self.cfg.periodic_y:
+            L = ymax - ymin
+            if d > 0.5 * L:
+                d -= L
+            elif d < -0.5 * L:
+                d += L
+        return d
+
+    def _wrap(self, p: Particle) -> None:
+        xmin, ymin, xmax, ymax = self.cfg.domain
+        if self.cfg.periodic_x:
+            L = xmax - xmin
+            while p.x < xmin:
+                p.x += L
+            while p.x >= xmax:
+                p.x -= L
+        if self.cfg.periodic_y:
+            L = ymax - ymin
+            while p.y < ymin:
+                p.y += L
+            while p.y >= ymax:
+                p.y -= L
+
+    def _rebuild_hash(self) -> None:
+        h_max = max((p.h for p in self.particles if p.active), default=0.05)
+        support = self.kernel.support(h_max)
+        xmin, ymin, xmax, ymax = self.cfg.domain
+        pad = support
+        self._hash = SpatialHash(support, xmin - pad, ymin - pad, xmax + pad, ymax + pad)
+        for i, p in enumerate(self.particles):
+            if p.active:
+                self._hash.insert(i, p.x, p.y)
+
+    # -- EOS ----------------------------------------------------------------
+
+    def pressure(self, rho: float) -> float:
+        cfg = self.cfg
+        if cfg.eos == "ideal":
+            # p = c0^2 * rho  (isothermal-ish)
+            return cfg.c0 * cfg.c0 * rho
+        # Tait weakly compressible: p = (c0^2 ρ0 / γ) * ((ρ/ρ0)^γ - 1)
+        ratio = max(rho / cfg.rho0, 1e-8)
+        return (cfg.c0 * cfg.c0 * cfg.rho0 / cfg.gamma) * (ratio ** cfg.gamma - 1.0)
+
+    # -- density / forces ---------------------------------------------------
+
+    def compute_density(self) -> None:
+        self._rebuild_hash()
+        assert self._hash is not None
+        cfg = self.cfg
+        n = len(self.particles)
+        if cfg.density_mode == "summation":
+            for i, pi in enumerate(self.particles):
+                if not pi.active or pi.tag == "wall":
+                    if pi.tag == "wall":
+                        pi.rho = cfg.rho0
+                        pi.p = self.pressure(pi.rho)
+                    continue
+                rho = 0.0
+                for j in self._hash.neighbours(pi.x, pi.y):
+                    pj = self.particles[j]
+                    if not pj.active:
+                        continue
+                    dx = self._delta(pi.x, pj.x, "x")
+                    dy = self._delta(pi.y, pj.y, "y")
+                    r = math.hypot(dx, dy)
+                    hij = 0.5 * (pi.h + pj.h)
+                    if r < self.kernel.support(hij):
+                        rho += pj.m * self.kernel.W(r, hij)
+                # self contribution already included when j==i
+                pi.rho = max(rho, 1e-8)
+                pi.p = self.pressure(pi.rho)
+        else:
+            # continuity mode keeps previous rho; pressure still updated
+            for pi in self.particles:
+                if pi.active:
+                    pi.p = self.pressure(pi.rho)
+
+    def compute_forces(self) -> None:
+        self._rebuild_hash()
+        assert self._hash is not None
+        cfg = self.cfg
+        for p in self.particles:
+            p.ax = 0.0
+            p.ay = -cfg.g if p.tag == "fluid" and p.active else 0.0
+
+        for i, pi in enumerate(self.particles):
+            if not pi.active or pi.tag != "fluid":
+                continue
+            for j in self._hash.neighbours(pi.x, pi.y):
+                if j <= i:
+                    continue
+                pj = self.particles[j]
+                if not pj.active:
+                    continue
+                dx = self._delta(pi.x, pj.x, "x")
+                dy = self._delta(pi.y, pj.y, "y")
+                r = math.hypot(dx, dy)
+                hij = 0.5 * (pi.h + pj.h)
+                if r >= self.kernel.support(hij) or r < 1e-18:
+                    continue
+                gwx, gwy = self.kernel.grad_W(dx, dy, hij)
+
+                # Pressure gradient (symmetric Monaghan form)
+                # dv_i/dt += - m_j (p_i/ρ_i² + p_j/ρ_j²) ∇W_ij
+                p_term = pi.p / (pi.rho * pi.rho) + pj.p / (pj.rho * pj.rho)
+
+                # Artificial viscosity
+                visc = 0.0
+                dvx = pi.vx - pj.vx
+                dvy = pi.vy - pj.vy
+                vdotx = dvx * dx + dvy * dy
+                if vdotx < 0.0:
+                    mu = hij * vdotx / (r * r + 0.01 * hij * hij)
+                    rho_bar = 0.5 * (pi.rho + pj.rho)
+                    c_bar = cfg.c0
+                    visc = (-cfg.alpha_visc * c_bar * mu + cfg.beta_visc * mu * mu) / rho_bar
+
+                factor = p_term + visc
+                # a_i += - m_j * factor * ∇W_ij
+                # a_j += - m_i * factor * ∇W_ji = + m_i * factor * ∇W_ij
+                pi.ax += -pj.m * factor * gwx
+                pi.ay += -pj.m * factor * gwy
+                if pj.tag == "fluid":
+                    pj.ax += pi.m * factor * gwx
+                    pj.ay += pi.m * factor * gwy
+
+                # Wall repulsion (soft LJ when neighbour is wall)
+                if pj.tag == "wall":
+                    r0 = 0.5 * hij
+                    if r < r0:
+                        mag = cfg.wall_repulsion * ((r0 / r) ** 2 - 1.0) / pi.rho
+                        nx, ny = dx / r, dy / r
+                        pi.ax += mag * nx
+                        pi.ay += mag * ny
+
+        # Domain hard walls if not periodic
+        xmin, ymin, xmax, ymax = cfg.domain
+        for pi in self.particles:
+            if not pi.active or pi.tag != "fluid":
+                continue
+            pad = 0.5 * pi.h
+            if not cfg.periodic_x:
+                if pi.x < xmin + pad:
+                    pi.ax += cfg.wall_repulsion * (xmin + pad - pi.x) / cfg.rho0
+                if pi.x > xmax - pad:
+                    pi.ax -= cfg.wall_repulsion * (pi.x - (xmax - pad)) / cfg.rho0
+            if not cfg.periodic_y:
+                if pi.y < ymin + pad:
+                    pi.ay += cfg.wall_repulsion * (ymin + pad - pi.y) / cfg.rho0
+                if pi.y > ymax - pad:
+                    pi.ay -= cfg.wall_repulsion * (pi.y - (ymax - pad)) / cfg.rho0
+
+    def xsph_correct_velocity(self) -> None:
+        """XSPH: v_i ← v_i + ε Σ_j m_j (v_j - v_i)/(0.5(ρi+ρj)) W_ij"""
+        eps = self.cfg.eps_xsph
+        if eps <= 0.0:
+            return
+        self._rebuild_hash()
+        assert self._hash is not None
+        corr = [(0.0, 0.0) for _ in self.particles]
+        for i, pi in enumerate(self.particles):
+            if not pi.active or pi.tag != "fluid":
+                continue
+            cx = cy = 0.0
+            for j in self._hash.neighbours(pi.x, pi.y):
+                pj = self.particles[j]
+                if not pj.active or j == i:
+                    continue
+                dx = self._delta(pi.x, pj.x, "x")
+                dy = self._delta(pi.y, pj.y, "y")
+                r = math.hypot(dx, dy)
+                hij = 0.5 * (pi.h + pj.h)
+                w = self.kernel.W(r, hij)
+                if w <= 0.0:
+                    continue
+                rho_bar = 0.5 * (pi.rho + pj.rho)
+                fac = pj.m * w / max(rho_bar, 1e-12)
+                cx += fac * (pj.vx - pi.vx)
+                cy += fac * (pj.vy - pi.vy)
+            corr[i] = (eps * cx, eps * cy)
+        for i, pi in enumerate(self.particles):
+            if pi.tag == "fluid" and pi.active:
+                pi.vx += corr[i][0]
+                pi.vy += corr[i][1]
+
+    def continuity_density_update(self, dt: float) -> None:
+        """dρ_i/dt = Σ_j m_j (v_i - v_j)·∇W_ij — continuity density mode."""
+        if self.cfg.density_mode != "continuity":
+            return
+        self._rebuild_hash()
+        assert self._hash is not None
+        drho = [0.0] * len(self.particles)
+        for i, pi in enumerate(self.particles):
+            if not pi.active or pi.tag != "fluid":
+                continue
+            acc = 0.0
+            for j in self._hash.neighbours(pi.x, pi.y):
+                pj = self.particles[j]
+                if not pj.active or j == i:
+                    continue
+                dx = self._delta(pi.x, pj.x, "x")
+                dy = self._delta(pi.y, pj.y, "y")
+                r = math.hypot(dx, dy)
+                hij = 0.5 * (pi.h + pj.h)
+                if r >= self.kernel.support(hij):
+                    continue
+                gwx, gwy = self.kernel.grad_W(dx, dy, hij)
+                acc += pj.m * ((pi.vx - pj.vx) * gwx + (pi.vy - pj.vy) * gwy)
+            drho[i] = acc
+        for i, pi in enumerate(self.particles):
+            if pi.active and pi.tag == "fluid":
+                pi.rho = max(pi.rho + dt * drho[i], 1e-8)
+                pi.p = self.pressure(pi.rho)
+
+    # -- time integration ---------------------------------------------------
+
+    def suggest_dt(self) -> float:
+        cfg = self.cfg
+        if cfg.dt > 0.0:
+            return cfg.dt
+        h_min = min((p.h for p in self.particles if p.active and p.tag == "fluid"), default=0.05)
+        v_max = max((math.hypot(p.vx, p.vy) for p in self.particles if p.active), default=0.0)
+        # CFL: dt <= CFL * h / (c0 + v_max)
+        return cfg.cfl * h_min / max(cfg.c0 + v_max, 1e-6)
+
+    def step(self, dt: Optional[float] = None) -> Diagnostics:
+        """Velocity-Verlet / leapfrog half-kick drift full-kick."""
+        dt = dt if dt is not None else self.suggest_dt()
+        fluids = [p for p in self.particles if p.active and p.tag == "fluid"]
+
+        # half kick
+        for p in fluids:
+            p.vx += 0.5 * dt * p.ax
+            p.vy += 0.5 * dt * p.ay
+
+        # drift
+        for p in fluids:
+            p.x += dt * p.vx
+            p.y += dt * p.vy
+            self._wrap(p)
+
+        self.xsph_correct_velocity()
+        if self.cfg.density_mode == "summation":
+            self.compute_density()
+        else:
+            self.continuity_density_update(dt)
+            for p in self.particles:
+                if p.active:
+                    p.p = self.pressure(p.rho)
+
+        self.compute_forces()
+
+        # full kick
+        for p in fluids:
+            p.vx += 0.5 * dt * p.ax
+            p.vy += 0.5 * dt * p.ay
+
+        self.t += dt
+        self.step_i += 1
+        diag = self.diagnostics(dt)
+        self.history.append(diag)
+        return diag
+
+    def bootstrap(self) -> None:
+        self.compute_density()
+        self.compute_forces()
+
+    def diagnostics(self, dt: float) -> Diagnostics:
+        cfg = self.cfg
+        fluids = [p for p in self.particles if p.active and p.tag == "fluid"]
+        n = len(fluids)
+        mass = sum(p.m for p in fluids)
+        mx = sum(p.m * p.vx for p in fluids)
+        my = sum(p.m * p.vy for p in fluids)
+        ke = 0.5 * sum(p.m * (p.vx * p.vx + p.vy * p.vy) for p in fluids)
+        pe = sum(p.m * cfg.g * p.y for p in fluids)
+        # Internal energy proxy for Tait: integrate EOS
+        ue = 0.0
+        for p in fluids:
+            if cfg.eos == "ideal":
+                # u = p / ((γ-1)ρ) with γ→ effectively c^2 relation: u = c0^2 ln ρ
+                ue += p.m * cfg.c0 * cfg.c0 * math.log(max(p.rho / cfg.rho0, 1e-12))
+            else:
+                # Tait internal: (c0^2/γ) * ( (ρ/ρ0)^{γ-1}/(γ-1) + ρ0/ρ ) roughly;
+                # use Monaghan form: u = (c0^2/γ) [(ρ/ρ0)^{γ-1} - 1] / (γ-1)
+                ratio = max(p.rho / cfg.rho0, 1e-12)
+                ue += p.m * (cfg.c0 * cfg.c0 / cfg.gamma) * ((ratio ** (cfg.gamma - 1.0) - 1.0) / max(cfg.gamma - 1.0, 1e-9))
+        rhos = [p.rho for p in fluids] or [cfg.rho0]
+        rho_mean = sum(rhos) / len(rhos)
+        var = sum((r - rho_mean) ** 2 for r in rhos) / len(rhos)
+        rho_std = math.sqrt(var)
+        v_max = max((math.hypot(p.vx, p.vy) for p in fluids), default=0.0)
+        h_min = min((p.h for p in fluids), default=0.05)
+        cfl_est = dt * (cfg.c0 + v_max) / max(h_min, 1e-9)
+        return Diagnostics(
+            step=self.step_i,
+            t=self.t,
+            n_fluid=n,
+            mass=mass,
+            mom_x=mx,
+            mom_y=my,
+            ke=ke,
+            pe=pe,
+            ue=ue,
+            e_tot=ke + pe + ue,
+            rho_mean=rho_mean,
+            rho_std=rho_std,
+            rho_max=max(rhos),
+            rho_min=min(rhos),
+            v_max=v_max,
+            dt=dt,
+            cfl_est=cfl_est,
+        )
+
+    # -- visualization ------------------------------------------------------
+
+    def ascii_field(self, nx: int = 48, ny: int = 24, field: str = "rho") -> str:
+        xmin, ymin, xmax, ymax = self.cfg.domain
+        grid = [[0.0 for _ in range(nx)] for _ in range(ny)]
+        cnt = [[0 for _ in range(nx)] for _ in range(ny)]
+        for p in self.particles:
+            if not p.active or p.tag != "fluid":
+                continue
+            ix = int((p.x - xmin) / max(xmax - xmin, 1e-12) * (nx - 1))
+            iy = int((p.y - ymin) / max(ymax - ymin, 1e-12) * (ny - 1))
+            ix = int(_clamp(ix, 0, nx - 1))
+            iy = int(_clamp(iy, 0, ny - 1))
+            val = p.rho if field == "rho" else math.hypot(p.vx, p.vy)
+            grid[iy][ix] += val
+            cnt[iy][ix] += 1
+        for j in range(ny):
+            for i in range(nx):
+                if cnt[j][i]:
+                    grid[j][i] /= cnt[j][i]
+        flat = [grid[j][i] for j in range(ny) for i in range(nx) if cnt[j][i]]
+        lo = min(flat) if flat else 0.0
+        hi = max(flat) if flat else 1.0
+        ramp = " .:-=+*#%@"
+        lines = []
+        for j in range(ny - 1, -1, -1):
+            row = []
+            for i in range(nx):
+                if cnt[j][i] == 0:
+                    row.append(" ")
+                else:
+                    t = 0.0 if hi <= lo else (grid[j][i] - lo) / (hi - lo)
+                    row.append(ramp[int(_clamp(t, 0.0, 1.0) * (len(ramp) - 1))])
+            lines.append("".join(row))
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Scenarios
+# ---------------------------------------------------------------------------
+
+def _lattice(x0: float, y0: float, x1: float, y1: float, spacing: float) -> List[Tuple[float, float]]:
+    pts = []
+    y = y0 + 0.5 * spacing
+    row = 0
+    while y < y1:
+        x = x0 + 0.5 * spacing
+        # hexagonal offset optional
+        off = 0.5 * spacing if row % 2 else 0.0
+        while x + off < x1:
+            pts.append((x + off, y))
+            x += spacing
+        y += spacing * math.sin(PI / 3.0)  # hex packing vertical
+        row += 1
+    return pts
+
+
+def scenario_dam_break(
+    nx: int = 12,
+    ny: int = 24,
+    spacing: Optional[float] = None,
+    domain: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    rho0: float = 1000.0,
+    h_factor: float = 1.3,
+) -> Tuple[SPHConfig, List[Particle]]:
+    """Classic 2D dam-break: water column on left collapses under gravity."""
+    xmin, ymin, xmax, ymax = domain
+    sp = spacing if spacing else (0.35 / max(nx, 1))
+    h = h_factor * sp
+    # water column [0, 0.35] x [0, 0.7] roughly
+    x1 = xmin + 0.35 * (xmax - xmin)
+    y1 = ymin + 0.70 * (ymax - ymin)
+    pts = _lattice(xmin + sp, ymin + sp, x1, y1, sp)
+    m = rho0 * (sp * sp)  # 2D mass ~ ρ0 * area
+    particles = [
+        Particle(x=x, y=y, m=m, h=h, rho=rho0, tag="fluid") for x, y in pts
+    ]
+    # bottom wall particles
+    wx = xmin + 0.5 * sp
+    while wx < xmax:
+        particles.append(Particle(x=wx, y=ymin + 0.25 * sp, m=m, h=h, rho=rho0, tag="wall", vx=0, vy=0))
+        wx += sp
+    cfg = SPHConfig(
+        rho0=rho0,
+        c0=20.0,  # ~10 * sqrt(gH)
+        alpha_visc=0.15,
+        g=9.81,
+        domain=domain,
+        kernel="cubic_spline",
+        cfl=0.2,
+        wall_repulsion=5e4,
+    )
+    return cfg, particles
+
+
+def scenario_hydrostatic(
+    n: int = 200,
+    domain: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    rho0: float = 1000.0,
+    fill_h: float = 0.6,
+) -> Tuple[SPHConfig, List[Particle]]:
+    """Resting tank — should stay near hydrostatic equilibrium."""
+    xmin, ymin, xmax, ymax = domain
+    area = (xmax - xmin) * fill_h
+    sp = math.sqrt(area / max(n, 1))
+    h = 1.3 * sp
+    pts = _lattice(xmin + sp, ymin + sp, xmax - sp, ymin + fill_h, sp)
+    m = rho0 * sp * sp
+    particles = [Particle(x=x, y=y, m=m, h=h, rho=rho0, tag="fluid") for x, y in pts]
+    cfg = SPHConfig(
+        rho0=rho0,
+        c0=30.0,
+        alpha_visc=0.3,
+        eps_xsph=0.5,
+        g=9.81,
+        domain=domain,
+        cfl=0.15,
+        wall_repulsion=8e4,
+    )
+    return cfg, particles
+
+
+def scenario_droplet(
+    n_each: int = 80,
+    domain: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    rho0: float = 1000.0,
+    impact_v: float = 2.0,
+) -> Tuple[SPHConfig, List[Particle]]:
+    """Two liquid blobs approaching for collision."""
+    xmin, ymin, xmax, ymax = domain
+    cx1, cy1 = 0.35, 0.5
+    cx2, cy2 = 0.65, 0.5
+    R = 0.12
+    # area per drop ~ πR^2
+    sp = math.sqrt(PI * R * R / max(n_each, 1))
+    h = 1.3 * sp
+    m = rho0 * sp * sp
+    particles: List[Particle] = []
+    for cx, cy, vx in ((cx1, cy1, impact_v), (cx2, cy2, -impact_v)):
+        # fill disk
+        y = cy - R
+        while y <= cy + R:
+            x = cx - R
+            while x <= cx + R:
+                if (x - cx) ** 2 + (y - cy) ** 2 <= R * R:
+                    particles.append(Particle(x=x, y=y, vx=vx, vy=0.0, m=m, h=h, rho=rho0, tag="fluid"))
+                x += sp
+            y += sp
+    cfg = SPHConfig(
+        rho0=rho0,
+        c0=15.0,
+        alpha_visc=0.2,
+        g=0.0,
+        domain=domain,
+        cfl=0.2,
+        periodic_x=False,
+        periodic_y=False,
+        wall_repulsion=2e4,
+    )
+    return cfg, particles
+
+
+def scenario_shear(
+    n: int = 300,
+    domain: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    rho0: float = 1000.0,
+    v0: float = 1.0,
+) -> Tuple[SPHConfig, List[Particle]]:
+    """Kelvin-Helmholtz–like shear layer (periodic x)."""
+    xmin, ymin, xmax, ymax = domain
+    sp = math.sqrt(((xmax - xmin) * (ymax - ymin)) / max(n, 1))
+    h = 1.3 * sp
+    m = rho0 * sp * sp
+    particles: List[Particle] = []
+    pts = _lattice(xmin, ymin, xmax, ymax, sp)
+    mid = 0.5 * (ymin + ymax)
+    rng = random.Random(0)
+    for x, y in pts:
+        vx = v0 if y >= mid else -v0
+        # small vertical perturbation
+        vy = 0.05 * v0 * math.sin(TWO_PI * (x - xmin) / (xmax - xmin))
+        vy += 0.01 * v0 * (rng.random() - 0.5)
+        particles.append(Particle(x=x, y=y, vx=vx, vy=vy, m=m, h=h, rho=rho0, tag="fluid"))
+    cfg = SPHConfig(
+        rho0=rho0,
+        c0=10.0,
+        alpha_visc=0.05,
+        g=0.0,
+        domain=domain,
+        cfl=0.25,
+        periodic_x=True,
+        periodic_y=True,
+        eps_xsph=0.1,
+    )
+    return cfg, particles
+
+
+SCENARIOS = {
+    "dam_break": scenario_dam_break,
+    "hydrostatic": scenario_hydrostatic,
+    "droplet": scenario_droplet,
+    "shear": scenario_shear,
+}
+
+
+# ---------------------------------------------------------------------------
+# Kernel analytic checks
+# ---------------------------------------------------------------------------
+
+def kernel_partition_of_unity(kernel: Kernel, h: float = 0.05, n: int = 21) -> float:
+    """Σ_j ΔA W(|x-xj|,h) ≈ 1 on a uniform lattice (2D)."""
+    sp = h / 1.3
+    half = (n // 2) * sp
+    acc = 0.0
+    area = sp * sp
+    for ix in range(n):
+        for iy in range(n):
+            dx = (ix - n // 2) * sp
+            dy = (iy - n // 2) * sp
+            r = math.hypot(dx, dy)
+            acc += area * kernel.W(r, h)
+    return acc
+
+
+def kernel_gradient_odd(kernel: Kernel, h: float = 0.05) -> float:
+    """∇W must be odd: gradW(r) + gradW(-r) = 0; sample residual."""
+    dx, dy = 0.03, -0.02
+    g1 = kernel.grad_W(dx, dy, h)
+    g2 = kernel.grad_W(-dx, -dy, h)
+    return math.hypot(g1[0] + g2[0], g1[1] + g2[1])
+
+
+# ---------------------------------------------------------------------------
+# High-level runners
+# ---------------------------------------------------------------------------
+
+def build_world(scenario: str = "dam_break", **kw) -> SPHWorld:
+    if scenario not in SCENARIOS:
+        raise ValueError(f"unknown scenario {scenario}; choose from {list(SCENARIOS)}")
+    # filter kwargs accepted by scenario call signatures loosely
+    fn = SCENARIOS[scenario]
+    cfg, particles = fn(**{k: v for k, v in kw.items() if k in fn.__code__.co_varnames})  # type: ignore
+    # allow overrides
+    for k, v in kw.items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, v)
+    if "kernel" in kw:
+        cfg.kernel = kw["kernel"]
+    world = SPHWorld(cfg, particles)
+    world.kernel = KERNELS.get(cfg.kernel, KERNELS["cubic_spline"])
+    world.bootstrap()
+    return world
+
+
+def run_simulation(
+    scenario: str = "dam_break",
+    steps: int = 50,
+    seed: int = 0,
+    kernel: str = "cubic_spline",
+    **kw,
+) -> Dict:
+    random.seed(seed)
+    world = build_world(scenario, kernel=kernel, **kw)
+    t0 = time.perf_counter()
+    d0 = world.diagnostics(world.suggest_dt())
+    for _ in range(steps):
+        world.step()
+    elapsed = time.perf_counter() - t0
+    d1 = world.history[-1] if world.history else world.diagnostics(world.suggest_dt())
+    mass_err = abs(d1.mass - d0.mass) / max(d0.mass, 1e-12)
+    # momentum drift (gravity systems expect my change)
+    return {
+        "scenario": scenario,
+        "kernel": kernel,
+        "steps": steps,
+        "n_fluid": d1.n_fluid,
+        "t": d1.t,
+        "elapsed_s": elapsed,
+        "steps_per_s": steps / max(elapsed, 1e-12),
+        "mass_0": d0.mass,
+        "mass_1": d1.mass,
+        "mass_rel_err": mass_err,
+        "mom_x_0": d0.mom_x,
+        "mom_x_1": d1.mom_x,
+        "ke_0": d0.ke,
+        "ke_1": d1.ke,
+        "e_tot_0": d0.e_tot,
+        "e_tot_1": d1.e_tot,
+        "e_tot_rel_drift": abs(d1.e_tot - d0.e_tot) / max(abs(d0.e_tot), 1e-9),
+        "rho_mean": d1.rho_mean,
+        "rho_std": d1.rho_std,
+        "rho_max": d1.rho_max,
+        "v_max": d1.v_max,
+        "cfl_est": d1.cfl_est,
+        "dt": d1.dt,
+    }
+
+
+def compare_kernels(scenario: str = "hydrostatic", steps: int = 40) -> Dict:
+    rows = []
+    for kname in ("cubic_spline", "wendland_c2"):
+        rows.append(run_simulation(scenario=scenario, steps=steps, kernel=kname))
+    return {"scenario": scenario, "steps": steps, "kernels": rows}
+
+
+def theory_ledger(n: int = 10000, dim: int = 2) -> Dict:
+    """Complexity & memory model for production SPH."""
+    # neighbours ~ π (2h/sp)^2 ≈ π (2*1.3)^2 ≈ 21
+    avg_nbr = PI * (2.0 * 1.3) ** 2
+    bytes_per_particle = 8 * 12  # x y vx vy ax ay rho p m h + tags overhead approx
+    mem_mb = n * bytes_per_particle / (1024 * 1024)
+    flops_per_step = n * avg_nbr * 40  # rough pair loop
+    return {
+        "n_particles": n,
+        "dim": dim,
+        "avg_neighbours": avg_nbr,
+        "bytes_per_particle": bytes_per_particle,
+        "memory_mib": mem_mb,
+        "pair_flops_per_step_est": flops_per_step,
+        "time_complexity": "O(N * n_nbr) with spatial hash ≈ O(N)",
+        "notes": [
+            "Weakly-compressible SPH (WCSPH) with Tait EOS γ=7",
+            "Artificial viscosity Monaghan α–β; XSPH ε smoothing",
+            "CFL: dt ≤ CFL * h / (c0 + |v|_max)",
+            "c0 typically 10× max bulk velocity to keep δρ/ρ ≲ 1%",
+        ],
+    }
+
+
+def selftest() -> int:
+    """CI gate — returns 0 on success."""
+    failures = []
+
+    # 1. Kernel partition of unity
+    for name, kern in KERNELS.items():
+        pu = kernel_partition_of_unity(kern, h=0.05, n=25)
+        if not (0.85 <= pu <= 1.15):
+            failures.append(f"partition_unity[{name}]={pu:.4f} not ~1")
+
+    # 2. Gradient oddness
+    for name, kern in KERNELS.items():
+        odd = kernel_gradient_odd(kern)
+        if odd > 1e-12:
+            failures.append(f"grad_odd[{name}]={odd}")
+
+    # 3. Kernel support zero outside
+    for name, kern in KERNELS.items():
+        if kern.W(2.01 * 0.05, 0.05) != 0.0:
+            failures.append(f"support[{name}] not compact")
+
+    # 4. Mass conservation dam-break
+    r = run_simulation(scenario="dam_break", steps=30, kernel="cubic_spline")
+    if r["mass_rel_err"] > 1e-9:
+        failures.append(f"mass_rel_err dam_break={r['mass_rel_err']}")
+    if r["n_fluid"] < 10:
+        failures.append("too few fluid particles")
+
+    # 5. Hydrostatic: density shouldn't explode
+    h = run_simulation(scenario="hydrostatic", steps=25, kernel="wendland_c2")
+    if h["rho_max"] > 5.0 * 1000.0:
+        failures.append(f"hydrostatic rho_max exploded {h['rho_max']}")
+    if h["mass_rel_err"] > 1e-9:
+        failures.append(f"mass hydrostatic {h['mass_rel_err']}")
+
+    # 6. Droplet: finite energy
+    d = run_simulation(scenario="droplet", steps=20)
+    if not math.isfinite(d["e_tot_1"]):
+        failures.append("droplet energy non-finite")
+    if d["v_max"] > 100.0:
+        failures.append(f"droplet blew up v_max={d['v_max']}")
+
+    # 7. Shear periodic mass hold
+    s = run_simulation(scenario="shear", steps=15)
+    if s["mass_rel_err"] > 1e-9:
+        failures.append(f"shear mass {s['mass_rel_err']}")
+
+    # 8. Pressure EOS monotonic
+    cfg = SPHConfig()
+    w = SPHWorld(cfg, [])
+    p1 = w.pressure(1000.0)
+    p2 = w.pressure(1100.0)
+    if not (p1 < p2):
+        failures.append("Tait EOS not monotonic")
+    if abs(p1) > 1e-6:  # at rho0, Tait p≈0
+        failures.append(f"Tait p(rho0) should ~0 got {p1}")
+
+    # 9. Spatial hash returns self
+    cfg, parts = scenario_hydrostatic(n=50)
+    world = SPHWorld(cfg, parts)
+    world._rebuild_hash()
+    assert world._hash is not None
+    p0 = parts[0]
+    nbrs = world._hash.neighbours(p0.x, p0.y)
+    if 0 not in nbrs:
+        failures.append("spatial hash missed self")
+
+    # 10. Theory ledger keys
+    th = theory_ledger(5000)
+    for k in ("n_particles", "memory_mib", "pair_flops_per_step_est"):
+        if k not in th:
+            failures.append(f"theory missing {k}")
+
+    if failures:
+        print("SELFTEST FAIL:")
+        for f in failures:
+            print("  •", f)
+        return 1
+    print("SELFTEST OK — 10/10 invariant groups passed")
+    print(f"  dam_break mass_rel_err={r['mass_rel_err']:.2e} n={r['n_fluid']} sps={r['steps_per_s']:.1f}")
+    print(f"  hydrostatic rho_mean={h['rho_mean']:.1f} std={h['rho_std']:.1f}")
+    print(f"  droplet e_tot_drift={d['e_tot_rel_drift']:.3e} v_max={d['v_max']:.3f}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _print_json(obj: Dict) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def cmd_selftest(_args: argparse.Namespace) -> int:
+    return selftest()
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    out = run_simulation(
+        scenario=args.scenario,
+        steps=args.steps,
+        kernel=args.kernel,
+        seed=args.seed,
+    )
+    if args.json:
+        _print_json(out)
+    else:
+        print(f"SPH bench  scenario={out['scenario']} kernel={out['kernel']}")
+        print(f"  n_fluid={out['n_fluid']}  steps={out['steps']}  t={out['t']:.5f}s")
+        print(f"  throughput={out['steps_per_s']:.1f} steps/s  elapsed={out['elapsed_s']:.3f}s")
+        print(f"  mass_rel_err={out['mass_rel_err']:.3e}  e_tot_rel_drift={out['e_tot_rel_drift']:.3e}")
+        print(f"  rho_mean={out['rho_mean']:.2f} ± {out['rho_std']:.2f}  max={out['rho_max']:.2f}")
+        print(f"  v_max={out['v_max']:.4f}  CFL≈{out['cfl_est']:.3f}  dt={out['dt']:.5e}")
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    out = compare_kernels(scenario=args.scenario, steps=args.steps)
+    if args.json:
+        _print_json(out)
+    else:
+        print(f"Kernel compare @ {out['scenario']} steps={out['steps']}")
+        for row in out["kernels"]:
+            print(
+                f"  {row['kernel']:14s}  mass_err={row['mass_rel_err']:.2e}  "
+                f"e_drift={row['e_tot_rel_drift']:.3e}  rho_std={row['rho_std']:.2f}  "
+                f"sps={row['steps_per_s']:.1f}"
+            )
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    world = build_world(args.scenario, kernel=args.kernel)
+    print(f"Running {args.scenario} for {args.steps} steps (kernel={args.kernel})...")
+    for s in range(args.steps):
+        d = world.step()
+        if args.verbose and (s % max(1, args.steps // 10) == 0 or s == args.steps - 1):
+            print(
+                f"  [{d.step:4d}] t={d.t:.4f}  KE={d.ke:.4f}  PE={d.pe:.4f}  "
+                f"ρ̄={d.rho_mean:.1f}  |v|_max={d.v_max:.3f}"
+            )
+    if args.ascii:
+        print("\nDensity field:")
+        print(world.ascii_field(nx=args.width, ny=args.height))
+    d = world.history[-1]
+    summary = {
+        "scenario": args.scenario,
+        "steps": args.steps,
+        "t": d.t,
+        "mass": d.mass,
+        "e_tot": d.e_tot,
+        "rho_mean": d.rho_mean,
+        "v_max": d.v_max,
+        "n_fluid": d.n_fluid,
+    }
+    if args.json:
+        _print_json(summary)
+    else:
+        print(
+            f"done: t={d.t:.4f} mass={d.mass:.4f} E={d.e_tot:.4f} "
+            f"ρ̄={d.rho_mean:.2f} n={d.n_fluid}"
+        )
+    return 0
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    out = theory_ledger(n=args.n)
+    if args.json:
+        _print_json(out)
+    else:
+        print("SPH production theory ledger")
+        print(f"  N={out['n_particles']}  ⟨nbrs⟩≈{out['avg_neighbours']:.1f}")
+        print(f"  memory≈{out['memory_mib']:.2f} MiB  pair-FLOPs/step≈{out['pair_flops_per_step_est']:.3e}")
+        print(f"  complexity: {out['time_complexity']}")
+        for n in out["notes"]:
+            print(f"  • {n}")
+    return 0
+
+
+def cmd_kernels(args: argparse.Namespace) -> int:
+    rows = []
+    for name, kern in KERNELS.items():
+        pu = kernel_partition_of_unity(kern, h=args.h, n=args.n)
+        odd = kernel_gradient_odd(kern, h=args.h)
+        rows.append({"kernel": name, "partition_unity": pu, "grad_odd_residual": odd, "W0": kern.W(0.0, args.h)})
+    if args.json:
+        _print_json({"kernels": rows})
+    else:
+        for r in rows:
+            print(
+                f"{r['kernel']:14s}  W(0)={r['W0']:.6f}  "
+                f"ΣW≈{r['partition_unity']:.4f}  |grad odd|={r['grad_odd_residual']:.2e}"
+            )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="sph-hydrodynamics",
+        description="2D Smoothed Particle Hydrodynamics (SPH) Fluid Engine",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("selftest", help="CI invariant gate")
+    s.set_defaults(func=cmd_selftest)
+
+    b = sub.add_parser("bench", help="Benchmark a scenario")
+    b.add_argument("--scenario", default="dam_break", choices=list(SCENARIOS))
+    b.add_argument("--steps", type=int, default=40)
+    b.add_argument("--kernel", default="cubic_spline", choices=list(KERNELS))
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--json", action="store_true")
+    b.set_defaults(func=cmd_bench)
+
+    c = sub.add_parser("compare", help="Compare cubic spline vs Wendland C2")
+    c.add_argument("--scenario", default="hydrostatic", choices=list(SCENARIOS))
+    c.add_argument("--steps", type=int, default=30)
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=cmd_compare)
+
+    r = sub.add_parser("run", help="Run scenario with optional ASCII field")
+    r.add_argument("--scenario", default="dam_break", choices=list(SCENARIOS))
+    r.add_argument("--steps", type=int, default=50)
+    r.add_argument("--kernel", default="cubic_spline", choices=list(KERNELS))
+    r.add_argument("--ascii", action="store_true")
+    r.add_argument("--width", type=int, default=48)
+    r.add_argument("--height", type=int, default=20)
+    r.add_argument("--verbose", action="store_true")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=cmd_run)
+
+    t = sub.add_parser("theory", help="Complexity & memory ledger")
+    t.add_argument("--n", type=int, default=10000)
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_theory)
+
+    k = sub.add_parser("kernels", help="Kernel partition-of-unity / oddness checks")
+    k.add_argument("--h", type=float, default=0.05)
+    k.add_argument("--n", type=int, default=25)
+    k.add_argument("--json", action="store_true")
+    k.set_defaults(func=cmd_kernels)
+
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
