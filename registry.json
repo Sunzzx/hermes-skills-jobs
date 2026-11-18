@@ -2185,5 +2185,23 @@
       "llm-serving",
       "roofline-model"
     ]
+  },
+  {
+    "id": "keydiff-kv-engine",
+    "title": "KeyDiff: Key Similarity-Based KV Cache Eviction Engine (NeurIPS 2025)",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Training-free KV cache eviction via geometric key distinctiveness (farthest-point sampling) without attention scores \u2014 FlashAttention-compatible needle retention under hard memory budgets.",
+    "cli": "keydiff-kv-engine",
+    "evolved_at": "2026-11-19T00:19:39.466064",
+    "tags": [
+      "Frontier-AI",
+      "KV-Cache",
+      "KeyDiff",
+      "Eviction",
+      "FlashAttention",
+      "NeurIPS2025",
+      "Inference"
+    ]
   }
 ]

@@ -1,14 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-125-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-128-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (125 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (128 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -137,6 +137,9 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **PagedAttention Virtual Memory & Block-Table Allocator** | `inference` | `paged-kv-allocator` | Virtual memory paging manager for LLM KV caches. Eliminates memory fragmentation by mapping non-contiguous physical memory blocks to logical token sequences with copy-on-write fork support. | `PagedAttention` `KVCache` `vLLM` |
 | **PiSSA Principal Singular Values & Vectors Adaptation Engine** | `ml-optimization` | `pissa-principal-adapter` | Principal Singular values and Singular vectors Adaptation (NeurIPS 2024 / arXiv:2404.05971) for parameter-efficient fine-tuning with zero inference latency overhead. | `peft` `lora` `svd` |
 | **RadixAttention: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS, arXiv:2312.07104)** | `inference` | N/A |  | `radix-attention` `sglang` `kv-cache` |
+| **SpecInfer Tree-Based Speculative Inference Engine (ASPLOS 2024)** | `inference` | `specinfer-tree-speculation` | Tree-based speculative inference with multi-child draft verification and topology-aware acceptance. | `SpecInfer` `SpeculativeDecoding` `ASPLOS2024` |
+| **Sarathi-Serve Chunked-Prefill & Piggyback Batching Engine (OSDI 2024)** | `inference` | `sarathi-chunked-prefill` | Stall-free chunked prefills with decode piggybacking for near-zero ITL jitter. | `Sarathi` `ChunkedPrefill` `OSDI2024` |
+| **KeyDiff: Key Similarity-Based KV Cache Eviction Engine (NeurIPS 2025)** | `inference` | `keydiff-kv-engine` | Training-free KV eviction via geometric key distinctiveness (farthest-point sampling) without attention scores — FlashAttention-compatible needle retention under hard memory budgets. | `KeyDiff` `KV-Cache` `NeurIPS2025` |
 
 ---
 
@@ -167,4 +170,4 @@ research-radar
 
 ---
 
-*Last Evolved: 2026-11-14 18:55:00*
+*Last Evolved: 2026-11-19 00:19:00*

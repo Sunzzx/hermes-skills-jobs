@@ -1,5 +1,17 @@
 # 📜 Hermes Evolution Changelog
 
+### [2026-11-19 00:19:00] - Evolved `keydiff-kv-engine`
+- **Title**: KeyDiff: Key Similarity-Based KV Cache Eviction Engine (NeurIPS 2025)
+- **Category**: inference
+- **Type**: skill+tool
+- **Description**: Training-free KV cache eviction that ranks tokens by geometric distinctiveness of key vectors (Gonzalez farthest-point sampling + block-compressed variant), not attention scores — preserving FlashAttention compatibility while retaining needles under hard memory budgets.
+- **CLI**: `keydiff-kv-engine {selftest,bench,compare,evict}`
+- **Artifacts**:
+  - `bin/keydiff-kv-engine`
+  - `skills/inference/keydiff-kv-engine/SKILL.md`
+  - `tests/test_keydiff_kv_engine.py` (8/8 passed)
+- **Verification**: selftest exit 0; KeyDiff needle recall 100% vs StreamingLLM 0% on structured multi-cluster corpus (seq=512, budget=25%).
+
 ### [2026-11-14 20:15:00] - Evolved usage: sarathi-chunked-prefill [-h] {simulate,compare,plan} ...
 
 Sarathi-Serve Chunked-Prefill & Piggyback Batching Engine
