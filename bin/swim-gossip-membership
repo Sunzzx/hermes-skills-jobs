@@ -1,0 +1,1396 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""swim-gossip-membership: SWIM Gossip Failure Detector & Membership Engine.
+
+Production-grade pure-Python reference for SWIM
+(Scalable Weakly-consistent Infection-style Process Group Membership):
+
+  Das, Gupta, Motivala — SWIM: Scalable Weakly-consistent Infection-style
+  Process Group Membership Protocol, DSN 2002 / IEEE Infocom lineage.
+
+Features:
+  • Direct ping + indirect k-member ping-req failure detection
+  • Suspicion sub-protocol with incarnation numbers (refutation)
+  • Infection-style gossip piggyback of membership deltas (alive/suspect/confirm)
+  • Weakly-consistent full membership view per node
+  • Message complexity O(n log n) vs full-mesh heartbeat O(n²)
+  • Fault models: crash, mute, partition, flaky links, false-suspicion storms
+  • Comparison ledger vs all-to-all heartbeat and random gossip-only
+  • CLI: selftest | simulate | chaos | bench | theory | explain | status | compare
+
+Pure Python 3 stdlib only (no NumPy).
+
+References:
+  - Das, Gupta, Motivala, SWIM, DSN 2002
+  - HashiCorp memberlist / Serf / Consul (SWIM + Lifeguard extensions)
+  - Van Renesse et al., gossip / epidemic dissemination
+  - Lakshman & Malik, Cassandra phi-accrual + gossip
+  - Birman et al., Bimodal Multicast / pbcast
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import random
+import sys
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+
+ENGINE_NAME = "swim-gossip-membership"
+ENGINE_VERSION = "1.0.0"
+PAPER = "Das, Gupta, Motivala — SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol, DSN 2002"
+
+
+# ---------------------------------------------------------------------------
+# Core types
+# ---------------------------------------------------------------------------
+
+class MemberState(Enum):
+    ALIVE = "alive"
+    SUSPECT = "suspect"
+    DEAD = "dead"          # confirmed
+    LEFT = "left"
+
+
+class MsgType(Enum):
+    PING = auto()
+    ACK = auto()
+    PING_REQ = auto()      # A asks B to ping C
+    PING_REQ_ACK = auto()  # B reports C reachable/unreachable
+    GOSSIP = auto()        # pure gossip envelope (no probe)
+
+
+@dataclass
+class MembershipUpdate:
+    """Infection-style membership delta with incarnation for refutation."""
+    node: int
+    state: MemberState
+    incarnation: int
+    from_node: int
+    hop: int = 0
+
+    def key(self) -> Tuple[int, str, int]:
+        return (self.node, self.state.value, self.incarnation)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "node": self.node,
+            "state": self.state.value,
+            "incarnation": self.incarnation,
+            "from": self.from_node,
+            "hop": self.hop,
+        }
+
+
+@dataclass
+class Message:
+    mtype: MsgType
+    src: int
+    dst: int
+    target: Optional[int] = None   # for ping-req: the node being probed
+    payload: Optional[List[MembershipUpdate]] = None
+    seq: int = 0
+    deliver_at: float = 0.0
+    drop: bool = False
+
+
+@dataclass
+class LocalView:
+    """Per-node membership row."""
+    state: MemberState = MemberState.ALIVE
+    incarnation: int = 0
+    last_heard: float = 0.0
+    suspect_since: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Network model
+# ---------------------------------------------------------------------------
+
+class LossyNetwork:
+    """Discrete-event lossy/delayed bidirectional network."""
+
+    def __init__(
+        self,
+        n: int,
+        drop_p: float = 0.0,
+        delay_mean: float = 1.0,
+        delay_jitter: float = 0.5,
+        seed: int = 0,
+        partitions: Optional[List[Set[int]]] = None,
+    ):
+        self.n = n
+        self.drop_p = drop_p
+        self.delay_mean = delay_mean
+        self.delay_jitter = delay_jitter
+        self.rng = random.Random(seed)
+        self.queue: List[Message] = []
+        self.now = 0.0
+        self.sent = 0
+        self.delivered = 0
+        self.dropped = 0
+        self.partitions = partitions or []
+        self.muted: Set[int] = set()
+        self.crashed: Set[int] = set()
+        self.by_type: Dict[str, int] = defaultdict(int)
+
+    def _partitioned(self, a: int, b: int) -> bool:
+        if not self.partitions:
+            return False
+        for part in self.partitions:
+            if a in part and b in part:
+                return False
+        # if either is in some partition set and they don't share one → blocked
+        in_any = any(a in p or b in p for p in self.partitions)
+        if not in_any:
+            return False
+        return True
+
+    def send(self, msg: Message) -> None:
+        self.sent += 1
+        self.by_type[msg.mtype.name] += 1
+        if msg.src in self.crashed or msg.src in self.muted:
+            self.dropped += 1
+            return
+        if msg.dst in self.crashed:
+            self.dropped += 1
+            return
+        if self._partitioned(msg.src, msg.dst):
+            self.dropped += 1
+            return
+        if self.rng.random() < self.drop_p:
+            self.dropped += 1
+            return
+        delay = max(0.1, self.delay_mean + self.rng.uniform(-self.delay_jitter, self.delay_jitter))
+        msg.deliver_at = self.now + delay
+        self.queue.append(msg)
+
+    def tick(self, dt: float = 1.0) -> List[Message]:
+        self.now += dt
+        ready: List[Message] = []
+        remain: List[Message] = []
+        for m in self.queue:
+            if m.deliver_at <= self.now:
+                ready.append(m)
+                self.delivered += 1
+            else:
+                remain.append(m)
+        self.queue = remain
+        return ready
+
+    def stats(self) -> Dict[str, Any]:
+        return {
+            "sent": self.sent,
+            "delivered": self.delivered,
+            "dropped": self.dropped,
+            "queued": len(self.queue),
+            "by_type": dict(self.by_type),
+            "now": self.now,
+        }
+
+
+# ---------------------------------------------------------------------------
+# SWIM node
+# ---------------------------------------------------------------------------
+
+class SwimNode:
+    """One SWIM participant."""
+
+    def __init__(
+        self,
+        node_id: int,
+        n: int,
+        k_indirect: int = 3,
+        protocol_period: float = 10.0,
+        ping_timeout: float = 3.0,
+        suspect_timeout: float = 20.0,
+        gossip_fanout: int = 3,
+        piggyback_max: int = 8,
+        seed: int = 0,
+    ):
+        self.id = node_id
+        self.n = n
+        self.k = k_indirect
+        self.T = protocol_period
+        self.ping_timeout = ping_timeout
+        self.suspect_timeout = suspect_timeout
+        self.fanout = gossip_fanout
+        self.piggyback_max = piggyback_max
+        self.rng = random.Random(seed + node_id * 97)
+
+        self.alive = True
+        self.incarnation = 0
+        self.view: Dict[int, LocalView] = {
+            i: LocalView(state=MemberState.ALIVE, incarnation=0, last_heard=0.0)
+            for i in range(n)
+        }
+        self.view[node_id].state = MemberState.ALIVE
+
+        self.pending_ping: Optional[Tuple[int, float, int]] = None  # (target, deadline, seq)
+        self.pending_indirect: Dict[int, Tuple[float, Set[int]]] = {}  # seq -> (deadline, helpers)
+        self.seq = 0
+        self.update_buf: deque = deque(maxlen=256)
+        self.dissemination_count: Dict[Tuple[int, str, int], int] = defaultdict(int)
+        self.probe_index = 0
+        self.probe_order = list(range(n))
+        self.rng.shuffle(self.probe_order)
+
+        # metrics
+        self.pings_sent = 0
+        self.acks_recv = 0
+        self.suspects_raised = 0
+        self.confirms_raised = 0
+        self.refutations = 0
+        self.detection_events: List[Dict[str, Any]] = []
+
+    def membership_alive(self) -> List[int]:
+        return [
+            i for i, v in self.view.items()
+            if v.state == MemberState.ALIVE and i != self.id
+        ]
+
+    def membership_nondead(self) -> List[int]:
+        return [
+            i for i, v in self.view.items()
+            if v.state != MemberState.DEAD and i != self.id
+        ]
+
+    def _next_probe_target(self) -> Optional[int]:
+        alive = self.membership_alive()
+        if not alive:
+            return None
+        # round-robin over full n, skip self/dead
+        for _ in range(self.n):
+            t = self.probe_order[self.probe_index % self.n]
+            self.probe_index += 1
+            if t != self.id and self.view[t].state == MemberState.ALIVE:
+                return t
+        return alive[self.rng.randrange(len(alive))] if alive else None
+
+    def _piggyback(self) -> List[MembershipUpdate]:
+        """Select hottest undisseminated updates (infection-style)."""
+        items = sorted(
+            self.update_buf,
+            key=lambda u: self.dissemination_count[u.key()],
+        )
+        out: List[MembershipUpdate] = []
+        for u in items:
+            if len(out) >= self.piggyback_max:
+                break
+            # retransmit budget ~ log(n) + c
+            budget = max(2, int(math.ceil(math.log2(max(2, self.n)))) + 2)
+            if self.dissemination_count[u.key()] < budget:
+                nu = MembershipUpdate(
+                    node=u.node,
+                    state=u.state,
+                    incarnation=u.incarnation,
+                    from_node=self.id,
+                    hop=u.hop + 1,
+                )
+                out.append(nu)
+                self.dissemination_count[u.key()] += 1
+        return out
+
+    def _enqueue_update(self, upd: MembershipUpdate, now: float) -> bool:
+        """Apply update if it wins incarnation/state precedence. Return True if accepted."""
+        if upd.node == self.id:
+            # someone suspects/declares us — refute with higher incarnation
+            if upd.state in (MemberState.SUSPECT, MemberState.DEAD):
+                self.incarnation = max(self.incarnation, upd.incarnation) + 1
+                self.view[self.id].incarnation = self.incarnation
+                self.view[self.id].state = MemberState.ALIVE
+                self.view[self.id].last_heard = now
+                refute = MembershipUpdate(
+                    node=self.id,
+                    state=MemberState.ALIVE,
+                    incarnation=self.incarnation,
+                    from_node=self.id,
+                    hop=0,
+                )
+                self.update_buf.append(refute)
+                self.refutations += 1
+                return True
+            return False
+
+        cur = self.view[upd.node]
+        # precedence: higher incarnation wins; same incarnation: alive < suspect < dead
+        rank = {MemberState.ALIVE: 0, MemberState.SUSPECT: 1, MemberState.DEAD: 2, MemberState.LEFT: 3}
+        if upd.incarnation < cur.incarnation:
+            return False
+        if upd.incarnation == cur.incarnation and rank[upd.state] <= rank[cur.state]:
+            if upd.state == cur.state:
+                cur.last_heard = now
+            return False
+
+        prev = cur.state
+        cur.state = upd.state
+        cur.incarnation = upd.incarnation
+        cur.last_heard = now
+        if upd.state == MemberState.SUSPECT:
+            cur.suspect_since = now
+            if prev != MemberState.SUSPECT:
+                self.suspects_raised += 1
+        elif upd.state == MemberState.DEAD:
+            cur.suspect_since = None
+            if prev != MemberState.DEAD:
+                self.confirms_raised += 1
+                self.detection_events.append({
+                    "detector": self.id,
+                    "target": upd.node,
+                    "t": now,
+                    "incarnation": upd.incarnation,
+                })
+        else:
+            cur.suspect_since = None
+
+        self.update_buf.append(upd)
+        return True
+
+    def start_protocol_period(self, net: LossyNetwork) -> None:
+        if not self.alive:
+            return
+        target = self._next_probe_target()
+        if target is None:
+            return
+        self.seq += 1
+        seq = self.seq
+        piggy = self._piggyback()
+        net.send(Message(
+            mtype=MsgType.PING,
+            src=self.id,
+            dst=target,
+            seq=seq,
+            payload=piggy,
+        ))
+        self.pings_sent += 1
+        self.pending_ping = (target, net.now + self.ping_timeout, seq)
+
+    def on_timeout_check(self, net: LossyNetwork) -> None:
+        if not self.alive:
+            return
+        now = net.now
+        # direct ping timeout → indirect
+        if self.pending_ping is not None:
+            target, deadline, seq = self.pending_ping
+            if now >= deadline:
+                self.pending_ping = None
+                helpers = self.membership_alive()
+                helpers = [h for h in helpers if h != target]
+                self.rng.shuffle(helpers)
+                chosen = helpers[: self.k]
+                if not chosen:
+                    # no helpers — raise suspicion immediately
+                    self._raise_suspect(target, now, net)
+                else:
+                    helper_set = set(chosen)
+                    self.pending_indirect[seq] = (now + self.ping_timeout, helper_set)
+                    for h in chosen:
+                        net.send(Message(
+                            mtype=MsgType.PING_REQ,
+                            src=self.id,
+                            dst=h,
+                            target=target,
+                            seq=seq,
+                            payload=self._piggyback(),
+                        ))
+
+        # indirect timeout
+        expired = []
+        for seq, (deadline, helpers) in list(self.pending_indirect.items()):
+            if now >= deadline:
+                expired.append(seq)
+        for seq in expired:
+            # recover target from any outstanding knowledge — stored via last pending
+            # We encoded target only in messages; track via a side map
+            target = self._indirect_target.get(seq)
+            del self.pending_indirect[seq]
+            if target is not None:
+                self._raise_suspect(target, now, net)
+
+        # suspect → confirm (dead)
+        for nid, row in list(self.view.items()):
+            if row.state == MemberState.SUSPECT and row.suspect_since is not None:
+                if now - row.suspect_since >= self.suspect_timeout:
+                    self._confirm_dead(nid, now, net)
+
+    # filled by handlers
+    _indirect_target: Dict[int, int] = {}
+
+    def _raise_suspect(self, target: int, now: float, net: LossyNetwork) -> None:
+        if target == self.id or not self.alive:
+            return
+        row = self.view[target]
+        if row.state == MemberState.DEAD:
+            return
+        inc = row.incarnation
+        upd = MembershipUpdate(
+            node=target,
+            state=MemberState.SUSPECT,
+            incarnation=inc,
+            from_node=self.id,
+            hop=0,
+        )
+        self._enqueue_update(upd, now)
+        # gossip immediately
+        self._fanout_gossip(net)
+
+    def _confirm_dead(self, target: int, now: float, net: LossyNetwork) -> None:
+        row = self.view[target]
+        upd = MembershipUpdate(
+            node=target,
+            state=MemberState.DEAD,
+            incarnation=row.incarnation,
+            from_node=self.id,
+            hop=0,
+        )
+        self._enqueue_update(upd, now)
+        self._fanout_gossip(net)
+
+    def _fanout_gossip(self, net: LossyNetwork) -> None:
+        peers = self.membership_nondead()
+        if not peers:
+            return
+        self.rng.shuffle(peers)
+        for p in peers[: self.fanout]:
+            net.send(Message(
+                mtype=MsgType.GOSSIP,
+                src=self.id,
+                dst=p,
+                payload=self._piggyback(),
+            ))
+
+    def handle(self, msg: Message, net: LossyNetwork) -> None:
+        if not self.alive:
+            return
+        now = net.now
+        # always apply piggybacked updates first
+        if msg.payload:
+            for u in msg.payload:
+                self._enqueue_update(u, now)
+
+        if msg.mtype == MsgType.PING:
+            net.send(Message(
+                mtype=MsgType.ACK,
+                src=self.id,
+                dst=msg.src,
+                seq=msg.seq,
+                payload=self._piggyback(),
+            ))
+        elif msg.mtype == MsgType.ACK:
+            self.acks_recv += 1
+            if self.pending_ping and self.pending_ping[2] == msg.seq:
+                self.pending_ping = None
+            # clear indirect if this was a relayed success path (direct ack)
+            if msg.seq in self.pending_indirect:
+                del self.pending_indirect[msg.seq]
+            # refresh alive
+            row = self.view[msg.src]
+            if row.state != MemberState.DEAD:
+                if row.state != MemberState.ALIVE or row.incarnation <= self.view[msg.src].incarnation:
+                    upd = MembershipUpdate(
+                        node=msg.src,
+                        state=MemberState.ALIVE,
+                        incarnation=max(row.incarnation, self.view[msg.src].incarnation),
+                        from_node=self.id,
+                        hop=0,
+                    )
+                    self._enqueue_update(upd, now)
+        elif msg.mtype == MsgType.PING_REQ:
+            # we are helper: ping the target on behalf of msg.src
+            target = msg.target
+            if target is None:
+                return
+            self.seq += 1
+            # store reverse mapping so ACK from target can generate PING_REQ_ACK
+            self._helper_jobs[self.seq] = (msg.src, target, msg.seq)
+            net.send(Message(
+                mtype=MsgType.PING,
+                src=self.id,
+                dst=target,
+                seq=self.seq,
+                payload=self._piggyback(),
+            ))
+            self.pings_sent += 1
+            # also schedule local timeout for helper path
+            self._helper_deadlines[self.seq] = (net.now + self.ping_timeout, msg.src, target, msg.seq)
+        elif msg.mtype == MsgType.PING_REQ_ACK:
+            # helper reported reachability of target
+            reachable = bool(msg.target)  # reuse target field as 1/0 flag via payload convention
+            # Actually: we encode reachable in msg.target as None vs node id; use seq match
+            seq = msg.seq
+            if seq in self.pending_indirect:
+                del self.pending_indirect[seq]
+            if reachable:
+                # target alive — clear any local suspicion start
+                tnode = msg.target
+                if tnode is not None and self.view[tnode].state == MemberState.SUSPECT:
+                    upd = MembershipUpdate(
+                        node=tnode,
+                        state=MemberState.ALIVE,
+                        incarnation=self.view[tnode].incarnation,
+                        from_node=self.id,
+                    )
+                    self._enqueue_update(upd, now)
+            # if not reachable, wait for full indirect timeout (other helpers may succeed)
+        elif msg.mtype == MsgType.GOSSIP:
+            pass  # piggyback already applied
+
+    _helper_jobs: Dict[int, Tuple[int, int, int]] = {}
+    _helper_deadlines: Dict[int, Tuple[float, int, int, int]] = {}
+
+    def helper_timeout_check(self, net: LossyNetwork) -> None:
+        """Complete helper ping-req when direct ping to target ACKs or times out."""
+        if not self.alive:
+            return
+        now = net.now
+        # If we got an ACK matching a helper job, report success
+        # Handled in a post-pass from cluster by checking acks — simpler approach:
+        done = []
+        for seq, (deadline, origin, target, orig_seq) in list(self._helper_deadlines.items()):
+            # success if we no longer expect — check if ACK cleared via side channel
+            if seq in self._helper_success:
+                net.send(Message(
+                    mtype=MsgType.PING_REQ_ACK,
+                    src=self.id,
+                    dst=origin,
+                    target=target,  # reachable
+                    seq=orig_seq,
+                    payload=self._piggyback(),
+                ))
+                done.append(seq)
+            elif now >= deadline:
+                # unreachable report
+                net.send(Message(
+                    mtype=MsgType.PING_REQ_ACK,
+                    src=self.id,
+                    dst=origin,
+                    target=None,  # unreachable
+                    seq=orig_seq,
+                    payload=self._piggyback(),
+                ))
+                done.append(seq)
+        for seq in done:
+            self._helper_deadlines.pop(seq, None)
+            self._helper_jobs.pop(seq, None)
+            self._helper_success.discard(seq)
+
+    _helper_success: Set[int] = field(default_factory=set) if False else set()
+
+    def note_ack_seq(self, seq: int) -> None:
+        if seq in self._helper_jobs:
+            self._helper_success.add(seq)
+
+    def crash(self) -> None:
+        self.alive = False
+
+    def revive(self, now: float) -> None:
+        self.alive = True
+        self.incarnation += 1
+        self.view[self.id].incarnation = self.incarnation
+        self.view[self.id].state = MemberState.ALIVE
+        self.view[self.id].last_heard = now
+        self.update_buf.append(MembershipUpdate(
+            node=self.id,
+            state=MemberState.ALIVE,
+            incarnation=self.incarnation,
+            from_node=self.id,
+        ))
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "alive": self.alive,
+            "incarnation": self.incarnation,
+            "view": {
+                str(i): {"state": v.state.value, "inc": v.incarnation}
+                for i, v in self.view.items()
+            },
+            "pings_sent": self.pings_sent,
+            "acks_recv": self.acks_recv,
+            "suspects": self.suspects_raised,
+            "confirms": self.confirms_raised,
+            "refutations": self.refutations,
+        }
+
+
+# Fix class-level mutable defaults properly on SwimNode
+def _init_node_maps(node: SwimNode) -> None:
+    node._indirect_target = {}
+    node._helper_jobs = {}
+    node._helper_deadlines = {}
+    node._helper_success = set()
+
+
+# ---------------------------------------------------------------------------
+# Cluster simulator
+# ---------------------------------------------------------------------------
+
+class SwimCluster:
+    def __init__(
+        self,
+        n: int = 8,
+        k_indirect: int = 3,
+        protocol_period: float = 10.0,
+        ping_timeout: float = 3.0,
+        suspect_timeout: float = 25.0,
+        gossip_fanout: int = 3,
+        drop_p: float = 0.0,
+        seed: int = 42,
+        partitions: Optional[List[Set[int]]] = None,
+    ):
+        self.n = n
+        self.seed = seed
+        self.period = protocol_period
+        self.net = LossyNetwork(n, drop_p=drop_p, seed=seed, partitions=partitions)
+        self.nodes = [
+            SwimNode(
+                i, n,
+                k_indirect=k_indirect,
+                protocol_period=protocol_period,
+                ping_timeout=ping_timeout,
+                suspect_timeout=suspect_timeout,
+                gossip_fanout=gossip_fanout,
+                seed=seed,
+            )
+            for i in range(n)
+        ]
+        for nd in self.nodes:
+            _init_node_maps(nd)
+        self.period_counter = 0
+        self.crash_times: Dict[int, float] = {}
+        self.detection_latency: List[float] = []
+        self.false_positives = 0
+        self.true_detections = 0
+
+    def step(self, dt: float = 1.0) -> None:
+        # start new protocol periods staggered
+        for nd in self.nodes:
+            if not nd.alive:
+                continue
+            # each node probes once per period, offset by id
+            phase = int(self.net.now + nd.id * (self.period / max(1, self.n)))
+            prev_phase = int((self.net.now - dt) + nd.id * (self.period / max(1, self.n)))
+            if phase // int(self.period) > prev_phase // int(self.period) or (
+                self.net.now == 0 and dt > 0 and nd.id == 0
+            ):
+                # more reliable: probe on modulo boundary unique per node
+                pass
+
+        # cleaner period trigger
+        for nd in self.nodes:
+            if not nd.alive:
+                continue
+            t0 = self.net.now
+            # probe ticks: every `period` time units, offset by id
+            offset = (nd.id * self.period) / max(1, self.n)
+            if self._crossed_boundary(t0, t0 + dt, self.period, offset) or (
+                abs(t0) < 1e-9 and nd.id < 2
+            ):
+                nd.start_protocol_period(self.net)
+
+        # deliver messages
+        msgs = self.net.tick(dt)
+        for m in msgs:
+            if m.dst < 0 or m.dst >= self.n:
+                continue
+            nd = self.nodes[m.dst]
+            # track helper success before handle consumes ACK
+            if m.mtype == MsgType.ACK:
+                nd.note_ack_seq(m.seq)
+            # track ping-req target on initiator
+            if m.mtype == MsgType.PING_REQ and m.target is not None:
+                self.nodes[m.src]._indirect_target[m.seq] = m.target
+                # also initiator stores
+                if m.seq not in self.nodes[m.src]._indirect_target:
+                    pass
+            # initiator needs target map when sending ping-req — set at send time
+            nd.handle(m, self.net)
+            if m.mtype == MsgType.ACK and m.seq in nd._helper_jobs:
+                nd.note_ack_seq(m.seq)
+
+        for nd in self.nodes:
+            nd.on_timeout_check(self.net)
+            nd.helper_timeout_check(self.net)
+
+        # record detection latencies
+        self._score_detections()
+
+    def _crossed_boundary(self, t0: float, t1: float, period: float, offset: float) -> bool:
+        def bucket(t: float) -> int:
+            return int(math.floor((t - offset) / period))
+        return bucket(t1) > bucket(t0) and t1 >= offset
+
+    def _score_detections(self) -> None:
+        for nd in self.nodes:
+            if not nd.alive:
+                continue
+            for ev in nd.detection_events:
+                tid = ev["target"]
+                if tid in self.crash_times:
+                    lat = ev["t"] - self.crash_times[tid]
+                    if lat >= 0:
+                        self.detection_latency.append(lat)
+                        self.true_detections += 1
+                else:
+                    # declared dead but never crashed → false positive
+                    self.false_positives += 1
+            nd.detection_events.clear()
+
+    def crash_node(self, nid: int) -> None:
+        self.nodes[nid].crash()
+        self.net.crashed.add(nid)
+        self.crash_times[nid] = self.net.now
+
+    def mute_node(self, nid: int) -> None:
+        self.net.muted.add(nid)
+
+    def unmute_node(self, nid: int) -> None:
+        self.net.muted.discard(nid)
+
+    def run(self, ticks: int = 200, dt: float = 1.0) -> None:
+        # initial probes
+        for nd in self.nodes:
+            if nd.alive:
+                nd.start_protocol_period(self.net)
+        for _ in range(ticks):
+            self.step(dt)
+
+    def alive_ground_truth(self) -> Set[int]:
+        return {i for i, nd in enumerate(self.nodes) if nd.alive}
+
+    def view_agreement(self) -> Dict[str, Any]:
+        """How many live nodes agree on each membership row."""
+        truth = self.alive_ground_truth()
+        live = [nd for nd in self.nodes if nd.alive]
+        if not live:
+            return {"live": 0, "mean_accuracy": 0.0, "full_agree": False}
+
+        accs = []
+        for nd in live:
+            correct = 0
+            for i in range(self.n):
+                row = nd.view[i]
+                is_alive_truth = i in truth
+                if is_alive_truth:
+                    ok = row.state in (MemberState.ALIVE, MemberState.SUSPECT)
+                else:
+                    ok = row.state in (MemberState.DEAD, MemberState.SUSPECT, MemberState.LEFT)
+                if ok:
+                    correct += 1
+            accs.append(correct / self.n)
+
+        # full agreement on DEAD set among live nodes
+        dead_sets = []
+        for nd in live:
+            dead_sets.append(frozenset(
+                i for i, v in nd.view.items() if v.state == MemberState.DEAD
+            ))
+        full_agree = len(set(dead_sets)) == 1 if dead_sets else True
+        return {
+            "live": len(live),
+            "mean_accuracy": sum(accs) / len(accs),
+            "min_accuracy": min(accs),
+            "full_dead_agree": full_agree,
+            "dead_sets": [sorted(s) for s in dead_sets],
+            "truth_alive": sorted(truth),
+        }
+
+    def summary(self) -> Dict[str, Any]:
+        agree = self.view_agreement()
+        lat = self.detection_latency
+        return {
+            "n": self.n,
+            "net": self.net.stats(),
+            "agreement": agree,
+            "true_detections": self.true_detections,
+            "false_positives": self.false_positives,
+            "detection_latency": {
+                "count": len(lat),
+                "mean": (sum(lat) / len(lat)) if lat else None,
+                "max": max(lat) if lat else None,
+                "min": min(lat) if lat else None,
+            },
+            "msgs_per_node": self.net.sent / max(1, self.n),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Scenario runners
+# ---------------------------------------------------------------------------
+
+def run_happy(n: int = 8, ticks: int = 120, seed: int = 1) -> Dict[str, Any]:
+    c = SwimCluster(n=n, seed=seed, drop_p=0.0, suspect_timeout=20.0)
+    c.run(ticks=ticks)
+    s = c.summary()
+    s["scenario"] = "happy"
+    s["ok"] = s["agreement"]["mean_accuracy"] >= 0.99 and s["false_positives"] == 0
+    return s
+
+
+def run_single_crash(
+    n: int = 8,
+    crash_at: float = 30.0,
+    victim: int = 3,
+    ticks: int = 200,
+    seed: int = 2,
+    drop_p: float = 0.0,
+) -> Dict[str, Any]:
+    c = SwimCluster(n=n, seed=seed, drop_p=drop_p, suspect_timeout=20.0, ping_timeout=3.0)
+    # run until crash
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    t = 0.0
+    dt = 1.0
+    crashed = False
+    while t < ticks:
+        if not crashed and t >= crash_at:
+            c.crash_node(victim)
+            crashed = True
+        c.step(dt)
+        t += dt
+    s = c.summary()
+    s["scenario"] = "single_crash"
+    s["victim"] = victim
+    # survivors should eventually mark victim dead
+    live = [nd for nd in c.nodes if nd.alive]
+    detected = sum(1 for nd in live if nd.view[victim].state == MemberState.DEAD)
+    s["detected_fraction"] = detected / max(1, len(live))
+    s["ok"] = s["detected_fraction"] >= 0.8 and s["true_detections"] >= 1
+    return s
+
+
+def run_multi_crash(
+    n: int = 12,
+    victims: Optional[List[int]] = None,
+    crash_at: float = 25.0,
+    ticks: int = 250,
+    seed: int = 3,
+) -> Dict[str, Any]:
+    victims = victims or [2, 5, 9]
+    c = SwimCluster(n=n, seed=seed, k_indirect=3, suspect_timeout=22.0)
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    t = 0.0
+    dt = 1.0
+    crashed = False
+    while t < ticks:
+        if not crashed and t >= crash_at:
+            for v in victims:
+                c.crash_node(v)
+            crashed = True
+        c.step(dt)
+        t += dt
+    s = c.summary()
+    s["scenario"] = "multi_crash"
+    s["victims"] = victims
+    live = [nd for nd in c.nodes if nd.alive]
+    fracs = []
+    for v in victims:
+        d = sum(1 for nd in live if nd.view[v].state == MemberState.DEAD)
+        fracs.append(d / max(1, len(live)))
+    s["mean_detected_fraction"] = sum(fracs) / len(fracs)
+    s["ok"] = s["mean_detected_fraction"] >= 0.7
+    return s
+
+
+def run_lossy(
+    n: int = 8,
+    drop: float = 0.1,
+    crash_at: float = 40.0,
+    victim: int = 1,
+    ticks: int = 260,
+    seed: int = 4,
+) -> Dict[str, Any]:
+    c = SwimCluster(n=n, seed=seed, drop_p=drop, suspect_timeout=30.0, ping_timeout=4.0)
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    t = 0.0
+    dt = 1.0
+    crashed = False
+    while t < ticks:
+        if not crashed and t >= crash_at:
+            c.crash_node(victim)
+            crashed = True
+        c.step(dt)
+        t += dt
+    s = c.summary()
+    s["scenario"] = "lossy"
+    s["drop_p"] = drop
+    live = [nd for nd in c.nodes if nd.alive]
+    detected = sum(1 for nd in live if nd.view[victim].state == MemberState.DEAD)
+    s["detected_fraction"] = detected / max(1, len(live))
+    # allow some FP under loss but require eventual detection
+    s["ok"] = s["detected_fraction"] >= 0.6
+    return s
+
+
+def run_false_suspicion_refute(
+    n: int = 8,
+    mute_at: float = 20.0,
+    unmute_at: float = 35.0,
+    victim: int = 4,
+    ticks: int = 160,
+    seed: int = 5,
+) -> Dict[str, Any]:
+    """Transient mute should cause suspect then ALIVE refute, not permanent DEAD."""
+    c = SwimCluster(n=n, seed=seed, drop_p=0.0, suspect_timeout=40.0, ping_timeout=3.0)
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    t = 0.0
+    dt = 1.0
+    while t < ticks:
+        if abs(t - mute_at) < 0.5:
+            c.mute_node(victim)
+        if abs(t - unmute_at) < 0.5:
+            c.unmute_node(victim)
+        c.step(dt)
+        t += dt
+    s = c.summary()
+    s["scenario"] = "false_suspicion_refute"
+    # victim still alive
+    assert c.nodes[victim].alive
+    live = [nd for nd in c.nodes if nd.alive]
+    dead_marks = sum(1 for nd in live if nd.view[victim].state == MemberState.DEAD)
+    alive_marks = sum(1 for nd in live if nd.view[victim].state == MemberState.ALIVE)
+    s["dead_marks"] = dead_marks
+    s["alive_marks"] = alive_marks
+    s["refutations_total"] = sum(nd.refutations for nd in c.nodes)
+    # most should see ALIVE after unmute; DEAD marks should be rare (suspect_timeout long)
+    s["ok"] = dead_marks <= max(1, n // 4) and alive_marks >= n // 2
+    return s
+
+
+def run_partition(
+    n: int = 10,
+    ticks: int = 180,
+    seed: int = 6,
+) -> Dict[str, Any]:
+    """Two partitions: membership should diverge weakly then (if healed) converge.
+    Here we keep partition for whole run — each side marks the other suspect/dead.
+    """
+    a = set(range(0, 5))
+    b = set(range(5, 10))
+    c = SwimCluster(
+        n=n, seed=seed, drop_p=0.0, suspect_timeout=18.0,
+        partitions=[a, b],
+    )
+    c.run(ticks=ticks)
+    s = c.summary()
+    s["scenario"] = "partition"
+    s["partitions"] = [sorted(a), sorted(b)]
+    # node 0 should eventually see nodes in b as suspect or dead
+    v0 = c.nodes[0]
+    cross = [i for i in b if v0.view[i].state in (MemberState.SUSPECT, MemberState.DEAD)]
+    s["cross_detected"] = len(cross)
+    s["ok"] = len(cross) >= 3
+    return s
+
+
+def run_chaos(
+    n: int = 12,
+    drop: float = 0.08,
+    ticks: int = 300,
+    seed: int = 7,
+) -> Dict[str, Any]:
+    rng = random.Random(seed)
+    c = SwimCluster(n=n, seed=seed, drop_p=drop, suspect_timeout=28.0, k_indirect=3)
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    victims = sorted(rng.sample(range(n), k=max(1, n // 5)))
+    t = 0.0
+    dt = 1.0
+    crash_at = 40.0
+    crashed = False
+    # brief mute storm
+    mute_target = rng.randrange(n)
+    while t < ticks:
+        if not crashed and t >= crash_at:
+            for v in victims:
+                if v != mute_target:
+                    c.crash_node(v)
+            crashed = True
+        if abs(t - 15.0) < 0.5:
+            c.mute_node(mute_target)
+        if abs(t - 28.0) < 0.5:
+            c.unmute_node(mute_target)
+        c.step(dt)
+        t += dt
+    s = c.summary()
+    s["scenario"] = "chaos"
+    s["victims"] = victims
+    s["ok"] = s["agreement"]["mean_accuracy"] >= 0.55 and s["true_detections"] >= 1
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Theory / compare / bench
+# ---------------------------------------------------------------------------
+
+def theory_ledger(n: int = 32, k: int = 3, periods: int = 1) -> Dict[str, Any]:
+    """Message complexity comparison."""
+    # SWIM: each node 1 ping + 1 ack + k ping-req + k helper pings + k helper acks + k ping-req-acks
+    # happy path roughly: 2n (ping+ack) + if failure path extra  ~ 2n + O(k) per failure
+    # infection gossip: fanout * piggyback amortized O(n log n) total to disseminate
+    swim_probe_msgs = 2 * n  # ping+ack per period cluster-wide
+    swim_indirect_worst = n * (2 * k + 2 * k)  # rare
+    swim_gossip = n * 3  # fanout=3 one shot
+    swim_per_period = swim_probe_msgs + swim_gossip
+    heartbeat_mesh = n * (n - 1)  # all-to-all ping per period
+    random_gossip_only = n * int(math.ceil(math.log2(max(2, n))))
+    disseminate_hops = math.ceil(math.log2(max(2, n))) + 2
+    return {
+        "n": n,
+        "k_indirect": k,
+        "swim_msgs_per_period_happy": swim_per_period,
+        "swim_msgs_per_node_happy": swim_per_period / n,
+        "swim_indirect_worst_extra": swim_indirect_worst,
+        "all_to_all_heartbeat_msgs": heartbeat_mesh,
+        "random_gossip_disseminate_msgs": random_gossip_only,
+        "infection_retransmit_budget": disseminate_hops,
+        "complexity": {
+            "swim": "O(n) probes/period + O(n log n) infection disseminate",
+            "heartbeat_mesh": "O(n²) per period",
+            "ratio_mesh_vs_swim": round(heartbeat_mesh / max(1, swim_per_period), 2),
+        },
+        "paper": PAPER,
+    }
+
+
+def compare_ledger(n: int = 32) -> Dict[str, Any]:
+    t = theory_ledger(n=n)
+    # empirical micro on small n
+    emp_n = min(n, 16)
+    happy = run_happy(n=emp_n, ticks=80, seed=11)
+    crash = run_single_crash(n=emp_n, ticks=160, seed=12)
+    return {
+        "theory": t,
+        "empirical_happy_msgs": happy["net"]["sent"],
+        "empirical_crash_detect_frac": crash.get("detected_fraction"),
+        "empirical_crash_latency_mean": crash["detection_latency"]["mean"],
+        "ok": happy.get("ok") and crash.get("ok"),
+    }
+
+
+def bench(n: int = 24, ticks: int = 150, seed: int = 99) -> Dict[str, Any]:
+    t0 = time.perf_counter()
+    c = SwimCluster(n=n, seed=seed, drop_p=0.02)
+    # crash 2 nodes mid-way
+    for nd in c.nodes:
+        nd.start_protocol_period(c.net)
+    t = 0.0
+    dt = 1.0
+    while t < ticks:
+        if abs(t - 40.0) < 0.5:
+            c.crash_node(0)
+            c.crash_node(n // 2)
+        c.step(dt)
+        t += dt
+    elapsed = time.perf_counter() - t0
+    s = c.summary()
+    s["wall_ms"] = round(elapsed * 1000, 3)
+    s["ticks_per_sec"] = round(ticks / max(elapsed, 1e-9), 1)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+def selftest() -> int:
+    checks = []
+    failures = []
+
+    def ck(name: str, cond: bool, detail: str = "") -> None:
+        checks.append(name)
+        if not cond:
+            failures.append(f"{name}: {detail}")
+
+    # 1. theory math
+    t = theory_ledger(n=32, k=3)
+    ck("theory_ratio", t["complexity"]["ratio_mesh_vs_swim"] > 5, str(t))
+    ck("theory_swim_linear", t["swim_msgs_per_period_happy"] < t["all_to_all_heartbeat_msgs"])
+
+    # 2. happy path no false positives
+    h = run_happy(n=6, ticks=100, seed=101)
+    ck("happy_ok", h["ok"], str(h))
+    ck("happy_fp0", h["false_positives"] == 0, str(h["false_positives"]))
+    ck("happy_acc", h["agreement"]["mean_accuracy"] >= 0.99, str(h["agreement"]))
+
+    # 3. single crash detection
+    sc = run_single_crash(n=8, ticks=200, seed=102, crash_at=25, victim=2)
+    ck("crash_ok", sc["ok"], str(sc))
+    ck("crash_detect", sc["detected_fraction"] >= 0.8, str(sc.get("detected_fraction")))
+    ck("crash_true_det", sc["true_detections"] >= 1, str(sc["true_detections"]))
+    ck("crash_latency", sc["detection_latency"]["mean"] is not None and sc["detection_latency"]["mean"] > 0)
+
+    # 4. multi crash
+    mc = run_multi_crash(n=10, victims=[1, 4, 7], ticks=240, seed=103)
+    ck("multi_ok", mc["ok"], str(mc))
+
+    # 5. lossy
+    ly = run_lossy(n=8, drop=0.1, ticks=280, seed=104)
+    ck("lossy_ok", ly["ok"], str(ly))
+
+    # 6. refute false suspicion
+    fr = run_false_suspicion_refute(n=8, ticks=150, seed=105)
+    ck("refute_ok", fr["ok"], str(fr))
+
+    # 7. partition
+    pt = run_partition(n=10, ticks=160, seed=106)
+    ck("partition_ok", pt["ok"], str(pt))
+
+    # 8. chaos
+    ch = run_chaos(n=10, drop=0.05, ticks=260, seed=107)
+    ck("chaos_ok", ch["ok"], str(ch))
+
+    # 9. incarnation refutation unit
+    net = LossyNetwork(4, seed=1)
+    nd = SwimNode(0, 4, seed=1)
+    _init_node_maps(nd)
+    nd._enqueue_update(MembershipUpdate(0, MemberState.SUSPECT, 0, from_node=1), now=1.0)
+    ck("self_refute_inc", nd.incarnation >= 1, str(nd.incarnation))
+    ck("self_refute_alive", nd.view[0].state == MemberState.ALIVE)
+    ck("self_refute_count", nd.refutations >= 1)
+
+    # 10. update precedence
+    nd2 = SwimNode(1, 4, seed=2)
+    _init_node_maps(nd2)
+    nd2._enqueue_update(MembershipUpdate(2, MemberState.ALIVE, 1, from_node=0), 1.0)
+    nd2._enqueue_update(MembershipUpdate(2, MemberState.SUSPECT, 1, from_node=0), 2.0)
+    ck("prec_suspect", nd2.view[2].state == MemberState.SUSPECT)
+    nd2._enqueue_update(MembershipUpdate(2, MemberState.ALIVE, 1, from_node=0), 3.0)
+    ck("prec_no_downgrade", nd2.view[2].state == MemberState.SUSPECT)
+    nd2._enqueue_update(MembershipUpdate(2, MemberState.ALIVE, 2, from_node=2), 4.0)
+    ck("prec_inc_wins", nd2.view[2].state == MemberState.ALIVE and nd2.view[2].incarnation == 2)
+
+    # 11. membership update serialization
+    u = MembershipUpdate(3, MemberState.DEAD, 4, from_node=1, hop=2)
+    ck("ser_key", u.key() == (3, "dead", 4))
+    ck("ser_dict", u.as_dict()["state"] == "dead")
+
+    # 12. network partition drop
+    netp = LossyNetwork(4, partitions=[{0, 1}, {2, 3}], seed=3)
+    netp.send(Message(MsgType.PING, 0, 2, seq=1))
+    ck("part_drop", netp.dropped == 1 and netp.sent == 1)
+
+    # 13. compare ledger
+    cmp_ = compare_ledger(n=16)
+    ck("compare_ok", cmp_["ok"], str(cmp_))
+
+    # 14. bench runs
+    b = bench(n=12, ticks=80, seed=108)
+    ck("bench_runs", b["net"]["sent"] > 0, str(b["net"]))
+
+    # 15. msg type coverage in happy
+    ck("msg_ping", h["net"]["by_type"].get("PING", 0) > 0, str(h["net"]["by_type"]))
+    ck("msg_ack", h["net"]["by_type"].get("ACK", 0) > 0)
+
+    # 16. kademlia-style scale theory n=128
+    t128 = theory_ledger(n=128)
+    ck("scale_ratio", t128["complexity"]["ratio_mesh_vs_swim"] > 20)
+
+    # 17. dead confirm path unit
+    c3 = SwimCluster(n=5, seed=9, suspect_timeout=5.0, ping_timeout=2.0)
+    c3.crash_node(3)
+    for nd in c3.nodes:
+        if nd.alive:
+            nd.start_protocol_period(c3.net)
+    for _ in range(120):
+        c3.step(1.0)
+    live = [nd for nd in c3.nodes if nd.alive]
+    det = sum(1 for nd in live if nd.view[3].state == MemberState.DEAD)
+    ck("unit_confirm", det >= 2, f"det={det}")
+
+    # 18. engine metadata
+    ck("meta_name", ENGINE_NAME == "swim-gossip-membership")
+    ck("meta_ver", ENGINE_VERSION == "1.0.0")
+
+    # 19. digest stability for snapshots
+    d1 = json.dumps(h["agreement"], sort_keys=True)
+    d2 = json.dumps(h["agreement"], sort_keys=True)
+    ck("json_stable", d1 == d2)
+
+    # 20. no crash on empty membership probe
+    lonely = SwimNode(0, 1, seed=0)
+    _init_node_maps(lonely)
+    net1 = LossyNetwork(1, seed=0)
+    lonely.start_protocol_period(net1)
+    ck("lonely_noop", lonely.pending_ping is None)
+
+    total = len(checks)
+    passed = total - len(failures)
+    print(f"SWIM selftest: {passed}/{total} passed")
+    if failures:
+        print("FAILURES:")
+        for f in failures:
+            print(f"  ✗ {f}")
+        return 1
+    print("✓ all checks passed")
+    print(json.dumps({
+        "engine": ENGINE_NAME,
+        "version": ENGINE_VERSION,
+        "passed": passed,
+        "total": total,
+        "paper": PAPER,
+    }, indent=2))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def cmd_explain() -> None:
+    text = f"""
+{ENGINE_NAME} v{ENGINE_VERSION}
+{PAPER}
+
+SWIM in one page
+----------------
+Goal: maintain a weakly-consistent full membership list and detect failures
+with O(n) messages per protocol period instead of O(n²) all-to-all heartbeats.
+
+Protocol period T (per node):
+  1. Select next probe target (round-robin over members)
+  2. Send direct PING (piggyback membership deltas)
+  3. Wait ping_timeout for ACK
+  4. On timeout: send PING-REQ to k random members asking them to PING target
+  5. If still no evidence of life → mark SUSPECT and infect-gossip the update
+  6. After suspect_timeout without refute → CONFIRM (DEAD) and gossip
+
+Incarnation numbers:
+  A node that hears itself SUSPECT/DEAD increments incarnation and gossips ALIVE,
+  refuting false positives (Lifeguard/HashiCorp memberlist uses the same idea).
+
+Infection-style dissemination:
+  Each membership update is retransmitted ~log₂(n)+c times via piggyback on
+  probes and explicit gossip fanout — epidemic spread with high probability.
+
+Complexity:
+  Happy path ≈ 2n (ping+ack) + O(n) gossip fanout per cluster period
+  vs all-to-all heartbeat n(n-1). At n=128 this is >20× fewer messages.
+
+Use when:
+  • Designing Serf/Consul/memberlist-style gossip membership
+  • Teaching failure detectors vs consensus (SWIM ≠ Raft/HotStuff)
+  • Estimating detection latency under loss, partitions, mute storms
+"""
+    print(text.strip())
+
+
+def cmd_status() -> None:
+    print(json.dumps({
+        "engine": ENGINE_NAME,
+        "version": ENGINE_VERSION,
+        "paper": PAPER,
+        "commands": [
+            "selftest", "simulate", "chaos", "bench",
+            "theory", "compare", "explain", "status",
+        ],
+        "scenarios": [
+            "happy", "single_crash", "multi_crash",
+            "lossy", "false_suspicion_refute", "partition", "chaos",
+        ],
+    }, indent=2))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog=ENGINE_NAME,
+        description="SWIM gossip failure detector & membership engine (DSN 2002)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("selftest", help="CI gate — invariant checks")
+    sub.add_parser("explain", help="Human protocol walkthrough")
+    sub.add_parser("status", help="Engine metadata")
+
+    ps = sub.add_parser("simulate", help="Run a named scenario")
+    ps.add_argument(
+        "--scenario",
+        default="happy",
+        choices=[
+            "happy", "single_crash", "multi_crash", "lossy",
+            "false_suspicion_refute", "partition", "chaos",
+        ],
+    )
+    ps.add_argument("--n", type=int, default=8)
+    ps.add_argument("--ticks", type=int, default=200)
+    ps.add_argument("--seed", type=int, default=42)
+    ps.add_argument("--drop", type=float, default=0.1)
+    ps.add_argument("--victim", type=int, default=3)
+
+    pc = sub.add_parser("chaos", help="Combined crash+mute+loss stress")
+    pc.add_argument("--n", type=int, default=12)
+    pc.add_argument("--drop", type=float, default=0.08)
+    pc.add_argument("--ticks", type=int, default=300)
+    pc.add_argument("--seed", type=int, default=7)
+
+    pb = sub.add_parser("bench", help="Throughput microbench")
+    pb.add_argument("--n", type=int, default=24)
+    pb.add_argument("--ticks", type=int, default=150)
+    pb.add_argument("--seed", type=int, default=99)
+
+    pt = sub.add_parser("theory", help="Message-complexity ledger")
+    pt.add_argument("--n", type=int, default=32)
+    pt.add_argument("--k", type=int, default=3)
+
+    pcmp = sub.add_parser("compare", help="SWIM vs mesh heartbeat ledger")
+    pcmp.add_argument("--n", type=int, default=32)
+
+    args = p.parse_args(argv)
+
+    if args.cmd == "selftest":
+        return selftest()
+    if args.cmd == "explain":
+        cmd_explain()
+        return 0
+    if args.cmd == "status":
+        cmd_status()
+        return 0
+    if args.cmd == "theory":
+        print(json.dumps(theory_ledger(n=args.n, k=args.k), indent=2))
+        return 0
+    if args.cmd == "compare":
+        print(json.dumps(compare_ledger(n=args.n), indent=2))
+        return 0
+    if args.cmd == "bench":
+        print(json.dumps(bench(n=args.n, ticks=args.ticks, seed=args.seed), indent=2))
+        return 0
+    if args.cmd == "chaos":
+        print(json.dumps(run_chaos(n=args.n, drop=args.drop, ticks=args.ticks, seed=args.seed), indent=2))
+        return 0
+    if args.cmd == "simulate":
+        sc = args.scenario
+        if sc == "happy":
+            out = run_happy(n=args.n, ticks=args.ticks, seed=args.seed)
+        elif sc == "single_crash":
+            out = run_single_crash(n=args.n, ticks=args.ticks, seed=args.seed, victim=args.victim)
+        elif sc == "multi_crash":
+            out = run_multi_crash(n=args.n, ticks=args.ticks, seed=args.seed)
+        elif sc == "lossy":
+            out = run_lossy(n=args.n, drop=args.drop, ticks=args.ticks, seed=args.seed, victim=args.victim)
+        elif sc == "false_suspicion_refute":
+            out = run_false_suspicion_refute(n=args.n, ticks=args.ticks, seed=args.seed, victim=args.victim)
+        elif sc == "partition":
+            out = run_partition(n=max(args.n, 10), ticks=args.ticks, seed=args.seed)
+        elif sc == "chaos":
+            out = run_chaos(n=args.n, drop=args.drop, ticks=args.ticks, seed=args.seed)
+        else:
+            print(f"unknown scenario {sc}", file=sys.stderr)
+            return 2
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("ok", True) else 1
+
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

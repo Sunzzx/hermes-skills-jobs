@@ -1,5 +1,7 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
+- **Latest evolution**: `swim-gossip-membership` (SWIM gossip membership, DSN 2002) — 2026-11-19 13:02:14
+
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
 [![Total Capabilities](https://img.shields.io/badge/Capabilities-135-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

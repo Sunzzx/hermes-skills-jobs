@@ -1,3 +1,15 @@
+### [2026-11-19 13:02:14] - Evolved `swim-gossip-membership`
+- **Title**: SWIM Gossip Failure Detector & Membership Engine (Das et al. DSN 2002)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: SWIM weakly-consistent infection-style membership — direct+indirect ping, suspicion/confirm with incarnation refutation, epidemic piggyback, O(n) vs O(n²) mesh heartbeat, crash/mute/lossy/partition chaos — pure-Python companion to Kademlia/Raft/HotStuff.
+- **CLI**: `swim-gossip-membership {selftest,simulate,chaos,bench,theory,compare,status,explain}`
+- **Artifacts**:
+  - `bin/swim-gossip-membership`
+  - `skills/systems/swim-gossip-membership/SKILL.md`
+  - `tests/test_swim_gossip_membership.py` (17/17 passed)
+- **Verification**: selftest 33/33 exit 0; pytest 17 passed; theory n=128 mesh/SWIM ratio 25.4×.
+
 ### [2026-11-19 11:54:23] - Evolved `hotstuff-chained-bft`
 - **Title**: HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)
 - **Category**: systems

@@ -2330,5 +2330,24 @@
       "PODC2019",
       "LinearBFT"
     ]
+  },
+  {
+    "id": "swim-gossip-membership",
+    "title": "SWIM Gossip Failure Detector & Membership Engine (Das et al. DSN 2002)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "SWIM scalable weakly-consistent infection-style membership: direct+indirect ping failure detection, suspicion/confirm with incarnation refutation, epidemic piggyback gossip, O(n) vs O(n\u00b2) mesh heartbeat ledger, crash/mute/lossy/partition chaos \u2014 pure-Python companion to Kademlia/Raft/HotStuff (DSN 2002).",
+    "cli": "swim-gossip-membership",
+    "evolved_at": "2026-11-19T13:02:14.471610+05:30",
+    "tags": [
+      "DistributedSystems",
+      "SWIM",
+      "Gossip",
+      "FailureDetector",
+      "Membership",
+      "DSN2002",
+      "Epidemic",
+      "Memberlist"
+    ]
   }
 ]
