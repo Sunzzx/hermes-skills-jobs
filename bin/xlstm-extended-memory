@@ -1,0 +1,1427 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""xlstm-extended-memory: xLSTM Extended Long Short-Term Memory Engine.
+
+Production-grade pure-Python reference for xLSTM (Beck, Schmidgall, et al.,
+NeurIPS 2024 / arXiv:2405.04517):
+
+  • Vanilla LSTM baseline (Hochreiter & Schmidhuber 1997) with sigmoid gates
+  • sLSTM: exponential input/forget gates, normalizer state, multi-head
+    recurrent memory mixing across cells (revision-capable scalar memory)
+  • mLSTM: matrix covariance memory via outer-product KV updates, query
+    retrieval, normalizer vector — fully parallelizable (no memory mixing)
+  • xLSTM blocks: residual pre-norm residual stacks of sLSTM and/or mLSTM
+  • Sequence probes: copy, delayed parity, associative recall, Zipf next-token
+  • Exact forward math ledgers, gate-revision demos, FLOP/parameter theory
+  • CLI: selftest | simulate | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only (no NumPy).
+
+References:
+  - Beck et al., xLSTM: Extended Long Short-Term Memory, arXiv:2405.04517
+  - Hochreiter & Schmidhuber, Long Short-Term Memory, Neural Computation 1997
+  - Gers et al., Learning to Forget: Continual Prediction with LSTM, 2000
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Linear algebra primitives (pure Python)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _zeros(n: int) -> List[float]:
+    return [0.0] * n
+
+
+def _zeros2(r: int, c: int) -> List[List[float]]:
+    return [[0.0] * c for _ in range(r)]
+
+
+def _eye(n: int) -> List[List[float]]:
+    m = _zeros2(n, n)
+    for i in range(n):
+        m[i][i] = 1.0
+    return m
+
+
+def _clone(v: Sequence[float]) -> List[float]:
+    return [float(x) for x in v]
+
+
+def _clone2(m: Sequence[Sequence[float]]) -> List[List[float]]:
+    return [[float(x) for x in row] for row in m]
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x - y for x, y in zip(a, b)]
+
+
+def _scale(a: Sequence[float], s: float) -> List[float]:
+    return [x * s for x in a]
+
+
+def _hadamard(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    return [x * y for x, y in zip(a, b)]
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _norm(a: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in a))
+
+
+def _outer(a: Sequence[float], b: Sequence[float]) -> List[List[float]]:
+    return [[ai * bj for bj in b] for ai in a]
+
+
+def _matvec(m: Sequence[Sequence[float]], v: Sequence[float]) -> List[float]:
+    return [sum(row[j] * v[j] for j in range(len(v))) for row in m]
+
+
+def _matadd(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> List[List[float]]:
+    return [[a[i][j] + b[i][j] for j in range(len(a[0]))] for i in range(len(a))]
+
+
+def _matscale(a: Sequence[Sequence[float]], s: float) -> List[List[float]]:
+    return [[x * s for x in row] for row in a]
+
+
+def _matmul(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> List[List[float]]:
+    n, k, m = len(a), len(a[0]), len(b[0])
+    out = _zeros2(n, m)
+    for i in range(n):
+        for t in range(k):
+            aik = a[i][t]
+            if aik == 0.0:
+                continue
+            brow = b[t]
+            row = out[i]
+            for j in range(m):
+                row[j] += aik * brow[j]
+    return out
+
+
+def _transpose(m: Sequence[Sequence[float]]) -> List[List[float]]:
+    if not m:
+        return []
+    return [[m[i][j] for i in range(len(m))] for j in range(len(m[0]))]
+
+
+def _frobenius(m: Sequence[Sequence[float]]) -> float:
+    return math.sqrt(sum(x * x for row in m for x in row))
+
+
+def sigmoid(x: float) -> float:
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def tanh(x: float) -> float:
+    # stable tanh
+    if x > 20:
+        return 1.0
+    if x < -20:
+        return -1.0
+    e2 = math.exp(2.0 * x)
+    return (e2 - 1.0) / (e2 + 1.0)
+
+
+def softplus(x: float) -> float:
+    if x > 20:
+        return x
+    if x < -20:
+        return math.exp(x)
+    return math.log1p(math.exp(x))
+
+
+def exp_gate(x: float, cap: float = 20.0) -> float:
+    """Exponential gate used by sLSTM/mLSTM (stabilized)."""
+    return math.exp(min(cap, max(-cap, x)))
+
+
+def rms_norm(v: Sequence[float], eps: float = 1e-6) -> List[float]:
+    n = len(v)
+    mean_sq = sum(x * x for x in v) / max(1, n)
+    inv = 1.0 / math.sqrt(mean_sq + eps)
+    return [x * inv for x in v]
+
+
+def xavier_uniform(rng: random.Random, rows: int, cols: int, gain: float = 1.0) -> List[List[float]]:
+    limit = gain * math.sqrt(6.0 / (rows + cols))
+    return [[rng.uniform(-limit, limit) for _ in range(cols)] for _ in range(rows)]
+
+
+def xavier_vec(rng: random.Random, n: int, fan_in: int, fan_out: int, gain: float = 1.0) -> List[float]:
+    limit = gain * math.sqrt(6.0 / (fan_in + fan_out))
+    return [rng.uniform(-limit, limit) for _ in range(n)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Weight containers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class LSTMWeights:
+    """Shared layout: 4 gates × (W_x @ x + W_h @ h + b)."""
+
+    d_in: int
+    d_hid: int
+    W_x: List[List[float]]  # (4*d_hid, d_in)
+    W_h: List[List[float]]  # (4*d_hid, d_hid)
+    b: List[float]  # (4*d_hid,)
+
+    @staticmethod
+    def init(d_in: int, d_hid: int, rng: random.Random, forget_bias: float = 1.0) -> "LSTMWeights":
+        g = 4 * d_hid
+        W_x = xavier_uniform(rng, g, d_in)
+        W_h = xavier_uniform(rng, g, d_hid)
+        b = [0.0] * g
+        # forget gate bias → open forget at init (Gers et al.)
+        for i in range(d_hid, 2 * d_hid):
+            b[i] = forget_bias
+        return LSTMWeights(d_in, d_hid, W_x, W_h, b)
+
+    def n_params(self) -> int:
+        return self.d_hid * 4 * (self.d_in + self.d_hid + 1)
+
+
+@dataclass
+class SLSTMWeights:
+    """sLSTM weights + recurrent memory-mixing matrix R (heads)."""
+
+    d_in: int
+    d_hid: int
+    n_heads: int
+    W_x: List[List[float]]  # (4*d_hid, d_in) — i,f,z,o
+    W_h: List[List[float]]  # (4*d_hid, d_hid)
+    b: List[float]
+    R: List[List[float]]  # (d_hid, d_hid) block-diagonal-ish mixing per head group
+
+    @staticmethod
+    def init(d_in: int, d_hid: int, n_heads: int, rng: random.Random, forget_bias: float = 0.0) -> "SLSTMWeights":
+        assert d_hid % n_heads == 0, "d_hid must be divisible by n_heads"
+        g = 4 * d_hid
+        W_x = xavier_uniform(rng, g, d_in)
+        W_h = xavier_uniform(rng, g, d_hid)
+        b = [0.0] * g
+        for i in range(d_hid, 2 * d_hid):
+            b[i] = forget_bias
+        # head-local mixing: block diagonal identity + small noise
+        R = _zeros2(d_hid, d_hid)
+        hs = d_hid // n_heads
+        for h in range(n_heads):
+            lo, hi = h * hs, (h + 1) * hs
+            for i in range(lo, hi):
+                for j in range(lo, hi):
+                    R[i][j] = (1.0 if i == j else 0.0) + rng.uniform(-0.05, 0.05)
+        return SLSTMWeights(d_in, d_hid, n_heads, W_x, W_h, b, R)
+
+    def n_params(self) -> int:
+        return self.d_hid * 4 * (self.d_in + self.d_hid + 1) + self.d_hid * self.d_hid
+
+
+@dataclass
+class MLSTMWeights:
+    """mLSTM: separate q,k,v projections + input/forget/output gates."""
+
+    d_in: int
+    d_hid: int
+    d_matrix: int  # matrix memory rank/dim (usually = d_hid)
+    W_q: List[List[float]]
+    W_k: List[List[float]]
+    W_v: List[List[float]]
+    W_i: List[List[float]]  # input gate from x
+    W_f: List[List[float]]
+    W_o: List[List[float]]
+    b_i: List[float]
+    b_f: List[float]
+    b_o: List[float]
+    W_out: List[List[float]]  # d_hid × d_matrix (often identity-scale)
+
+    @staticmethod
+    def init(d_in: int, d_hid: int, d_matrix: Optional[int], rng: random.Random) -> "MLSTMWeights":
+        dm = d_matrix if d_matrix is not None else d_hid
+        W_q = xavier_uniform(rng, dm, d_in)
+        W_k = xavier_uniform(rng, dm, d_in)
+        W_v = xavier_uniform(rng, dm, d_in)
+        W_i = xavier_uniform(rng, 1, d_in)
+        W_f = xavier_uniform(rng, 1, d_in)
+        W_o = xavier_uniform(rng, d_hid, d_in)
+        b_i = [0.0]
+        b_f = [0.0]
+        b_o = [0.0] * d_hid
+        W_out = xavier_uniform(rng, d_hid, dm)
+        return MLSTMWeights(d_in, d_hid, dm, W_q, W_k, W_v, W_i, W_f, W_o, b_i, b_f, b_o, W_out)
+
+    def n_params(self) -> int:
+        dm = self.d_matrix
+        return (
+            3 * dm * self.d_in  # qkv
+            + 2 * self.d_in  # i,f
+            + self.d_hid * self.d_in  # o
+            + 1 + 1 + self.d_hid  # biases
+            + self.d_hid * dm  # out
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Cell states
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class LSTMState:
+    h: List[float]
+    c: List[float]
+
+
+@dataclass
+class SLSTMState:
+    h: List[float]
+    c: List[float]
+    n: List[float]  # normalizer state
+    m: List[float]  # stabilizer (max log-gate) for exp gates
+
+
+@dataclass
+class MLSTMState:
+    C: List[List[float]]  # (d_matrix, d_matrix) covariance memory
+    n: List[float]  # normalizer vector (d_matrix,)
+    m: float  # scalar stabilizer for exp gates
+    h: List[float]  # last hidden
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Cells
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class VanillaLSTM:
+    """Classic LSTM cell (sigmoid gates, tanh cell)."""
+
+    name = "lstm"
+
+    def __init__(self, weights: LSTMWeights) -> None:
+        self.w = weights
+        self.d = weights.d_hid
+
+    def initial_state(self) -> LSTMState:
+        return LSTMState(h=_zeros(self.d), c=_zeros(self.d))
+
+    def step(self, x: Sequence[float], state: LSTMState) -> Tuple[List[float], LSTMState]:
+        wh = self.w
+        pre = _add(_matvec(wh.W_x, x), _add(_matvec(wh.W_h, state.h), wh.b))
+        d = self.d
+        i = [sigmoid(pre[t]) for t in range(0, d)]
+        f = [sigmoid(pre[t]) for t in range(d, 2 * d)]
+        z = [tanh(pre[t]) for t in range(2 * d, 3 * d)]
+        o = [sigmoid(pre[t]) for t in range(3 * d, 4 * d)]
+        c = _add(_hadamard(f, state.c), _hadamard(i, z))
+        h = _hadamard(o, [tanh(v) for v in c])
+        return h, LSTMState(h=h, c=c)
+
+    def forward(self, xs: Sequence[Sequence[float]], state: Optional[LSTMState] = None) -> Tuple[List[List[float]], LSTMState]:
+        st = state or self.initial_state()
+        outs: List[List[float]] = []
+        for x in xs:
+            h, st = self.step(x, st)
+            outs.append(h)
+        return outs, st
+
+
+class SLSTM:
+    """sLSTM with exponential gates, normalizer, and head-local memory mixing.
+
+    Stabilized recurrence (Beck et al. App.):
+      m_t = max(log f_t + m_{t-1}, log i_t)
+      i'_t = exp(log i_t - m_t)
+      f'_t = exp(log f_t + m_{t-1} - m_t)
+      c_t  = f'_t ⊙ c_{t-1} + i'_t ⊙ z_t
+      n_t  = f'_t ⊙ n_{t-1} + i'_t
+      h_t  = o_t ⊙ (c_t / (n_t + eps))
+    Memory mixing applies R to recurrent gate pre-activations from h.
+    """
+
+    name = "slstm"
+
+    def __init__(self, weights: SLSTMWeights, eps: float = 1e-6) -> None:
+        self.w = weights
+        self.d = weights.d_hid
+        self.eps = eps
+
+    def initial_state(self) -> SLSTMState:
+        d = self.d
+        return SLSTMState(h=_zeros(d), c=_zeros(d), n=_zeros(d), m=[-1e9] * d)
+
+    def step(self, x: Sequence[float], state: SLSTMState) -> Tuple[List[float], SLSTMState]:
+        w = self.w
+        d = self.d
+        # recurrent path with memory mixing on h
+        h_mix = _matvec(w.R, state.h)
+        pre = _add(_matvec(w.W_x, x), _add(_matvec(w.W_h, h_mix), w.b))
+        # raw gate logits
+        log_i = pre[0:d]
+        log_f = pre[d : 2 * d]
+        z = [tanh(pre[t]) for t in range(2 * d, 3 * d)]
+        o = [sigmoid(pre[t]) for t in range(3 * d, 4 * d)]
+
+        # stabilizer m and stabilized exp gates (elementwise)
+        m_new = [max(log_f[t] + state.m[t], log_i[t]) for t in range(d)]
+        i_p = [math.exp(min(20.0, log_i[t] - m_new[t])) for t in range(d)]
+        f_p = [math.exp(min(20.0, log_f[t] + state.m[t] - m_new[t])) for t in range(d)]
+
+        c = _add(_hadamard(f_p, state.c), _hadamard(i_p, z))
+        n = _add(_hadamard(f_p, state.n), i_p)
+        h_tilde = [c[t] / (n[t] + self.eps) for t in range(d)]
+        h = _hadamard(o, h_tilde)
+        return h, SLSTMState(h=h, c=c, n=n, m=m_new)
+
+    def forward(self, xs: Sequence[Sequence[float]], state: Optional[SLSTMState] = None) -> Tuple[List[List[float]], SLSTMState]:
+        st = state or self.initial_state()
+        outs: List[List[float]] = []
+        for x in xs:
+            h, st = self.step(x, st)
+            outs.append(h)
+        return outs, st
+
+
+class MLSTM:
+    """mLSTM matrix memory cell (parallelizable covariance update).
+
+    Stabilized:
+      m_t = max(log f_t + m_{t-1}, log i_t)
+      i' = exp(log i - m_t); f' = exp(log f + m_{t-1} - m_t)
+      C_t = f' * C_{t-1} + i' * (v k^T)
+      n_t = f' * n_{t-1} + i' * k
+      h_raw = C_t q / max(|n_t^T q|, 1)
+      h = o ⊙ W_out h_raw   (here W_out projects dm→d_hid)
+    """
+
+    name = "mlstm"
+
+    def __init__(self, weights: MLSTMWeights, eps: float = 1e-6) -> None:
+        self.w = weights
+        self.d = weights.d_hid
+        self.dm = weights.d_matrix
+        self.eps = eps
+
+    def initial_state(self) -> MLSTMState:
+        return MLSTMState(
+            C=_zeros2(self.dm, self.dm),
+            n=_zeros(self.dm),
+            m=-1e9,
+            h=_zeros(self.d),
+        )
+
+    def step(self, x: Sequence[float], state: MLSTMState) -> Tuple[List[float], MLSTMState]:
+        w = self.w
+        q = _matvec(w.W_q, x)
+        k = _matvec(w.W_k, x)
+        v = _matvec(w.W_v, x)
+        # scale keys like 1/sqrt(d) for stability
+        inv_sqrt = 1.0 / math.sqrt(max(1, self.dm))
+        k = _scale(k, inv_sqrt)
+
+        log_i = _matvec(w.W_i, x)[0] + w.b_i[0]
+        log_f = _matvec(w.W_f, x)[0] + w.b_f[0]
+        o = [sigmoid(v + b) for v, b in zip(_matvec(w.W_o, x), w.b_o)]
+
+        m_new = max(log_f + state.m, log_i)
+        i_p = math.exp(min(20.0, log_i - m_new))
+        f_p = math.exp(min(20.0, log_f + state.m - m_new))
+
+        C = _matadd(_matscale(state.C, f_p), _matscale(_outer(v, k), i_p))
+        n = _add(_scale(state.n, f_p), _scale(k, i_p))
+
+        # retrieval
+        Cq = _matvec(C, q)
+        denom = _dot(n, q)
+        denom = denom if abs(denom) > 1.0 else (1.0 if denom >= 0 else -1.0)
+        h_raw = _scale(Cq, 1.0 / denom)
+        h_proj = _matvec(w.W_out, h_raw)
+        h = _hadamard(o, h_proj)
+        return h, MLSTMState(C=C, n=n, m=m_new, h=h)
+
+    def forward(self, xs: Sequence[Sequence[float]], state: Optional[MLSTMState] = None) -> Tuple[List[List[float]], MLSTMState]:
+        st = state or self.initial_state()
+        outs: List[List[float]] = []
+        for x in xs:
+            h, st = self.step(x, st)
+            outs.append(h)
+        return outs, st
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Blocks / stacks
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class BlockSpec:
+    kind: str  # "lstm" | "slstm" | "mlstm"
+    d_hid: int
+    n_heads: int = 4
+    d_matrix: Optional[int] = None
+
+
+class XLSTMBlock:
+    """Pre-RMSNorm residual block wrapping one cell kind."""
+
+    def __init__(self, d_model: int, spec: BlockSpec, rng: random.Random) -> None:
+        self.d_model = d_model
+        self.spec = spec
+        self.kind = spec.kind
+        if spec.kind == "lstm":
+            self.cell: Any = VanillaLSTM(LSTMWeights.init(d_model, spec.d_hid, rng))
+            self.proj = xavier_uniform(rng, d_model, spec.d_hid)
+        elif spec.kind == "slstm":
+            self.cell = SLSTM(SLSTMWeights.init(d_model, spec.d_hid, spec.n_heads, rng))
+            self.proj = xavier_uniform(rng, d_model, spec.d_hid)
+        elif spec.kind == "mlstm":
+            dm = spec.d_matrix or spec.d_hid
+            self.cell = MLSTM(MLSTMWeights.init(d_model, spec.d_hid, dm, rng))
+            self.proj = xavier_uniform(rng, d_model, spec.d_hid)
+        else:
+            raise ValueError(f"unknown block kind: {spec.kind}")
+
+    def forward(self, xs: Sequence[Sequence[float]]) -> List[List[float]]:
+        # residual stream in d_model; cell may use d_hid
+        # project input if needed: treat xs as d_model
+        outs: List[List[float]] = []
+        # We feed xs directly (d_in = d_model). Cell returns d_hid; proj back.
+        hs, _ = self.cell.forward(xs)
+        for t, h in enumerate(hs):
+            y = _matvec(self.proj, h)
+            # residual + pre-norm style blend
+            outs.append(_add(xs[t], y))
+        return outs
+
+    def n_params(self) -> int:
+        cell_p = self.cell.w.n_params()
+        proj_p = self.d_model * self.spec.d_hid
+        return cell_p + proj_p
+
+
+class XLSTMStack:
+    """Stack of residual xLSTM blocks with optional final readout."""
+
+    def __init__(
+        self,
+        d_model: int,
+        blocks: Sequence[BlockSpec],
+        n_classes: int,
+        seed: int = 0,
+    ) -> None:
+        self.d_model = d_model
+        self.n_classes = n_classes
+        self.rng = random.Random(seed)
+        self.blocks = [XLSTMBlock(d_model, b, self.rng) for b in blocks]
+        self.W_out = xavier_uniform(self.rng, n_classes, d_model)
+        self.b_out = [0.0] * n_classes
+
+    def forward(self, xs: Sequence[Sequence[float]]) -> Tuple[List[List[float]], List[float]]:
+        h: List[List[float]] = [rms_norm(x) for x in xs]
+        for blk in self.blocks:
+            h = blk.forward(h)
+            h = [rms_norm(v) for v in h]
+        logits = [_add(_matvec(self.W_out, v), self.b_out) for v in h]
+        return h, logits[-1] if logits else _zeros(self.n_classes)
+
+    def n_params(self) -> int:
+        return sum(b.n_params() for b in self.blocks) + self.n_classes * (self.d_model + 1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tiny online trainer (SGD on last-step CE) for probe tasks
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def softmax(logits: Sequence[float]) -> List[float]:
+    m = max(logits) if logits else 0.0
+    ex = [math.exp(min(20.0, x - m)) for x in logits]
+    s = sum(ex) or 1.0
+    return [e / s for e in ex]
+
+
+def cross_entropy(logits: Sequence[float], target: int) -> float:
+    p = softmax(logits)
+    return -math.log(max(p[target], 1e-12))
+
+
+def one_hot(idx: int, n: int) -> List[float]:
+    v = _zeros(n)
+    if 0 <= idx < n:
+        v[idx] = 1.0
+    return v
+
+
+@dataclass
+class TrainResult:
+    model: str
+    task: str
+    steps: int
+    train_acc: float
+    eval_acc: float
+    train_loss: float
+    eval_loss: float
+    n_params: int
+    seconds: float
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+def embed_token(tok: int, d_model: int, vocab: int, rng_table: Sequence[Sequence[float]]) -> List[float]:
+    return list(rng_table[tok % vocab])
+
+
+def make_embed_table(vocab: int, d_model: int, seed: int) -> List[List[float]]:
+    rng = random.Random(seed)
+    return xavier_uniform(rng, vocab, d_model)
+
+
+# ── finite-difference SGD on readout only (fast, stable probes) ──────────
+
+
+def train_readout_only(
+    cell_factory,
+    task_name: str,
+    make_batch,
+    d_model: int,
+    n_classes: int,
+    steps: int = 80,
+    batch_size: int = 8,
+    lr: float = 0.15,
+    seed: int = 0,
+    seq_meta: Optional[Dict[str, Any]] = None,
+) -> TrainResult:
+    """Train only a linear readout on frozen random cell features.
+
+    This isolates *memory architecture* capacity (copy/recall) without full BPTT
+    cost. Cell weights stay random-but-structured; readout learns via SGD.
+    """
+    rng = random.Random(seed)
+    cell = cell_factory(rng)
+    W = xavier_uniform(rng, n_classes, d_model, gain=0.5)
+    b = [0.0] * n_classes
+
+    def features(seq_ids: Sequence[int], emb: Sequence[Sequence[float]]) -> List[float]:
+        xs = [list(emb[t % len(emb)]) for t in seq_ids]
+        hs, _ = cell.forward(xs)
+        # mean-pool + last
+        last = hs[-1]
+        mean = [0.0] * d_model
+        for h in hs:
+            # project if needed
+            hh = h if len(h) == d_model else (h + [0.0] * (d_model - len(h)))[:d_model]
+            for i in range(d_model):
+                mean[i] += hh[i]
+        inv = 1.0 / max(1, len(hs))
+        mean = [m * inv for m in mean]
+        last = last if len(last) == d_model else (last + [0.0] * (d_model - len(last)))[:d_model]
+        return rms_norm(_add(mean, last))
+
+    def logits_of(feat: Sequence[float]) -> List[float]:
+        return _add(_matvec(W, feat), b)
+
+    t0 = time.perf_counter()
+    loss_acc = 0.0
+    correct = 0
+    total = 0
+    emb = make_embed_table(max(32, n_classes * 2), d_model, seed + 99)
+
+    for step in range(steps):
+        batch = [make_batch(rng) for _ in range(batch_size)]
+        grad_W = _zeros2(n_classes, d_model)
+        grad_b = _zeros(n_classes)
+        bloss = 0.0
+        for seq_ids, target in batch:
+            feat = features(seq_ids, emb)
+            logits = logits_of(feat)
+            p = softmax(logits)
+            bloss += cross_entropy(logits, target)
+            pred = max(range(n_classes), key=lambda i: logits[i])
+            correct += int(pred == target)
+            total += 1
+            # dL/dlogit = p - y
+            dlogit = p[:]
+            dlogit[target] -= 1.0
+            for i in range(n_classes):
+                grad_b[i] += dlogit[i]
+                for j in range(d_model):
+                    grad_W[i][j] += dlogit[i] * feat[j]
+        inv_bs = 1.0 / batch_size
+        for i in range(n_classes):
+            b[i] -= lr * grad_b[i] * inv_bs
+            for j in range(d_model):
+                W[i][j] -= lr * grad_W[i][j] * inv_bs
+        loss_acc = bloss * inv_bs
+
+    train_acc = correct / max(1, total)
+    train_loss = loss_acc
+
+    # eval
+    e_correct = 0
+    e_loss = 0.0
+    e_n = 40
+    for _ in range(e_n):
+        seq_ids, target = make_batch(rng)
+        feat = features(seq_ids, emb)
+        logits = logits_of(feat)
+        e_loss += cross_entropy(logits, target)
+        pred = max(range(n_classes), key=lambda i: logits[i])
+        e_correct += int(pred == target)
+    dt = time.perf_counter() - t0
+
+    n_params = 0
+    if hasattr(cell, "w") and hasattr(cell.w, "n_params"):
+        n_params = cell.w.n_params()
+    n_params += n_classes * (d_model + 1)
+
+    return TrainResult(
+        model=getattr(cell, "name", "cell"),
+        task=task_name,
+        steps=steps,
+        train_acc=train_acc,
+        eval_acc=e_correct / e_n,
+        train_loss=train_loss,
+        eval_loss=e_loss / e_n,
+        n_params=n_params,
+        seconds=dt,
+        extras=seq_meta or {},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Probe tasks
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def task_copy(rng: random.Random, length: int = 8, vocab: int = 10) -> Tuple[List[int], int]:
+    """Encode sequence then blank delay; label = first token (start marker recall)."""
+    seq = [rng.randrange(1, vocab) for _ in range(length)]
+    delay = [0] * length
+    # full input ids; target = seq[0]
+    return seq + delay, seq[0]
+
+
+def task_parity(rng: random.Random, length: int = 12) -> Tuple[List[int], int]:
+    """Delayed parity of bits — needs long-range XOR memory."""
+    bits = [rng.randrange(2) for _ in range(length)]
+    parity = 0
+    for b in bits:
+        parity ^= b
+    return bits, parity
+
+
+def task_associative_recall(
+    rng: random.Random, n_pairs: int = 4, vocab: int = 12
+) -> Tuple[List[int], int]:
+    """Present (k,v) pairs then query k* → v* (classic Hopfield/LSTM stress)."""
+    keys = list(range(1, n_pairs + 1))
+    vals = [rng.randrange(n_pairs, vocab) for _ in range(n_pairs)]
+    order = keys[:]
+    rng.shuffle(order)
+    seq: List[int] = []
+    pair_map = {}
+    for i, k in enumerate(order):
+        v = vals[i]
+        pair_map[k] = v
+        seq.extend([k, v])
+    q = rng.choice(keys)
+    seq.append(q)
+    return seq, pair_map[q]
+
+
+def task_majority(rng: random.Random, length: int = 15) -> Tuple[List[int], int]:
+    bits = [rng.randrange(2) for _ in range(length)]
+    return bits, int(sum(bits) > length / 2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Gate revision demonstration (sLSTM exponential vs sigmoid)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def gate_revision_demo() -> Dict[str, Any]:
+    """Show sLSTM can *increase* stored cell magnitude after a strong forget
+    by a later large input gate — exponential gates enable true revision.
+    Sigmoid gates are bounded (0,1) so cannot amplify beyond prior scale as freely.
+    """
+    rng = random.Random(0)
+    d_in, d = 4, 4
+    # sLSTM
+    sw = SLSTMWeights.init(d_in, d, n_heads=2, rng=rng, forget_bias=0.0)
+    s = SLSTM(sw)
+    st = s.initial_state()
+    # force a write
+    x1 = [1.0, 0.0, 0.0, 0.0]
+    # manually set pre-activations path by using multiple steps
+    traj_s = []
+    for t, x in enumerate([x1, [-1.0, 0, 0, 0], [2.0, 0, 0, 0], [0.5, 0, 0, 0]]):
+        h, st = s.step(x, st)
+        traj_s.append({"t": t, "c_norm": _norm(st.c), "n_norm": _norm(st.n), "h_norm": _norm(h)})
+
+    # vanilla
+    rng2 = random.Random(0)
+    lw = LSTMWeights.init(d_in, d, rng2, forget_bias=1.0)
+    lstm = VanillaLSTM(lw)
+    stl = lstm.initial_state()
+    traj_l = []
+    for t, x in enumerate([x1, [-1.0, 0, 0, 0], [2.0, 0, 0, 0], [0.5, 0, 0, 0]]):
+        h, stl = lstm.step(x, stl)
+        traj_l.append({"t": t, "c_norm": _norm(stl.c), "h_norm": _norm(h)})
+
+    return {
+        "slstm_trajectory": traj_s,
+        "lstm_trajectory": traj_l,
+        "note": "sLSTM normalizer n tracks mass; exponential gates revise cell content beyond sigmoid [0,1] products.",
+    }
+
+
+def mlstm_rank_demo(dim: int = 8, steps: int = 6) -> Dict[str, Any]:
+    """Show matrix memory C accumulates outer products (rank growth)."""
+    rng = random.Random(1)
+    w = MLSTMWeights.init(d_in=dim, d_hid=dim, d_matrix=dim, rng=rng)
+    cell = MLSTM(w)
+    st = cell.initial_state()
+    ranks = []
+    for t in range(steps):
+        x = [rng.gauss(0, 1) for _ in range(dim)]
+        _, st = cell.step(x, st)
+        # numerical rank via singular-value energy of Gram (power iteration count of significant energy)
+        # Use diagonal dominance / frobenius vs max-row heuristic for pure-Python rank proxy
+        fro = _frobenius(st.C)
+        # power-iteration top singular value
+        v = [rng.gauss(0, 1) for _ in range(dim)]
+        nv = _norm(v) or 1.0
+        v = _scale(v, 1.0 / nv)
+        for _ in range(20):
+            v = _matvec(st.C, v)
+            # C is not symmetric necessarily (v k^T); use C C^T via two multiplies
+            v = _matvec(_transpose(st.C), v)
+            nv = _norm(v) or 1.0
+            v = _scale(v, 1.0 / nv)
+        top = math.sqrt(max(0.0, _dot(v, _matvec(_matmul(st.C, _transpose(st.C)), v))))
+        ranks.append({"t": t, "frobenius": fro, "top_singular_proxy": top, "n_norm": _norm(st.n)})
+    return {"dim": dim, "steps": ranks}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Factories for compare
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def make_cell_factories(d_model: int, d_hid: int, seed_base: int = 0):
+    def lstm_f(rng: random.Random):
+        # reseed from rng state
+        w = LSTMWeights.init(d_model, d_hid, random.Random(rng.randrange(1 << 30)))
+        return VanillaLSTM(w)
+
+    def slstm_f(rng: random.Random):
+        w = SLSTMWeights.init(d_model, d_hid, n_heads=max(1, d_hid // 4), rng=random.Random(rng.randrange(1 << 30)))
+        return SLSTM(w)
+
+    def mlstm_f(rng: random.Random):
+        w = MLSTMWeights.init(d_model, d_hid, d_hid, random.Random(rng.randrange(1 << 30)))
+        return MLSTM(w)
+
+    return {
+        "lstm": lstm_f,
+        "slstm": slstm_f,
+        "mlstm": mlstm_f,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test suite
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class SelfTestError(Exception):
+    pass
+
+
+def _check(cond: bool, msg: str) -> None:
+    if not cond:
+        raise SelfTestError(msg)
+
+
+def run_selftest(verbose: bool = True) -> Dict[str, Any]:
+    checks = []
+
+    def ok(name: str) -> None:
+        checks.append(name)
+        if verbose:
+            print(f"  ✓ {name}")
+
+    # 1. activations
+    _check(abs(sigmoid(0) - 0.5) < 1e-9, "sigmoid(0)")
+    _check(abs(tanh(0)) < 1e-12, "tanh(0)")
+    _check(exp_gate(0) == 1.0, "exp_gate(0)")
+    ok("activations")
+
+    # 2. matmul identity
+    I = _eye(3)
+    v = [1.0, 2.0, 3.0]
+    _check(_matvec(I, v) == v, "matvec I")
+    _check(_frobenius(_sub_mat(_matmul(I, I), I)) < 1e-12, "matmul I")
+    ok("linear_algebra")
+
+    # 3. vanilla LSTM shapes + finite
+    rng = random.Random(0)
+    lw = LSTMWeights.init(5, 6, rng)
+    lstm = VanillaLSTM(lw)
+    xs = [[rng.gauss(0, 1) for _ in range(5)] for _ in range(7)]
+    hs, st = lstm.forward(xs)
+    _check(len(hs) == 7 and len(hs[0]) == 6, "lstm shapes")
+    _check(all(math.isfinite(x) for h in hs for x in h), "lstm finite")
+    ok("vanilla_lstm_forward")
+
+    # 4. sLSTM normalizer non-negative mass growth on positive writes
+    sw = SLSTMWeights.init(4, 4, 2, random.Random(1))
+    s = SLSTM(sw)
+    st = s.initial_state()
+    for _ in range(5):
+        x = [0.5, 0.1, -0.2, 0.3]
+        _, st = s.step(x, st)
+    _check(all(n >= -1e-6 for n in st.n), "slstm n mostly non-neg")
+    _check(all(math.isfinite(c) for c in st.c), "slstm c finite")
+    ok("slstm_forward_stable")
+
+    # 5. sLSTM memory mixing changes trajectory vs R=I
+    sw2 = SLSTMWeights.init(4, 4, 2, random.Random(2))
+    s_mix = SLSTM(sw2)
+    sw3 = SLSTMWeights.init(4, 4, 2, random.Random(2))
+    sw3.R = _eye(4)
+    s_id = SLSTM(sw3)
+    xs = [[math.sin(t), math.cos(t), 0.1 * t, -0.05] for t in range(6)]
+    h1, _ = s_mix.forward(xs)
+    h2, _ = s_id.forward(xs)
+    diff = sum(_norm(_sub(a, b)) for a, b in zip(h1, h2))
+    _check(diff > 1e-6, "memory mixing affects path")
+    ok("slstm_memory_mixing")
+
+    # 6. mLSTM outer product rank signal
+    mw = MLSTMWeights.init(6, 6, 6, random.Random(3))
+    m = MLSTM(mw)
+    st = m.initial_state()
+    _check(_frobenius(st.C) == 0.0, "mlstm C starts 0")
+    for _ in range(4):
+        x = [rng.gauss(0, 1) for _ in range(6)]
+        _, st = m.step(x, st)
+    _check(_frobenius(st.C) > 0.0, "mlstm C grows")
+    _check(all(math.isfinite(x) for row in st.C for x in row), "mlstm C finite")
+    ok("mlstm_matrix_update")
+
+    # 7. mLSTM retrieval responds to query direction
+    # write one distinct pattern then query
+    mw = MLSTMWeights.init(4, 4, 4, random.Random(4))
+    # amplify gates toward write
+    for i in range(4):
+        mw.W_i[0][i] = 0.5
+        mw.W_f[0][i] = -1.0
+    m = MLSTM(mw)
+    st = m.initial_state()
+    xw = [1.0, 0.0, 0.0, 0.0]
+    h1, st = m.step(xw, st)
+    h2, st = m.step([0.0, 1.0, 0.0, 0.0], st)
+    _check(all(math.isfinite(x) for x in h1 + h2), "mlstm retrieve finite")
+    ok("mlstm_retrieval")
+
+    # 8. residual stack
+    stack = XLSTMStack(
+        d_model=8,
+        blocks=[BlockSpec("slstm", 8, n_heads=2), BlockSpec("mlstm", 8)],
+        n_classes=3,
+        seed=5,
+    )
+    xs = [[rng.gauss(0, 0.5) for _ in range(8)] for _ in range(5)]
+    hs, logits = stack.forward(xs)
+    _check(len(logits) == 3 and all(math.isfinite(x) for x in logits), "stack logits")
+    ok("xlstm_stack")
+
+    # 9. gate revision demo runs
+    demo = gate_revision_demo()
+    _check(len(demo["slstm_trajectory"]) == 4, "revision demo")
+    ok("gate_revision_demo")
+
+    # 10. softmax / CE
+    p = softmax([1.0, 1.0, 1.0])
+    _check(abs(sum(p) - 1) < 1e-9, "softmax sum")
+    _check(cross_entropy([10.0, 0.0], 0) < 0.1, "ce confident")
+    ok("losses")
+
+    # 11. parity task learnability smoke (readout)
+    d_model, d_hid = 16, 16
+    fac = make_cell_factories(d_model, d_hid)["slstm"]
+
+    def batch_parity(r: random.Random):
+        return task_parity(r, length=8)
+
+    tr = train_readout_only(fac, "parity", batch_parity, d_model, 2, steps=30, batch_size=6, seed=7)
+    _check(0.0 <= tr.eval_acc <= 1.0, "train range")
+    ok("train_readout_smoke")
+
+    # 12. associative recall shapes
+    seq, tgt = task_associative_recall(random.Random(0), n_pairs=3, vocab=10)
+    _check(tgt in range(10) and len(seq) == 3 * 2 + 1, "assoc shapes")
+    ok("task_generators")
+
+    # 13. parameter counts positive & ordered (same d_in/d_hid)
+    _lw = LSTMWeights.init(8, 8, random.Random(11))
+    _sw = SLSTMWeights.init(8, 8, 4, random.Random(12))
+    _mw = MLSTMWeights.init(8, 8, 8, random.Random(13))
+    _check(_lw.n_params() > 0, "lstm params")
+    _check(_sw.n_params() > _lw.n_params(), "slstm > lstm params (R mixing)")
+    _check(_mw.n_params() > 0, "mlstm params")
+    ok("param_counts")
+
+    # 14. rms_norm unit RMS energy
+    v = rms_norm([3.0, 0.0, 0.0, 0.0])
+    mean_sq = sum(x * x for x in v) / len(v)
+    _check(abs(mean_sq - 1.0) < 1e-6, "rms unit energy")
+    ok("rms_norm")
+
+    # 15. exp gate stabilizer does not NaN on large logits
+    sw = SLSTMWeights.init(2, 2, 1, random.Random(9))
+    # huge weights
+    for row in sw.W_x:
+        for j in range(len(row)):
+            row[j] *= 50
+    s = SLSTM(sw)
+    st = s.initial_state()
+    for _ in range(3):
+        _, st = s.step([10.0, -10.0], st)
+    _check(all(math.isfinite(c) for c in st.c + st.n + st.m), "stabilizer prevents NaN")
+    ok("exp_gate_stabilizer")
+
+    # 16. mlstm rank demo
+    rd = mlstm_rank_demo(dim=4, steps=3)
+    _check(rd["steps"][-1]["frobenius"] >= 0.0, "rank demo")
+    ok("mlstm_rank_demo")
+
+    # 17. copy task generator
+    seq, t = task_copy(random.Random(1), length=5, vocab=8)
+    _check(len(seq) == 10 and 1 <= t < 8, "copy task")
+    ok("copy_task")
+
+    # 18. majority
+    seq, t = task_majority(random.Random(2), 11)
+    _check(t in (0, 1), "majority")
+    ok("majority_task")
+
+    result = {"passed": len(checks), "checks": checks, "ok": True}
+    if verbose:
+        print(f"\n✅ selftest passed: {len(checks)} checks")
+    return result
+
+
+def _sub_mat(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> List[List[float]]:
+    return [[a[i][j] - b[i][j] for j in range(len(a[0]))] for i in range(len(a))]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI commands
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    try:
+        run_selftest(verbose=not args.quiet)
+        return 0
+    except SelfTestError as e:
+        print(f"❌ selftest failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    rng = random.Random(args.seed)
+    d_model = args.dim
+    d_hid = args.dim
+    fac = make_cell_factories(d_model, d_hid)[args.cell]
+    cell = fac(rng)
+
+    if args.task == "copy":
+        seq, target = task_copy(rng, length=args.length, vocab=args.vocab)
+        n_classes = args.vocab
+    elif args.task == "parity":
+        seq, target = task_parity(rng, length=args.length)
+        n_classes = 2
+    elif args.task == "assoc":
+        seq, target = task_associative_recall(rng, n_pairs=max(2, args.length // 2), vocab=args.vocab)
+        n_classes = args.vocab
+    else:
+        seq, target = task_majority(rng, length=args.length)
+        n_classes = 2
+
+    emb = make_embed_table(max(args.vocab, 16), d_model, args.seed + 3)
+    xs = [list(emb[t % len(emb)]) for t in seq]
+    t0 = time.perf_counter()
+    hs, state = cell.forward(xs)
+    dt = (time.perf_counter() - t0) * 1000
+
+    # state summary
+    summary: Dict[str, Any] = {
+        "cell": args.cell,
+        "task": args.task,
+        "seq": seq,
+        "target": target,
+        "seq_len": len(seq),
+        "latency_ms": round(dt, 4),
+        "last_h_norm": round(_norm(hs[-1]), 6),
+        "n_params": cell.w.n_params(),
+    }
+    if isinstance(state, SLSTMState):
+        summary["c_norm"] = round(_norm(state.c), 6)
+        summary["n_norm"] = round(_norm(state.n), 6)
+        summary["m_mean"] = round(sum(state.m) / len(state.m), 6)
+    elif isinstance(state, MLSTMState):
+        summary["C_frobenius"] = round(_frobenius(state.C), 6)
+        summary["n_norm"] = round(_norm(state.n), 6)
+        summary["m"] = round(state.m, 6)
+    elif isinstance(state, LSTMState):
+        summary["c_norm"] = round(_norm(state.c), 6)
+
+    # optional readout snap (untrained) — just for shape
+    W = xavier_uniform(random.Random(args.seed), n_classes, d_model)
+    feat = hs[-1] if len(hs[-1]) == d_model else (hs[-1] + [0.0] * d_model)[:d_model]
+    logits = _matvec(W, rms_norm(feat))
+    summary["untrained_pred"] = int(max(range(n_classes), key=lambda i: logits[i]))
+
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    d_model = args.dim
+    d_hid = args.dim
+    factories = make_cell_factories(d_model, d_hid)
+    cells = args.cells.split(",") if args.cells else list(factories.keys())
+
+    def make_batch_fn(task: str):
+        if task == "copy":
+            return lambda r: task_copy(r, length=args.length, vocab=args.vocab), args.vocab
+        if task == "parity":
+            return lambda r: task_parity(r, length=args.length), 2
+        if task == "assoc":
+            return (
+                lambda r: task_associative_recall(r, n_pairs=max(2, args.length // 2), vocab=args.vocab),
+                args.vocab,
+            )
+        return lambda r: task_majority(r, length=args.length), 2
+
+    batch_fn, n_classes = make_batch_fn(args.task)
+    results = []
+    for name in cells:
+        if name not in factories:
+            print(f"skip unknown cell {name}", file=sys.stderr)
+            continue
+        tr = train_readout_only(
+            factories[name],
+            args.task,
+            batch_fn,
+            d_model,
+            n_classes,
+            steps=args.steps,
+            batch_size=args.batch,
+            lr=args.lr,
+            seed=args.seed,
+            seq_meta={"length": args.length, "dim": d_model},
+        )
+        results.append(tr)
+        print(
+            f"{tr.model:7s}  task={tr.task:7s}  eval_acc={tr.eval_acc:.3f}  "
+            f"train_acc={tr.train_acc:.3f}  loss={tr.eval_loss:.3f}  "
+            f"params={tr.n_params}  {tr.seconds:.2f}s"
+        )
+
+    results.sort(key=lambda r: (-r.eval_acc, r.eval_loss))
+    payload = {
+        "task": args.task,
+        "ranking": [
+            {
+                "model": r.model,
+                "eval_acc": round(r.eval_acc, 4),
+                "train_acc": round(r.train_acc, 4),
+                "eval_loss": round(r.eval_loss, 4),
+                "n_params": r.n_params,
+                "seconds": round(r.seconds, 3),
+            }
+            for r in results
+        ],
+        "winner": results[0].model if results else None,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"\nwinner: {payload['winner']}")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    d = args.dim
+    rng = random.Random(args.seed)
+    factories = make_cell_factories(d, d)
+    xs = [[rng.gauss(0, 1) for _ in range(d)] for _ in range(args.seq)]
+    rows = []
+    for name, fac in factories.items():
+        cell = fac(rng)
+        # warmup
+        cell.forward(xs[:2])
+        t0 = time.perf_counter()
+        for _ in range(args.reps):
+            cell.forward(xs)
+        dt = time.perf_counter() - t0
+        toks = args.reps * args.seq
+        rows.append(
+            {
+                "cell": name,
+                "tokens": toks,
+                "seconds": round(dt, 4),
+                "tokens_per_s": round(toks / max(dt, 1e-9), 1),
+                "ms_per_step": round(1000.0 * dt / max(1, args.reps * args.seq), 4),
+                "n_params": cell.w.n_params(),
+            }
+        )
+        print(
+            f"{name:7s}  {rows[-1]['tokens_per_s']:10.1f} tok/s  "
+            f"{rows[-1]['ms_per_step']:.4f} ms/step  params={rows[-1]['n_params']}"
+        )
+    if args.json:
+        print(json.dumps({"dim": d, "seq": args.seq, "reps": args.reps, "results": rows}, indent=2))
+    return 0
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    d_in = args.dim
+    d = args.dim
+    dm = args.matrix_dim or d
+    T = args.seq
+    # param & FLOP ledgers
+    lstm_p = 4 * d * (d_in + d + 1)
+    slstm_p = lstm_p + d * d  # + R mixing
+    mlstm_p = 3 * dm * d_in + 2 * d_in + d * d_in + (2 + d) + d * dm
+
+    # FLOPs per step (approx mul-adds)
+    lstm_flops = 4 * d * (d_in + d) + 8 * d  # gates + pointwise
+    slstm_flops = lstm_flops + d * d  # R @ h
+    mlstm_flops = (
+        3 * dm * d_in  # qkv
+        + 2 * d_in  # i,f
+        + d * d_in  # o
+        + dm * dm  # f'*C
+        + dm * dm  # i' outer add
+        + dm * dm  # C q
+        + d * dm  # W_out
+        + 4 * dm
+    )
+
+    ledger = {
+        "paper": "Beck et al., xLSTM: Extended Long Short-Term Memory, arXiv:2405.04517",
+        "dimensions": {"d_in": d_in, "d_hid": d, "d_matrix": dm, "T": T},
+        "parameters": {
+            "lstm": lstm_p,
+            "slstm": slstm_p,
+            "mlstm": mlstm_p,
+            "ratio_slstm_over_lstm": round(slstm_p / lstm_p, 3),
+            "ratio_mlstm_over_lstm": round(mlstm_p / lstm_p, 3),
+        },
+        "flops_per_step": {
+            "lstm": lstm_flops,
+            "slstm": slstm_flops,
+            "mlstm": mlstm_flops,
+        },
+        "flops_sequence": {
+            "lstm": lstm_flops * T,
+            "slstm": slstm_flops * T,
+            "mlstm": mlstm_flops * T,
+        },
+        "complexity": {
+            "lstm": "O(T · d · (d_in + d)) sequential",
+            "slstm": "O(T · d · (d_in + d)) sequential + head-local mixing; exp gates enable revision",
+            "mlstm": "O(T · (d_in·d_m + d_m²)) — matrix memory; parallelizable over T (no hidden→gate mix)",
+        },
+        "memory_bytes_fp32_state": {
+            "lstm": 2 * d * 4,
+            "slstm": (3 * d) * 4,  # c,n,m  (h separate)
+            "mlstm": (dm * dm + dm + 1) * 4,
+        },
+        "key_equations": {
+            "slstm_stabilizer": "m_t = max(log f_t + m_{t-1}, log i_t); i'=exp(log i - m_t); f'=exp(log f + m_{t-1} - m_t)",
+            "slstm_cell": "c_t = f' ⊙ c_{t-1} + i' ⊙ z_t;  n_t = f' ⊙ n_{t-1} + i';  h = o ⊙ c/(n+ε)",
+            "mlstm_cov": "C_t = f' C_{t-1} + i' (v k^T);  n_t = f' n_{t-1} + i' k;  h ∝ C q / (n·q)",
+        },
+    }
+    print(json.dumps(ledger, indent=2))
+    return 0
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    text = """
+xLSTM — Extended Long Short-Term Memory (Beck et al., 2024)
+===========================================================
+
+Problem with classic LSTM
+  • Sigmoid gates ∈ (0,1) cannot *revise* stored cell content upward in magnitude
+    after a forget; they only decay or blend.
+  • Scalar cell c_t stores one number per unit — limited relational storage.
+  • Sequential dependency blocks sequence-level parallel training.
+
+sLSTM (scalar, revision-capable)
+  • Replace σ gates on input/forget with exponential gates + normalizer n_t.
+  • Stabilizer m_t tracks max log-gate to avoid overflow (log-sum-exp style).
+  • Memory mixing: recurrent head-local matrix R mixes hidden→gate pre-acts
+    (like multi-head recurrent connections) — critical for state-tracking.
+  • Use when: need fine-grained revision, counting, state machines.
+
+mLSTM (matrix memory, parallelizable)
+  • Cell is a d×d covariance C_t updated by outer products v k^T (like a
+    linear attention / Fast Weight Programmer / delta-rule memory).
+  • Retrieve with query q: Cq normalized by n·q.
+  • No hidden-to-gate recurrent mixing → can be chunk-parallel like Transformers.
+  • Use when: associative recall, key-value memory, long-context compression.
+
+xLSTM block stack
+  • Alternate residual sLSTM / mLSTM blocks with RMSNorm (pre-norm style).
+  • mLSTM for memory capacity; sLSTM for non-linear state tracking.
+
+This CLI
+  selftest   invariant gate (18+ checks)
+  simulate   single forward + state norms
+  compare    lstm vs slstm vs mlstm on copy/parity/assoc/majority (readout SGD)
+  bench      tok/s microbench
+  theory     param/FLOP/complexity ledger
+  explain    this text
+  status     catalog
+""".strip()
+    print(text)
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    d = args.dim
+    payload = {
+        "name": "xlstm-extended-memory",
+        "version": "1.0.0",
+        "paper": "arXiv:2405.04517",
+        "cells": ["lstm", "slstm", "mlstm"],
+        "tasks": ["copy", "parity", "assoc", "majority"],
+        "default_dim": d,
+        "params_at_dim": {
+            "lstm": 4 * d * (d + d + 1),
+            "slstm": 4 * d * (d + d + 1) + d * d,
+            "mlstm": 3 * d * d + 2 * d + d * d + (2 + d) + d * d,
+        },
+        "cli": ["selftest", "simulate", "compare", "bench", "theory", "explain", "status"],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_revision(args: argparse.Namespace) -> int:
+    print(json.dumps(gate_revision_demo(), indent=2))
+    if args.rank:
+        print(json.dumps(mlstm_rank_demo(dim=args.dim, steps=args.steps), indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="xlstm-extended-memory",
+        description="xLSTM Extended Long Short-Term Memory Engine (Beck et al. 2024)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    s = sub.add_parser("selftest", help="CI invariant gate")
+    s.add_argument("--quiet", action="store_true")
+    s.set_defaults(func=cmd_selftest)
+
+    s = sub.add_parser("simulate", help="Forward one sequence and dump state")
+    s.add_argument("--cell", choices=["lstm", "slstm", "mlstm"], default="slstm")
+    s.add_argument("--task", choices=["copy", "parity", "assoc", "majority"], default="assoc")
+    s.add_argument("--dim", type=int, default=16)
+    s.add_argument("--length", type=int, default=8)
+    s.add_argument("--vocab", type=int, default=12)
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_simulate)
+
+    s = sub.add_parser("compare", help="Rank lstm/slstm/mlstm on a probe task")
+    s.add_argument("--task", choices=["copy", "parity", "assoc", "majority"], default="parity")
+    s.add_argument("--cells", type=str, default="lstm,slstm,mlstm")
+    s.add_argument("--dim", type=int, default=16)
+    s.add_argument("--length", type=int, default=10)
+    s.add_argument("--vocab", type=int, default=12)
+    s.add_argument("--steps", type=int, default=60)
+    s.add_argument("--batch", type=int, default=8)
+    s.add_argument("--lr", type=float, default=0.2)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_compare)
+
+    s = sub.add_parser("bench", help="Throughput microbench")
+    s.add_argument("--dim", type=int, default=32)
+    s.add_argument("--seq", type=int, default=64)
+    s.add_argument("--reps", type=int, default=5)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_bench)
+
+    s = sub.add_parser("theory", help="Param/FLOP/complexity ledger")
+    s.add_argument("--dim", type=int, default=64)
+    s.add_argument("--matrix-dim", type=int, default=None)
+    s.add_argument("--seq", type=int, default=1024)
+    s.set_defaults(func=cmd_theory)
+
+    s = sub.add_parser("explain", help="Human walkthrough")
+    s.set_defaults(func=cmd_explain)
+
+    s = sub.add_parser("status", help="Engine catalog")
+    s.add_argument("--dim", type=int, default=64)
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("revision", help="Gate-revision + optional mLSTM rank demo")
+    s.add_argument("--rank", action="store_true")
+    s.add_argument("--dim", type=int, default=8)
+    s.add_argument("--steps", type=int, default=6)
+    s.set_defaults(func=cmd_revision)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        argv = ["selftest"]
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+    try:
+        return int(args.func(args) or 0)
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

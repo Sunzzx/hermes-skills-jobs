@@ -1,17 +1,18 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-133-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-134-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (133 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (134 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)** | `research` | `xlstm-extended-memory` | Beck et al. 2024 xLSTM: exponential-gated sLSTM with normalizer + head-local memory mixing, matrix-memory mLSTM outer-product KV covariance, residual RMSNorm stacks, copy/parity/associative-recall probes vs classic LSTM (arXiv:2405.04517). | `xLSTM` `sLSTM` `mLSTM` |
 | **S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle** | `systems` | `s3fifo-tinylfu-ghost-ring` | S3-FIFO three-ring queues + W-TinyLFU Count-Min Sketch admission hybrid with ghost history, Bloom doorkeeper, and LRU/FIFO/CLOCK/ARC baselines (Yang 2023 / Einziger TOCS 2017). | `Caching` `S3FIFO` `TinyLFU` |
 | **Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine** | `systems` | `pbft-byzantine-quorum` | PBFT for n=3f+1: three-phase certificates, view-change prepared-cert recovery, checkpoints, linearizable KV, crash/mute/equivocate chaos under discrete-event networks (Castro & Liskov OSDI 1999). | `DistributedSystems` `PBFT` `ByzantineFaultTolerance` |
 | **InfLLM Training-Free Block Memory Engine** | `inference` | `infllm-block-memory-engine` | Training-free infinite-context KV: block partition, representative sketches, host offload, top-k block retrieval by query-rep cosine (arXiv:2402.04617). | `Frontier-AI` `InfLLM` `BlockMemory` `LongContext` |

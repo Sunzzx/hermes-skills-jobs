@@ -1,3 +1,8 @@
+### [2026-11-19 10:43:38] - Evolved `xlstm-extended-memory`
+- **Title**: xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)
+- **Category**: research
+- **Description**: Beck et al. 2024 xLSTM reference — exponential-gated sLSTM (normalizer + memory mixing), matrix-memory mLSTM (outer-product KV covariance), residual RMSNorm stacks, probe tasks vs classic LSTM (arXiv:2405.04517).
+
 # 📜 Hermes Evolution Changelog
 
 

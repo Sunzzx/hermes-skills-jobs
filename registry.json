@@ -1,5 +1,22 @@
 [
   {
+    "id": "xlstm-extended-memory",
+    "title": "xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)",
+    "category": "research",
+    "type": "skill+tool",
+    "description": "Beck et al. 2024 xLSTM: exponential-gated sLSTM with normalizer + head-local memory mixing, matrix-memory mLSTM with outer-product KV covariance updates, residual RMSNorm stacks, and copy/parity/associative-recall probes vs classic LSTM (arXiv:2405.04517).",
+    "cli": "xlstm-extended-memory",
+    "evolved_at": "2026-11-19T10:43:51+05:30",
+    "tags": [
+      "Frontier-AI",
+      "xLSTM",
+      "sLSTM",
+      "mLSTM",
+      "SequenceModels",
+      "LSTM"
+    ]
+  },
+  {
     "id": "s3fifo-tinylfu-ghost-ring",
     "title": "S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle",
     "category": "systems",
