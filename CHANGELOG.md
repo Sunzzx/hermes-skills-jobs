@@ -1,3 +1,15 @@
+### [2026-11-19 17:55:30] - Evolved `xor-filter-fuse-membership`
+- **Title**: XOR + Binary Fuse Filter Membership Oracle (Graf & Lemire SEA 2020 / 2022)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: Static approximate set membership — Bloom + blocked Bloom baselines, XOR 3-wise hypergraph peeling (~1.23n), Binary Fuse layered windows with adaptive capacity growth, 8/16-bit fingerprint FPR ledgers, bits/key theory, query microbench — pure-Python companion to S3-FIFO/LSM bloom paths.
+- **CLI**: `xor-filter-fuse-membership {selftest,build,query,compare,bench,theory,status,explain}`
+- **Artifacts**:
+  - `bin/xor-filter-fuse-membership`
+  - `skills/systems/xor-filter-fuse-membership/SKILL.md`
+  - `tests/test_xor_filter_fuse_membership.py` (17/17 passed)
+- **Verification**: selftest 28/28 exit 0; pytest 17 passed; compare n=800 all 6 kinds ok; xor16 beats Bloom space at p=1/65536 (19.68 vs 23.08 bpk).
+
 ### [2026-11-19 13:02:14] - Evolved `swim-gossip-membership`
 - **Title**: SWIM Gossip Failure Detector & Membership Engine (Das et al. DSN 2002)
 - **Category**: systems

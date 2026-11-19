@@ -2349,5 +2349,24 @@
       "Epidemic",
       "Memberlist"
     ]
+  },
+  {
+    "id": "xor-filter-fuse-membership",
+    "title": "XOR + Binary Fuse Filter Membership Oracle (Graf & Lemire SEA 2020 / 2022)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Static approximate set membership: classic + blocked Bloom baselines, XOR filters via 3-uniform hypergraph peeling (~1.23n fingerprints), Binary Fuse layered windows with adaptive peel, 8/16-bit FPR ledgers, bits/key theory, and query microbench \u2014 pure-Python companion to S3-FIFO/LSM bloom paths (arXiv:1912.08258).",
+    "cli": "xor-filter-fuse-membership",
+    "evolved_at": "2026-11-19T17:55:30.424909+05:30",
+    "tags": [
+      "Filters",
+      "XORFilter",
+      "BinaryFuse",
+      "BloomFilter",
+      "Membership",
+      "Systems",
+      "SEA2020",
+      "HypergraphPeeling"
+    ]
   }
 ]

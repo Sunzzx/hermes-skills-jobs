@@ -1,0 +1,1097 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""xor-filter-fuse-membership: XOR + Binary Fuse Filter Membership Oracle.
+
+Production-grade pure-Python reference for static approximate set membership:
+
+  • XOR Filter (Graf & Lemire, SEA 2020 / arXiv:1912.08258): 3-wise
+    hypergraph peeling construction; ~1.23n slots; fingerprint XOR probe.
+  • Binary Fuse Filter (Graf & Lemire 2022): layered fuse construction with
+    better cache locality and slightly lower bits/key than classic XOR.
+  • Bloom Filter baseline (Bloom 1970): classic k-hash bit array.
+  • Blocked Bloom (Putze et al.): cache-friendly single-block variant.
+  • Metrics: empirical FPR, bits/key, build time, query ns/op, peel failures.
+  • CLI: selftest | build | query | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only. Static sets only (no incremental insert after build).
+
+References:
+  - Graf & Lemire, Xor Filters: Faster and Smaller Than Bloom and Cuckoo, SEA 2020
+  - Graf & Lemire, Binary Fuse Filters: Fast and Tiny Set Membership, 2022
+  - Bloom, Space/Time Trade-offs in Hash Coding with Allowable Errors, CACM 1970
+  - Putze, Sanders, Dietzfelbinger, Cache-, Hash- and Space-Efficient Bloom Filters
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import struct
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hash primitives
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MASK64 = 0xFFFFFFFFFFFFFFFF
+_FNV_OFFSET = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+
+
+def _to_bytes(key: Any) -> bytes:
+    if isinstance(key, bytes):
+        return key
+    if isinstance(key, str):
+        return key.encode("utf-8")
+    if isinstance(key, int):
+        return struct.pack("<q", key)
+    return repr(key).encode("utf-8")
+
+
+def fnv1a64(key: Any, seed: int = 0) -> int:
+    h = (_FNV_OFFSET ^ (seed & _MASK64)) & _MASK64
+    for b in _to_bytes(key):
+        h ^= b
+        h = (h * _FNV_PRIME) & _MASK64
+    return h
+
+
+def splitmix64(x: int) -> int:
+    z = (x + 0x9E3779B97F4A7C15) & _MASK64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return (z ^ (z >> 31)) & _MASK64
+
+
+def murmur_mix64(h: int) -> int:
+    h &= _MASK64
+    h ^= h >> 33
+    h = (h * 0xFF51AFD7ED558CCD) & _MASK64
+    h ^= h >> 33
+    h = (h * 0xC4CEB9FE1A85EC53) & _MASK64
+    h ^= h >> 33
+    return h
+
+
+def fingerprint8(h: int) -> int:
+    return h & 0xFF
+
+
+def fingerprint16(h: int) -> int:
+    return h & 0xFFFF
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Bloom Filter
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class BloomFilter:
+    """Classic Bloom filter with optimal k for target FPR."""
+
+    def __init__(
+        self,
+        n: int,
+        fpr: float = 0.01,
+        seed: int = 42,
+        n_bits: Optional[int] = None,
+        n_hashes: Optional[int] = None,
+    ) -> None:
+        self.n = max(1, int(n))
+        self.fpr_target = float(fpr)
+        self.seed = int(seed)
+        if n_bits is None:
+            # m = -n ln(p) / (ln2)^2
+            m = int(math.ceil(-self.n * math.log(max(fpr, 1e-12)) / (math.log(2) ** 2)))
+            self.n_bits = max(64, m)
+        else:
+            self.n_bits = max(64, int(n_bits))
+        if n_hashes is None:
+            # k = (m/n) ln 2
+            k = int(round((self.n_bits / self.n) * math.log(2)))
+            self.n_hashes = max(1, min(16, k))
+        else:
+            self.n_hashes = max(1, min(16, int(n_hashes)))
+        self.bits = bytearray((self.n_bits + 7) // 8)
+        self.inserts = 0
+
+    def bits_per_key(self) -> float:
+        return self.n_bits / max(1, self.n)
+
+    def _positions(self, key: Any) -> List[int]:
+        h1 = fnv1a64(key, self.seed)
+        h2 = splitmix64(h1 ^ (self.seed * 0x9E3779B97F4A7C15)) | 1
+        return [((h1 + i * h2) % self.n_bits) for i in range(self.n_hashes)]
+
+    def add(self, key: Any) -> None:
+        for p in self._positions(key):
+            self.bits[p >> 3] |= 1 << (p & 7)
+        self.inserts += 1
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def might_contain(self, key: Any) -> bool:
+        for p in self._positions(key):
+            if not (self.bits[p >> 3] & (1 << (p & 7))):
+                return False
+        return True
+
+    def theory_fpr(self) -> float:
+        # (1 - e^{-kn/m})^k
+        kn_m = self.n_hashes * self.n / self.n_bits
+        return (1.0 - math.exp(-kn_m)) ** self.n_hashes
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "bloom",
+            "n": self.n,
+            "n_bits": self.n_bits,
+            "n_hashes": self.n_hashes,
+            "bits_per_key": round(self.bits_per_key(), 4),
+            "theory_fpr": self.theory_fpr(),
+            "inserts": self.inserts,
+        }
+
+
+class BlockedBloomFilter:
+    """Cache-friendly blocked Bloom: each key hashes to one 512-bit block."""
+
+    BLOCK_BITS = 512
+
+    def __init__(self, n: int, fpr: float = 0.01, seed: int = 42) -> None:
+        self.n = max(1, int(n))
+        self.fpr_target = float(fpr)
+        self.seed = int(seed)
+        # Approximate bits from classic formula, round up to whole blocks
+        m = int(math.ceil(-self.n * math.log(max(fpr, 1e-12)) / (math.log(2) ** 2)))
+        self.n_blocks = max(1, int(math.ceil(m / self.BLOCK_BITS)))
+        self.n_bits = self.n_blocks * self.BLOCK_BITS
+        # k hashes inside the block
+        k = int(round((self.BLOCK_BITS / max(1, self.n / self.n_blocks)) * math.log(2)))
+        self.n_hashes = max(1, min(16, k if k > 0 else 6))
+        self.bits = bytearray(self.n_bits // 8)
+        self.inserts = 0
+
+    def bits_per_key(self) -> float:
+        return self.n_bits / max(1, self.n)
+
+    def _locate(self, key: Any) -> Tuple[int, List[int]]:
+        h = fnv1a64(key, self.seed)
+        block = (h % self.n_blocks) * self.BLOCK_BITS
+        h2 = splitmix64(h) | 1
+        pos = [block + ((h + i * h2) % self.BLOCK_BITS) for i in range(self.n_hashes)]
+        return block, pos
+
+    def add(self, key: Any) -> None:
+        _, pos = self._locate(key)
+        for p in pos:
+            self.bits[p >> 3] |= 1 << (p & 7)
+        self.inserts += 1
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def might_contain(self, key: Any) -> bool:
+        _, pos = self._locate(key)
+        for p in pos:
+            if not (self.bits[p >> 3] & (1 << (p & 7))):
+                return False
+        return True
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "blocked-bloom",
+            "n": self.n,
+            "n_bits": self.n_bits,
+            "n_blocks": self.n_blocks,
+            "n_hashes": self.n_hashes,
+            "bits_per_key": round(self.bits_per_key(), 4),
+            "inserts": self.inserts,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XOR Filter (3-array peeling)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class XorBuildStats:
+    attempts: int = 0
+    peel_steps: int = 0
+    array_size: int = 0
+    success: bool = False
+    build_ms: float = 0.0
+
+
+class XorFilter:
+    """Classic 3-wise XOR filter with 8- or 16-bit fingerprints.
+
+    Construction: map each key to 3 slots across three equal segments of an
+    array of size ~1.23n (rounded up to multiple of 3). Build the 3-uniform
+    hypergraph and peel degree-1 vertices. Assign fingerprints so
+    fingerprint(key) == t[h0] XOR t[h1] XOR t[h2].
+    """
+
+    def __init__(
+        self,
+        keys: Sequence[Any],
+        fingerprint_bits: int = 8,
+        seed: int = 42,
+        load_factor: float = 1.23,
+        max_attempts: int = 32,
+    ) -> None:
+        if fingerprint_bits not in (8, 16):
+            raise ValueError("fingerprint_bits must be 8 or 16")
+        self.fingerprint_bits = fingerprint_bits
+        self.fp_mask = (1 << fingerprint_bits) - 1
+        self.n = len(keys)
+        self.seed0 = int(seed)
+        self.load_factor = float(load_factor)
+        self.max_attempts = max(1, int(max_attempts))
+        self.stats = XorBuildStats()
+        self.table: List[int] = []
+        self.segment_size = 0
+        self.array_size = 0
+        self.seed = self.seed0
+        if self.n == 0:
+            self.array_size = 3
+            self.segment_size = 1
+            self.table = [0, 0, 0]
+            self.stats.success = True
+            return
+        self._build(list(keys))
+
+    def bits_per_key(self) -> float:
+        return (self.array_size * self.fingerprint_bits) / max(1, self.n)
+
+    def theory_fpr(self) -> float:
+        return 1.0 / (1 << self.fingerprint_bits)
+
+    def _hash_triple(self, key: Any, seed: int) -> Tuple[int, int, int, int]:
+        h = murmur_mix64(fnv1a64(key, seed))
+        # three independent reductions into segments
+        h0 = h % self.segment_size
+        h1 = (splitmix64(h ^ 0xA0761D6478BD642F) % self.segment_size) + self.segment_size
+        h2 = (splitmix64(h ^ 0xE7037ED1A0B428DB) % self.segment_size) + 2 * self.segment_size
+        fp = (h if self.fingerprint_bits == 16 else (h >> 8)) & self.fp_mask
+        # ensure non-zero fingerprint when possible
+        if fp == 0:
+            fp = 1
+        return h0, h1, h2, fp
+
+    def _build(self, keys: List[Any]) -> None:
+        t0 = time.perf_counter()
+        capacity = max(3, int(math.ceil(self.n * self.load_factor)))
+        # round up to multiple of 3
+        while capacity % 3 != 0:
+            capacity += 1
+        self.array_size = capacity
+        self.segment_size = capacity // 3
+        self.stats.array_size = capacity
+
+        for attempt in range(self.max_attempts):
+            self.stats.attempts = attempt + 1
+            seed = (self.seed0 + attempt * 0x9E3779B9) & _MASK64
+            ok = self._try_build(keys, seed)
+            if ok:
+                self.seed = seed
+                self.stats.success = True
+                break
+        self.stats.build_ms = (time.perf_counter() - t0) * 1000.0
+        if not self.stats.success:
+            raise RuntimeError(
+                f"XOR filter peel failed after {self.max_attempts} attempts "
+                f"(n={self.n}, array={self.array_size})"
+            )
+
+    def _try_build(self, keys: List[Any], seed: int) -> bool:
+        n = len(keys)
+        size = self.array_size
+        # reverse stack of (key_index, lone_slot)
+        stack_ki: List[int] = []
+        stack_slot: List[int] = []
+        # per-slot: xor of incident key indices, and degree
+        slot_xorkey = [0] * size
+        slot_deg = [0] * size
+        # key -> 3 hashes + fp
+        h0s = [0] * n
+        h1s = [0] * n
+        h2s = [0] * n
+        fps = [0] * n
+
+        for i, key in enumerate(keys):
+            a, b, c, fp = self._hash_triple(key, seed)
+            h0s[i], h1s[i], h2s[i], fps[i] = a, b, c, fp
+            for s in (a, b, c):
+                slot_xorkey[s] ^= i
+                slot_deg[s] += 1
+
+        # queue of degree-1 slots
+        queue: List[int] = [s for s in range(size) if slot_deg[s] == 1]
+        qi = 0
+        peeled = 0
+        while qi < len(queue):
+            s = queue[qi]
+            qi += 1
+            if slot_deg[s] != 1:
+                continue
+            ki = slot_xorkey[s]
+            # record peel
+            stack_ki.append(ki)
+            stack_slot.append(s)
+            peeled += 1
+            # remove key ki from its three slots
+            for s2 in (h0s[ki], h1s[ki], h2s[ki]):
+                if slot_deg[s2] <= 0:
+                    continue
+                slot_xorkey[s2] ^= ki
+                slot_deg[s2] -= 1
+                if slot_deg[s2] == 1:
+                    queue.append(s2)
+
+        self.stats.peel_steps = peeled
+        if peeled != n:
+            return False  # cycle remains — retry with new seed
+
+        # assign fingerprints in reverse peel order
+        table = [0] * size
+        assigned = [False] * n
+        for ki, lone in zip(reversed(stack_ki), reversed(stack_slot)):
+            a, b, c, fp = h0s[ki], h1s[ki], h2s[ki], fps[ki]
+            # set lone slot so XOR of three equals fp
+            other = 0
+            for s in (a, b, c):
+                if s != lone:
+                    other ^= table[s]
+            table[lone] = (fp ^ other) & self.fp_mask
+            assigned[ki] = True
+
+        if not all(assigned):
+            return False
+        self.table = table
+        return True
+
+    def might_contain(self, key: Any) -> bool:
+        if self.n == 0:
+            return False
+        a, b, c, fp = self._hash_triple(key, self.seed)
+        got = (self.table[a] ^ self.table[b] ^ self.table[c]) & self.fp_mask
+        return got == fp
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": f"xor{self.fingerprint_bits}",
+            "n": self.n,
+            "array_size": self.array_size,
+            "segment_size": self.segment_size,
+            "fingerprint_bits": self.fingerprint_bits,
+            "bits_per_key": round(self.bits_per_key(), 4),
+            "theory_fpr": self.theory_fpr(),
+            "load_factor": self.load_factor,
+            "stats": {
+                "attempts": self.stats.attempts,
+                "peel_steps": self.stats.peel_steps,
+                "success": self.stats.success,
+                "build_ms": round(self.stats.build_ms, 3),
+            },
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Binary Fuse Filter (simplified 3-layer fuse)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class BinaryFuseFilter:
+    """Binary Fuse Filter (3-wise) — layered construction (Graf & Lemire 2022).
+
+    Keys hash into three consecutive segment windows. Peeling proceeds like
+    XOR filters but the array is slightly smaller (~1.125n for large n) and
+    hash locations are more cache-local (adjacent segments).
+    """
+
+    def __init__(
+        self,
+        keys: Sequence[Any],
+        fingerprint_bits: int = 8,
+        seed: int = 42,
+        max_attempts: int = 96,
+    ) -> None:
+        if fingerprint_bits not in (8, 16):
+            raise ValueError("fingerprint_bits must be 8 or 16")
+        self.fingerprint_bits = fingerprint_bits
+        self.fp_mask = (1 << fingerprint_bits) - 1
+        self.n = len(keys)
+        self.seed0 = int(seed)
+        self.max_attempts = max(1, int(max_attempts))
+        self.stats = XorBuildStats()
+        self.table: List[int] = []
+        self.array_size = 0
+        self.segment_length = 0
+        self.segment_count = 0
+        self.seed = self.seed0
+        if self.n == 0:
+            self.array_size = 4
+            self.segment_length = 1
+            self.segment_count = 4
+            self.table = [0] * 4
+            self.stats.success = True
+            return
+        self._build(list(keys))
+
+    def bits_per_key(self) -> float:
+        return (self.array_size * self.fingerprint_bits) / max(1, self.n)
+
+    def theory_fpr(self) -> float:
+        return 1.0 / (1 << self.fingerprint_bits)
+
+    def _size_for(self, n: int, inflate: float = 1.0) -> Tuple[int, int, int]:
+        # Conservative Binary Fuse 3 sizes. Small/mid n needs more slack because
+        # consecutive-segment windows reduce hash entropy vs classic XOR.
+        # (Paper hits ~1.125n only at multi-million scale with tuned seg lengths.)
+        if n < 100:
+            factor = 1.80
+        elif n < 500:
+            factor = 1.55
+        elif n < 2000:
+            factor = 1.42
+        elif n < 20_000:
+            factor = 1.28
+        else:
+            factor = 1.15
+        factor *= max(1.0, float(inflate))
+        capacity = max(16, int(math.ceil(n * factor)))
+        # Many short segments → more entropy on the window start index
+        rough = int(max(4, round(0.30 * math.sqrt(max(16, n)))))
+        seg_len = max(4, rough)
+        min_segments = 8
+        seg_count = max(min_segments, int(math.ceil(capacity / seg_len)))
+        # Ensure first-window domain is wide: at least n/4 candidate starts
+        while (seg_count - 2) < max(4, n // 8):
+            seg_count += 2
+        capacity = seg_count * seg_len
+        return capacity, seg_len, seg_count
+
+    def _hash_triple(self, key: Any, seed: int) -> Tuple[int, int, int, int]:
+        h = murmur_mix64(fnv1a64(key, seed))
+        max_first = max(1, self.segment_count - 2)
+        first = int(h % max_first)
+        o0 = int(splitmix64(h ^ 0xA0761D6478BD642F) % self.segment_length)
+        o1 = int(splitmix64(h ^ 0xE7037ED1A0B428DB) % self.segment_length)
+        o2 = int(splitmix64(h ^ 0x8EBC6AF09C88C6E3) % self.segment_length)
+        a = first * self.segment_length + o0
+        b = (first + 1) * self.segment_length + o1
+        c = (first + 2) * self.segment_length + o2
+        fp = (h if self.fingerprint_bits == 16 else (h >> 16)) & self.fp_mask
+        if fp == 0:
+            fp = 1
+        return a, b, c, fp
+
+    def _build(self, keys: List[Any]) -> None:
+        t0 = time.perf_counter()
+        inflate = 1.0
+        # outer loop grows capacity if peel keeps failing
+        for growth in range(8):
+            capacity, seg_len, seg_count = self._size_for(self.n, inflate=inflate)
+            self.array_size = capacity
+            self.segment_length = seg_len
+            self.segment_count = seg_count
+            self.stats.array_size = capacity
+            attempts_this = max(24, self.max_attempts // max(1, (growth // 2) + 1))
+            for _ in range(attempts_this):
+                self.stats.attempts += 1
+                seed = (self.seed0 + self.stats.attempts * 0x85EBCA77) & _MASK64
+                if self._try_build(keys, seed):
+                    self.seed = seed
+                    self.stats.success = True
+                    break
+            if self.stats.success:
+                break
+            inflate *= 1.12
+        self.stats.build_ms = (time.perf_counter() - t0) * 1000.0
+        if not self.stats.success:
+            raise RuntimeError(
+                f"Binary fuse peel failed after {self.stats.attempts} attempts "
+                f"(n={self.n}, array={self.array_size})"
+            )
+
+    def _try_build(self, keys: List[Any], seed: int) -> bool:
+        n = len(keys)
+        size = self.array_size
+        stack_ki: List[int] = []
+        stack_slot: List[int] = []
+        slot_xorkey = [0] * size
+        slot_deg = [0] * size
+        h0s = [0] * n
+        h1s = [0] * n
+        h2s = [0] * n
+        fps = [0] * n
+
+        for i, key in enumerate(keys):
+            a, b, c, fp = self._hash_triple(key, seed)
+            h0s[i], h1s[i], h2s[i], fps[i] = a, b, c, fp
+            for s in (a, b, c):
+                slot_xorkey[s] ^= i
+                slot_deg[s] += 1
+
+        queue = [s for s in range(size) if slot_deg[s] == 1]
+        qi = 0
+        peeled = 0
+        while qi < len(queue):
+            s = queue[qi]
+            qi += 1
+            if slot_deg[s] != 1:
+                continue
+            ki = slot_xorkey[s]
+            stack_ki.append(ki)
+            stack_slot.append(s)
+            peeled += 1
+            for s2 in (h0s[ki], h1s[ki], h2s[ki]):
+                if slot_deg[s2] <= 0:
+                    continue
+                slot_xorkey[s2] ^= ki
+                slot_deg[s2] -= 1
+                if slot_deg[s2] == 1:
+                    queue.append(s2)
+
+        self.stats.peel_steps = peeled
+        if peeled != n:
+            return False
+
+        table = [0] * size
+        for ki, lone in zip(reversed(stack_ki), reversed(stack_slot)):
+            a, b, c, fp = h0s[ki], h1s[ki], h2s[ki], fps[ki]
+            other = 0
+            for s in (a, b, c):
+                if s != lone:
+                    other ^= table[s]
+            table[lone] = (fp ^ other) & self.fp_mask
+
+        self.table = table
+        return True
+
+    def might_contain(self, key: Any) -> bool:
+        if self.n == 0:
+            return False
+        a, b, c, fp = self._hash_triple(key, self.seed)
+        got = (self.table[a] ^ self.table[b] ^ self.table[c]) & self.fp_mask
+        return got == fp
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": f"binary-fuse{self.fingerprint_bits}",
+            "n": self.n,
+            "array_size": self.array_size,
+            "segment_length": self.segment_length,
+            "segment_count": self.segment_count,
+            "fingerprint_bits": self.fingerprint_bits,
+            "bits_per_key": round(self.bits_per_key(), 4),
+            "theory_fpr": self.theory_fpr(),
+            "stats": {
+                "attempts": self.stats.attempts,
+                "peel_steps": self.stats.peel_steps,
+                "success": self.stats.success,
+                "build_ms": round(self.stats.build_ms, 3),
+            },
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Evaluation harness
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+FilterLike = Any
+
+
+def make_keys(n: int, seed: int = 0, prefix: str = "k") -> List[str]:
+    rng = random.Random(seed)
+    # unique keys
+    keys = [f"{prefix}{i}:{rng.getrandbits(32):08x}" for i in range(n)]
+    return keys
+
+
+def make_negatives(n: int, seed: int = 99, prefix: str = "n") -> List[str]:
+    return make_keys(n, seed=seed, prefix=prefix)
+
+
+def measure_fpr(filt: FilterLike, negatives: Sequence[Any]) -> float:
+    if not negatives:
+        return 0.0
+    hits = sum(1 for k in negatives if filt.might_contain(k))
+    return hits / len(negatives)
+
+
+def measure_recall(filt: FilterLike, positives: Sequence[Any]) -> float:
+    if not positives:
+        return 1.0
+    hits = sum(1 for k in positives if filt.might_contain(k))
+    return hits / len(positives)
+
+
+def build_filter(
+    kind: str,
+    keys: Sequence[Any],
+    fpr: float = 0.01,
+    seed: int = 42,
+) -> FilterLike:
+    kind = kind.lower().replace("_", "-")
+    if kind in ("bloom", "bloom-filter"):
+        bf = BloomFilter(n=len(keys), fpr=fpr, seed=seed)
+        bf.add_many(keys)
+        return bf
+    if kind in ("blocked-bloom", "blocked", "bloom-blocked"):
+        bf = BlockedBloomFilter(n=len(keys), fpr=fpr, seed=seed)
+        bf.add_many(keys)
+        return bf
+    if kind in ("xor8", "xor-8", "xor"):
+        return XorFilter(keys, fingerprint_bits=8, seed=seed)
+    if kind in ("xor16", "xor-16"):
+        return XorFilter(keys, fingerprint_bits=16, seed=seed)
+    if kind in ("fuse8", "binary-fuse8", "fuse", "binary-fuse"):
+        return BinaryFuseFilter(keys, fingerprint_bits=8, seed=seed)
+    if kind in ("fuse16", "binary-fuse16"):
+        return BinaryFuseFilter(keys, fingerprint_bits=16, seed=seed)
+    raise ValueError(f"unknown filter kind: {kind}")
+
+
+def evaluate(
+    kind: str,
+    n: int = 2000,
+    neg: int = 5000,
+    fpr: float = 0.01,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    keys = make_keys(n, seed=seed)
+    negatives = make_negatives(neg, seed=seed + 7)
+    t0 = time.perf_counter()
+    filt = build_filter(kind, keys, fpr=fpr, seed=seed)
+    build_ms = (time.perf_counter() - t0) * 1000.0
+    recall = measure_recall(filt, keys)
+    emp_fpr = measure_fpr(filt, negatives)
+    # query latency
+    t1 = time.perf_counter()
+    reps = 0
+    budget = 0.05  # 50ms
+    while time.perf_counter() - t1 < budget:
+        for k in keys[: min(256, len(keys))]:
+            filt.might_contain(k)
+            reps += 1
+    q_ns = ((time.perf_counter() - t1) / max(1, reps)) * 1e9
+    meta = filt.as_dict() if hasattr(filt, "as_dict") else {"kind": kind}
+    bpk = meta.get("bits_per_key")
+    if bpk is None and hasattr(filt, "bits_per_key"):
+        bpk = filt.bits_per_key()
+    return {
+        "kind": kind,
+        "n": n,
+        "negatives": neg,
+        "recall": recall,
+        "empirical_fpr": emp_fpr,
+        "bits_per_key": bpk,
+        "build_ms": round(build_ms, 3),
+        "query_ns": round(q_ns, 1),
+        "meta": meta,
+        "ok": recall == 1.0,
+    }
+
+
+def compare_all(
+    n: int = 2000,
+    neg: int = 5000,
+    fpr: float = 0.01,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    kinds = ["bloom", "blocked-bloom", "xor8", "xor16", "fuse8", "fuse16"]
+    rows = []
+    for k in kinds:
+        try:
+            rows.append(evaluate(k, n=n, neg=neg, fpr=fpr, seed=seed))
+        except Exception as e:
+            rows.append({"kind": k, "ok": False, "error": str(e)})
+    # rank by bits/key among ok with recall=1
+    ranked = sorted(
+        [r for r in rows if r.get("ok") and r.get("bits_per_key") is not None],
+        key=lambda r: (r["bits_per_key"], r["empirical_fpr"]),
+    )
+    return {
+        "n": n,
+        "negatives": neg,
+        "fpr_target": fpr,
+        "rows": rows,
+        "winner_bits": ranked[0]["kind"] if ranked else None,
+        "ranking": [r["kind"] for r in ranked],
+    }
+
+
+def theory_ledger(n: int = 10000, fpr: float = 0.01) -> Dict[str, Any]:
+    # Bloom optimal bits/key = -log2(p) / ln2 ≈ 1.44 log2(1/p)
+    bloom_bpk = -math.log2(fpr) / math.log(2)
+    bloom_k = -math.log2(fpr)
+    xor8_bpk = 1.23 * 8
+    xor16_bpk = 1.23 * 16
+    fuse8_bpk = 1.125 * 8
+    fuse16_bpk = 1.125 * 16
+    return {
+        "n": n,
+        "target_fpr": fpr,
+        "bloom": {
+            "bits_per_key_optimal": round(bloom_bpk, 4),
+            "optimal_k": round(bloom_k, 4),
+            "theory_fpr": fpr,
+            "total_bits": int(math.ceil(n * bloom_bpk)),
+        },
+        "xor8": {
+            "bits_per_key": round(xor8_bpk, 4),
+            "array_factor": 1.23,
+            "theory_fpr": 1 / 256,
+            "total_bits": int(math.ceil(n * xor8_bpk)),
+        },
+        "xor16": {
+            "bits_per_key": round(xor16_bpk, 4),
+            "array_factor": 1.23,
+            "theory_fpr": 1 / 65536,
+            "total_bits": int(math.ceil(n * xor16_bpk)),
+        },
+        "fuse8": {
+            "bits_per_key": round(fuse8_bpk, 4),
+            "array_factor": 1.125,
+            "theory_fpr": 1 / 256,
+            "total_bits": int(math.ceil(n * fuse8_bpk)),
+        },
+        "fuse16": {
+            "bits_per_key": round(fuse16_bpk, 4),
+            "array_factor": 1.125,
+            "theory_fpr": 1 / 65536,
+            "total_bits": int(math.ceil(n * fuse16_bpk)),
+        },
+        "savings_vs_bloom_at_p01": {
+            "xor8_ratio": round(xor8_bpk / bloom_bpk, 4),
+            "fuse8_ratio": round(fuse8_bpk / bloom_bpk, 4),
+            "note": "At p=1%, Bloom needs ~9.6 bpk; XOR8 ~9.84 bpk (similar space, faster); "
+            "at lower FPR XOR16/Fuse16 win hard on space vs Bloom.",
+        },
+        "complexity": {
+            "bloom_query": "O(k) random bit probes",
+            "xor_query": "O(1) three fingerprint XORs",
+            "fuse_query": "O(1) three fingerprint XORs (cache-local)",
+            "build": "O(n) expected peel for sparse 3-uniform hypergraph",
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test (CI gate)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def selftest(verbose: bool = True) -> int:
+    checks: List[Tuple[str, bool, str]] = []
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        checks.append((name, bool(cond), detail))
+        if verbose:
+            mark = "✓" if cond else "✗"
+            print(f"  {mark} {name}" + (f" — {detail}" if detail else ""))
+
+    # 1. empty XOR
+    xf = XorFilter([], fingerprint_bits=8)
+    check("empty_xor_no_false", not xf.might_contain("x"), "empty rejects")
+
+    # 2. tiny XOR perfect recall
+    keys = make_keys(50, seed=1)
+    xf = XorFilter(keys, fingerprint_bits=8, seed=7)
+    check("xor8_build_ok", xf.stats.success, f"attempts={xf.stats.attempts}")
+    check("xor8_recall", measure_recall(xf, keys) == 1.0, "all members found")
+
+    # 3. XOR FPR roughly near 1/256
+    neg = make_negatives(4000, seed=11)
+    fpr = measure_fpr(xf, neg)
+    check("xor8_fpr_band", 0.0 <= fpr <= 0.03, f"fpr={fpr:.4f}")
+
+    # 4. XOR16 tighter FPR
+    xf16 = XorFilter(keys, fingerprint_bits=16, seed=7)
+    fpr16 = measure_fpr(xf16, neg)
+    check("xor16_recall", measure_recall(xf16, keys) == 1.0)
+    check("xor16_fpr_tighter", fpr16 <= fpr + 0.005, f"fpr16={fpr16:.5f} vs fpr8={fpr:.5f}")
+
+    # 5. Binary fuse
+    bf = BinaryFuseFilter(keys, fingerprint_bits=8, seed=9)
+    check("fuse8_build_ok", bf.stats.success, f"attempts={bf.stats.attempts}")
+    check("fuse8_recall", measure_recall(bf, keys) == 1.0)
+    fpr_f = measure_fpr(bf, neg)
+    check("fuse8_fpr_band", 0.0 <= fpr_f <= 0.03, f"fpr={fpr_f:.4f}")
+
+    # 6. Bloom baseline
+    bloom = BloomFilter(n=len(keys), fpr=0.01, seed=3)
+    bloom.add_many(keys)
+    check("bloom_recall", measure_recall(bloom, keys) == 1.0)
+    bfpr = measure_fpr(bloom, neg)
+    check("bloom_fpr_near_target", bfpr < 0.05, f"fpr={bfpr:.4f}")
+
+    # 7. Blocked bloom
+    bb = BlockedBloomFilter(n=len(keys), fpr=0.01, seed=3)
+    bb.add_many(keys)
+    check("blocked_bloom_recall", measure_recall(bb, keys) == 1.0)
+
+    # 8. bits/key ledger sanity
+    check("xor8_bpk_range", 8.0 <= xf.bits_per_key() <= 12.0, f"bpk={xf.bits_per_key():.3f}")
+    check(
+        "fuse8_bpk_range",
+        8.0 <= bf.bits_per_key() <= 20.0,
+        f"bpk={bf.bits_per_key():.3f}",
+    )
+
+    # 9. theory ledger
+    th = theory_ledger(n=10000, fpr=0.01)
+    check("theory_bloom_bpk", 9.0 < th["bloom"]["bits_per_key_optimal"] < 10.5)
+    check("theory_xor8_bpk", abs(th["xor8"]["bits_per_key"] - 9.84) < 0.2)
+
+    # 10. larger peel
+    big = make_keys(1500, seed=21)
+    xf_big = XorFilter(big, fingerprint_bits=8, seed=5, max_attempts=48)
+    check("xor_large_peel", xf_big.stats.success and measure_recall(xf_big, big) == 1.0,
+          f"n=1500 attempts={xf_big.stats.attempts}")
+
+    fuse_big = BinaryFuseFilter(big, fingerprint_bits=8, seed=5, max_attempts=48)
+    check(
+        "fuse_large_peel",
+        fuse_big.stats.success and measure_recall(fuse_big, big) == 1.0,
+        f"n=1500 attempts={fuse_big.stats.attempts}",
+    )
+
+    # 11. evaluate helper
+    ev = evaluate("xor8", n=400, neg=2000, seed=13)
+    check("evaluate_xor8_ok", ev["ok"] and ev["empirical_fpr"] < 0.03, str(ev["empirical_fpr"]))
+
+    # 12. compare ranks something
+    cmp = compare_all(n=600, neg=2500, seed=17)
+    check("compare_has_winner", cmp["winner_bits"] is not None, str(cmp["ranking"][:3]))
+    check("compare_all_ok", all(r.get("ok") for r in cmp["rows"] if "error" not in r))
+
+    # 13. fingerprint identity: member always matches
+    for k in keys[:10]:
+        if not xf.might_contain(k):
+            check("member_probe", False, k)
+            break
+    else:
+        check("member_probe", True, "10/10")
+
+    # 14. hash stability
+    check("fnv_stable", fnv1a64("hermes", 0) == fnv1a64("hermes", 0))
+    check("splitmix_nonzero", splitmix64(1) != 0)
+
+    # 15. duplicate-tolerant build (duplicate keys still peel if multiset treated as list
+    # — XOR filters assume unique keys; duplicates break peel. Verify we document via unique.)
+    uniq = list(dict.fromkeys(keys + keys[:10]))
+    xf_u = XorFilter(uniq, fingerprint_bits=8, seed=2)
+    check("unique_keys_build", xf_u.stats.success)
+
+    # 16. bits comparison at low FPR — xor16 should beat bloom on space for p~1/65536
+    n = 800
+    keys2 = make_keys(n, seed=33)
+    bloom_tight = BloomFilter(n=n, fpr=1 / 65536, seed=1)
+    bloom_tight.add_many(keys2)
+    xor_tight = XorFilter(keys2, fingerprint_bits=16, seed=1)
+    check(
+        "xor16_space_vs_bloom_low_fpr",
+        xor_tight.bits_per_key() < bloom_tight.bits_per_key(),
+        f"xor={xor_tight.bits_per_key():.2f} bloom={bloom_tight.bits_per_key():.2f}",
+    )
+
+    # 17. blocked bloom dict
+    check("blocked_dict_kind", bb.as_dict()["kind"] == "blocked-bloom")
+
+    # 18. fuse16
+    f16 = BinaryFuseFilter(keys, fingerprint_bits=16, seed=4)
+    check("fuse16_recall", measure_recall(f16, keys) == 1.0)
+
+    passed = sum(1 for _, c, _ in checks if c)
+    total = len(checks)
+    if verbose:
+        print(f"\nselftest: {passed}/{total} passed")
+    return 0 if passed == total else 1
+
+
+def cmd_explain() -> None:
+    print(
+        """
+XOR / Binary Fuse Filters — membership without false negatives
+==============================================================
+
+Problem
+  Represent a static set S so membership tests never miss a true member
+  (no false negatives) while allowing a small false-positive rate. Bloom
+  filters do this with k independent bit probes. XOR filters replace the
+  bit array with a compact fingerprint table filled by hypergraph peeling.
+
+XOR Filter (Graf & Lemire 2020)
+  1. Allocate ~1.23|S| fingerprint slots in 3 equal segments.
+  2. Hash each key to one slot per segment + an 8/16-bit fingerprint.
+  3. Treat keys as 3-uniform hyperedges. Peel degree-1 vertices: the lone
+     slot of a degree-1 edge is forced by fingerprint XOR of the other two.
+  4. Query: fingerprint ?= t[h0] XOR t[h1] XOR t[h2]. Exactly three XORs.
+
+Binary Fuse Filter (2022)
+  Same peel math, but slots live in consecutive segment windows so the three
+  probes are cache-local. Array factor drops toward ~1.125n for large sets.
+
+When to prefer
+  • Static sets (build once) — dictionaries, URL allow-lists, frozen indexes
+  • Faster queries than Bloom (3 XORs vs k bit tests)
+  • Space: at low target FPR, XOR16/Fuse16 crush Bloom (~20 bpk vs ~32+ bpk)
+
+When not to
+  • Dynamic inserts/deletes → use Cuckoo filters or Bloom with rebuild
+  • Adversarial keys without a keyed hash → add a secret seed
+""".strip()
+    )
+
+
+def cmd_status() -> None:
+    print(
+        json.dumps(
+            {
+                "name": "xor-filter-fuse-membership",
+                "filters": [
+                    "bloom",
+                    "blocked-bloom",
+                    "xor8",
+                    "xor16",
+                    "fuse8",
+                    "fuse16",
+                ],
+                "commands": [
+                    "selftest",
+                    "build",
+                    "query",
+                    "compare",
+                    "bench",
+                    "theory",
+                    "explain",
+                    "status",
+                ],
+                "stdlib_only": True,
+                "references": [
+                    "arXiv:1912.08258",
+                    "Graf & Lemire Binary Fuse Filters 2022",
+                    "Bloom CACM 1970",
+                ],
+            },
+            indent=2,
+        )
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="xor-filter-fuse-membership",
+        description="XOR + Binary Fuse filter membership oracle (Graf & Lemire)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("selftest", help="CI invariant gate")
+    sp.add_argument("--quiet", action="store_true")
+
+    sp = sub.add_parser("build", help="Build a filter and print metadata JSON")
+    sp.add_argument("--kind", default="xor8", help="bloom|blocked-bloom|xor8|xor16|fuse8|fuse16")
+    sp.add_argument("--n", type=int, default=2000)
+    sp.add_argument("--fpr", type=float, default=0.01)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("query", help="Build then probe one key (demo)")
+    sp.add_argument("--kind", default="xor8")
+    sp.add_argument("--n", type=int, default=500)
+    sp.add_argument("--key", default=None, help="Key to probe (default: first member)")
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("compare", help="Rank all filter kinds on one workload")
+    sp.add_argument("--n", type=int, default=2000)
+    sp.add_argument("--neg", type=int, default=5000)
+    sp.add_argument("--fpr", type=float, default=0.01)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("bench", help="Throughput + FPR microbench")
+    sp.add_argument("--kind", default="xor8")
+    sp.add_argument("--n", type=int, default=5000)
+    sp.add_argument("--neg", type=int, default=10000)
+    sp.add_argument("--fpr", type=float, default=0.01)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("theory", help="Bits/key and complexity ledger")
+    sp.add_argument("--n", type=int, default=10000)
+    sp.add_argument("--fpr", type=float, default=0.01)
+
+    sub.add_parser("explain", help="Human protocol walkthrough")
+    sub.add_parser("status", help="Catalog JSON")
+
+    args = p.parse_args(list(argv) if argv is not None else None)
+
+    if args.cmd == "selftest":
+        return selftest(verbose=not args.quiet)
+
+    if args.cmd == "build":
+        keys = make_keys(args.n, seed=args.seed)
+        t0 = time.perf_counter()
+        filt = build_filter(args.kind, keys, fpr=args.fpr, seed=args.seed)
+        ms = (time.perf_counter() - t0) * 1000.0
+        out = filt.as_dict() if hasattr(filt, "as_dict") else {"kind": args.kind}
+        out["build_ms_wall"] = round(ms, 3)
+        out["recall_check"] = measure_recall(filt, keys)
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("recall_check", 1.0) == 1.0 else 1
+
+    if args.cmd == "query":
+        keys = make_keys(args.n, seed=args.seed)
+        filt = build_filter(args.kind, keys, seed=args.seed)
+        key = args.key if args.key is not None else keys[0]
+        print(
+            json.dumps(
+                {
+                    "kind": args.kind,
+                    "key": key,
+                    "might_contain": filt.might_contain(key),
+                    "is_member_expected": key in set(keys),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.cmd == "compare":
+        out = compare_all(n=args.n, neg=args.neg, fpr=args.fpr, seed=args.seed)
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("winner_bits") else 1
+
+    if args.cmd == "bench":
+        out = evaluate(args.kind, n=args.n, neg=args.neg, fpr=args.fpr, seed=args.seed)
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("ok") else 1
+
+    if args.cmd == "theory":
+        print(json.dumps(theory_ledger(n=args.n, fpr=args.fpr), indent=2))
+        return 0
+
+    if args.cmd == "explain":
+        cmd_explain()
+        return 0
+
+    if args.cmd == "status":
+        cmd_status()
+        return 0
+
+    p.error(f"unknown command {args.cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

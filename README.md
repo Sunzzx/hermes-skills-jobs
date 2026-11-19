@@ -1,16 +1,16 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
-- **Latest evolution**: `swim-gossip-membership` (SWIM gossip membership, DSN 2002) — 2026-11-19 13:02:14
+- **Latest evolution**: `xor-filter-fuse-membership` (XOR + Binary Fuse filters, Graf & Lemire) — 2026-11-19 17:55:30
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-135-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-137-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (135 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (137 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -182,4 +182,4 @@ curdkv-value-cur-engine compare --seq-len 320 --budget-ratio 0.22
 
 ---
 
-*Last Evolved: 2026-11-19 06:33:29*
+*Last Evolved: 2026-11-19 17:55:30*
