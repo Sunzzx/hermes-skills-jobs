@@ -8,7 +8,7 @@ platforms: [macos, linux, windows]
 metadata:
   hermes:
     tags: [DistributedSystems, PBFT, ByzantineFaultTolerance, Consensus, Quorum]
-    related_skills: [raft-consensus, zksnark-prover, crdt-sync]
+    related_skills: [raft-consensus, hotstuff-chained-bft, zksnark-prover, crdt-sync]
 ---
 
 # Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine

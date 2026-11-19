@@ -1,3 +1,15 @@
+### [2026-11-19 11:54:23] - Evolved `hotstuff-chained-bft`
+- **Title**: HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: Chained HotStuff with generic QCs, 3-chain commit, locked-QC safe-node voting, linear O(n) leader aggregation, pacemaker NEW-VIEW, linearizable KV, crash/Byzantine-fork/lossy chaos — PBFT companion with linearity & responsiveness.
+- **CLI**: `hotstuff-chained-bft {selftest,simulate,chaos,bench,compare,theory,status,explain}`
+- **Artifacts**:
+  - `bin/hotstuff-chained-bft`
+  - `skills/systems/hotstuff-chained-bft/SKILL.md`
+  - `tests/test_hotstuff_chained_bft.py` (15/15 passed)
+- **Verification**: selftest 37/37 exit 0; pytest 15 passed; compare n=7 PBFT/HS msg ratio 5.0×.
+
 ### [2026-11-19 10:43:38] - Evolved `xlstm-extended-memory`
 - **Title**: xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)
 - **Category**: research

@@ -2311,5 +2311,24 @@
       "OSDI1999",
       "ViewChange"
     ]
+  },
+  {
+    "id": "hotstuff-chained-bft",
+    "title": "HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Chained HotStuff with generic Quorum Certificates, 3-chain commit, locked-QC safe-node voting, linear O(n) leader-aggregated messaging, pacemaker NEW-VIEW recovery, linearizable KV SM, and crash/Byzantine-fork/lossy chaos \u2014 pure-Python companion to PBFT with linearity and responsiveness (PODC 2019 / arXiv:1803.05069).",
+    "cli": "hotstuff-chained-bft",
+    "evolved_at": "2026-11-19T11:54:23.199149+05:30",
+    "tags": [
+      "DistributedSystems",
+      "HotStuff",
+      "BFT",
+      "ByzantineFaultTolerance",
+      "Consensus",
+      "QuorumCertificate",
+      "PODC2019",
+      "LinearBFT"
+    ]
   }
 ]
