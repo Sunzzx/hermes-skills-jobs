@@ -1,17 +1,18 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-131-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-132-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (130 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (132 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine** | `systems` | `pbft-byzantine-quorum` | PBFT for n=3f+1: three-phase certificates, view-change prepared-cert recovery, checkpoints, linearizable KV, crash/mute/equivocate chaos under discrete-event networks (Castro & Liskov OSDI 1999). | `DistributedSystems` `PBFT` `ByzantineFaultTolerance` |
 | **InfLLM Training-Free Block Memory Engine** | `inference` | `infllm-block-memory-engine` | Training-free infinite-context KV: block partition, representative sketches, host offload, top-k block retrieval by query-rep cosine (arXiv:2402.04617). | `Frontier-AI` `InfLLM` `BlockMemory` `LongContext` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
@@ -176,4 +177,4 @@ curdkv-value-cur-engine compare --seq-len 320 --budget-ratio 0.22
 
 ---
 
-*Last Evolved: 2026-11-19 01:28:54*
+*Last Evolved: 2026-11-19 06:33:29*

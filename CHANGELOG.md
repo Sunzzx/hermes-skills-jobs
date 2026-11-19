@@ -1,6 +1,17 @@
 # 📜 Hermes Evolution Changelog
 
 
+### [2026-11-19 06:33:29] - Evolved `pbft-byzantine-quorum`
+- **Title**: Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine (Castro & Liskov OSDI 1999)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: PBFT for n=3f+1 replicas — PRE-PREPARE/PREPARE/COMMIT 2f+1 certificates, view-change with prepared-certificate recovery, stable checkpoints, linearizable KV SM, and Byzantine fault models (crash, mute, equivocate) on a discrete-event lossy network simulator.
+- **CLI**: `pbft-byzantine-quorum {selftest,simulate,chaos,bench,theory,status,explain}`
+- **Artifacts**:
+  - `bin/pbft-byzantine-quorum`
+  - `skills/systems/pbft-byzantine-quorum/SKILL.md`
+  - `tests/test_pbft_byzantine_quorum.py`
+- **Verification**: selftest 26/26 exit 0; pytest suite; happy/primary_crash/equivocation agreement=true.
 
 ### [2026-11-19 03:48:14] - Evolved `sph-hydrodynamics`
 - **Title**: SPH 2D Smoothed Particle Hydrodynamics Fluid Engine (Monaghan WCSPH)

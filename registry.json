@@ -2259,5 +2259,23 @@
       "Monaghan",
       "TaitEOS"
     ]
+  },
+  {
+    "id": "pbft-byzantine-quorum",
+    "title": "Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine (Castro & Liskov OSDI 1999)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "PBFT for n=3f+1: PRE-PREPARE/PREPARE/COMMIT certificates, view-change with prepared-cert recovery, checkpoints, linearizable KV, and chaos models (crash, mute, equivocate) under discrete-event lossy networks \u2014 Byzantine complement to Raft.",
+    "cli": "pbft-byzantine-quorum",
+    "evolved_at": "2026-11-19T06:33:29.071555",
+    "tags": [
+      "DistributedSystems",
+      "PBFT",
+      "ByzantineFaultTolerance",
+      "Consensus",
+      "Quorum",
+      "OSDI1999",
+      "ViewChange"
+    ]
   }
 ]
