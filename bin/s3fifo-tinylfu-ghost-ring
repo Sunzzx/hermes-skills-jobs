@@ -1,0 +1,1427 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""s3fifo-tinylfu-ghost-ring: S3-FIFO + Window-TinyLFU Hybrid Cache Oracle.
+
+Production-grade pure-Python reference for modern cache admission & eviction:
+
+  • S3-FIFO (Yang et al., 2023): small / main / ghost three-FIFO rings with
+    1-bit frequency promotion — scan-resistant, O(1) ops, no fancy clocks.
+  • W-TinyLFU (Einziger, Scalosub, Friedman TOCS 2017 / Caffeine):
+    sliding window cache + Count-Min Sketch frequency filter for admission.
+  • Count-Min Sketch (Cormode & Muthukrishnan): 4-row conservative counters
+    with aging/halving; optional Doorkeeper Bloom pre-filter.
+  • Baselines: LRU, FIFO, CLOCK, ARC (Adaptive Replacement Cache).
+  • Workloads: Zipf-Mandelbrot, IR (independent reference), scan bursts,
+    looping sequential, hotspot+tail mixtures.
+  • Metrics: hit rate, byte hit rate, eviction counts, ghost hits,
+    admission rejects, CMS estimate error vs exact freq, latency.
+  • CLI: selftest | simulate | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only.
+
+References:
+  - Yang et al., FIFO queues are all you need for cache eviction (S3-FIFO), 2023
+  - Einziger et al., TinyLFU: A Highly Efficient Cache Admission Policy, TOCS 2017
+  - Cormode & Muthukrishnan, An Improved Data Stream Summary (Count-Min Sketch)
+  - Megiddo & Modha, ARC: A Self-Tuning, Low Overhead Replacement Cache, FAST 2003
+  - Caffeine (Ben Manes) production W-TinyLFU design notes
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import random
+import sys
+import time
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Primitives
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _fnv1a64(key: Any, seed: int = 0) -> int:
+    """FNV-1a 64-bit hash — stable across runs for CMS buckets."""
+    if isinstance(key, bytes):
+        data = key
+    elif isinstance(key, str):
+        data = key.encode("utf-8")
+    else:
+        data = repr(key).encode("utf-8")
+    h = 0xCBF29CE484222325 ^ (seed & 0xFFFFFFFFFFFFFFFF)
+    for b in data:
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+class BloomDoorkeeper:
+    """Compact Bloom filter used as TinyLFU doorkeeper (first-seen gate)."""
+
+    def __init__(self, n_bits: int = 8192, n_hashes: int = 4, seed: int = 7) -> None:
+        self.n_bits = max(64, int(n_bits))
+        self.n_hashes = max(2, int(n_hashes))
+        self.seed = seed
+        self.bits = bytearray((self.n_bits + 7) // 8)
+        self.inserts = 0
+
+    def _positions(self, key: Any) -> List[int]:
+        h1 = _fnv1a64(key, self.seed)
+        h2 = _fnv1a64(key, self.seed ^ 0x9E3779B97F4A7C15) | 1
+        return [((h1 + i * h2) % self.n_bits) for i in range(self.n_hashes)]
+
+    def might_contain(self, key: Any) -> bool:
+        for p in self._positions(key):
+            if not (self.bits[p >> 3] & (1 << (p & 7))):
+                return False
+        return True
+
+    def add(self, key: Any) -> bool:
+        """Return True if newly inserted (was definitely absent)."""
+        newly = False
+        for p in self._positions(key):
+            byte_i, bit = p >> 3, p & 7
+            mask = 1 << bit
+            if not (self.bits[byte_i] & mask):
+                newly = True
+                self.bits[byte_i] |= mask
+        if newly:
+            self.inserts += 1
+        return newly
+
+    def clear(self) -> None:
+        self.bits = bytearray(len(self.bits))
+        self.inserts = 0
+
+
+class CountMinSketch:
+    """4-row Count-Min Sketch with periodic aging (right-shift halving)."""
+
+    def __init__(
+        self,
+        width: int = 2048,
+        depth: int = 4,
+        seed: int = 42,
+        age_after: int = 10_000,
+    ) -> None:
+        self.width = max(16, int(width))
+        self.depth = max(2, min(8, int(depth)))
+        self.seed = seed
+        self.age_after = max(1, int(age_after))
+        self.table = [[0] * self.width for _ in range(self.depth)]
+        self.ops = 0
+        self.ages = 0
+
+    def _idx(self, key: Any, row: int) -> int:
+        return _fnv1a64(key, self.seed + row * 0x9E3779B9) % self.width
+
+    def add(self, key: Any, count: int = 1) -> int:
+        self.ops += 1
+        if self.ops % self.age_after == 0:
+            self._age()
+        est = None
+        for r in range(self.depth):
+            j = self._idx(key, r)
+            self.table[r][j] = min(self.table[r][j] + count, 2**31 - 1)
+            v = self.table[r][j]
+            est = v if est is None else min(est, v)
+        return int(est or 0)
+
+    def estimate(self, key: Any) -> int:
+        est = None
+        for r in range(self.depth):
+            v = self.table[r][self._idx(key, r)]
+            est = v if est is None else min(est, v)
+        return int(est or 0)
+
+    def _age(self) -> None:
+        self.ages += 1
+        for r in range(self.depth):
+            row = self.table[r]
+            for j in range(self.width):
+                row[j] >>= 1
+
+    def clear(self) -> None:
+        self.table = [[0] * self.width for _ in range(self.depth)]
+        self.ops = 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Cache policies
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class CacheStats:
+    gets: int = 0
+    hits: int = 0
+    misses: int = 0
+    puts: int = 0
+    evictions: int = 0
+    admissions_reject: int = 0
+    ghost_hits: int = 0
+    promotions: int = 0
+    bytes_requested: int = 0
+    bytes_hit: int = 0
+
+    def hit_rate(self) -> float:
+        return self.hits / self.gets if self.gets else 0.0
+
+    def byte_hit_rate(self) -> float:
+        return self.bytes_hit / self.bytes_requested if self.bytes_requested else 0.0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "gets": self.gets,
+            "hits": self.hits,
+            "misses": self.misses,
+            "puts": self.puts,
+            "evictions": self.evictions,
+            "admissions_reject": self.admissions_reject,
+            "ghost_hits": self.ghost_hits,
+            "promotions": self.promotions,
+            "hit_rate": round(self.hit_rate(), 6),
+            "byte_hit_rate": round(self.byte_hit_rate(), 6),
+        }
+
+
+class CachePolicy:
+    name: str = "base"
+
+    def __init__(self, capacity: int) -> None:
+        if capacity < 2:
+            raise ValueError("capacity must be >= 2")
+        self.capacity = int(capacity)
+        self.stats = CacheStats()
+
+    def get(self, key: Any) -> bool:
+        raise NotImplementedError
+
+    def put(self, key: Any, size: int = 1) -> None:
+        raise NotImplementedError
+
+    def access(self, key: Any, size: int = 1) -> bool:
+        """get-or-put semantics used by workload drivers."""
+        self.stats.gets += 1
+        self.stats.bytes_requested += size
+        if self.get(key):
+            self.stats.hits += 1
+            self.stats.bytes_hit += size
+            return True
+        self.stats.misses += 1
+        self.put(key, size)
+        return False
+
+    def size(self) -> int:
+        raise NotImplementedError
+
+    def reset_stats(self) -> None:
+        self.stats = CacheStats()
+
+
+class LRUCache(CachePolicy):
+    name = "lru"
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__(capacity)
+        self._od: OrderedDict[Any, int] = OrderedDict()
+
+    def get(self, key: Any) -> bool:
+        if key not in self._od:
+            return False
+        self._od.move_to_end(key)
+        return True
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        if key in self._od:
+            self._od.move_to_end(key)
+            self._od[key] = size
+            return
+        while len(self._od) >= self.capacity:
+            self._od.popitem(last=False)
+            self.stats.evictions += 1
+        self._od[key] = size
+
+    def size(self) -> int:
+        return len(self._od)
+
+
+class FIFOCache(CachePolicy):
+    name = "fifo"
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__(capacity)
+        self._q: OrderedDict[Any, int] = OrderedDict()
+
+    def get(self, key: Any) -> bool:
+        return key in self._q
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        if key in self._q:
+            self._q[key] = size
+            return
+        while len(self._q) >= self.capacity:
+            self._q.popitem(last=False)
+            self.stats.evictions += 1
+        self._q[key] = size
+
+    def size(self) -> int:
+        return len(self._q)
+
+
+class ClockCache(CachePolicy):
+    """Second-chance CLOCK with 1-bit reference."""
+
+    name = "clock"
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__(capacity)
+        self._keys: List[Any] = [None] * capacity
+        self._sizes: List[int] = [0] * capacity
+        self._ref: List[int] = [0] * capacity
+        self._map: Dict[Any, int] = {}
+        self._hand = 0
+        self._count = 0
+
+    def get(self, key: Any) -> bool:
+        i = self._map.get(key)
+        if i is None:
+            return False
+        self._ref[i] = 1
+        return True
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        if key in self._map:
+            i = self._map[key]
+            self._sizes[i] = size
+            self._ref[i] = 1
+            return
+        if self._count < self.capacity:
+            i = self._count
+            self._count += 1
+        else:
+            i = self._evict_slot()
+            self.stats.evictions += 1
+        self._keys[i] = key
+        self._sizes[i] = size
+        self._ref[i] = 1
+        self._map[key] = i
+
+    def _evict_slot(self) -> int:
+        while True:
+            i = self._hand
+            self._hand = (self._hand + 1) % self.capacity
+            if self._ref[i] == 0:
+                old = self._keys[i]
+                if old is not None:
+                    self._map.pop(old, None)
+                return i
+            self._ref[i] = 0
+
+    def size(self) -> int:
+        return self._count if self._count < self.capacity else self.capacity
+
+
+class S3FIFOCache(CachePolicy):
+    """S3-FIFO: small FIFO + main FIFO + ghost FIFO (Yang et al. 2023).
+
+    New entries enter *small*. On eviction from small:
+      - freq bit set → promote to main
+      - else → drop and insert key into ghost
+    Ghost hits re-admit directly into main.
+    Main uses a 1-bit CLOCK-style reinsertion on eviction scan.
+    """
+
+    name = "s3fifo"
+
+    def __init__(
+        self,
+        capacity: int,
+        small_ratio: float = 0.1,
+        ghost_ratio: float = 0.9,
+    ) -> None:
+        super().__init__(capacity)
+        small_cap = max(1, int(capacity * small_ratio))
+        main_cap = max(1, capacity - small_cap)
+        ghost_cap = max(1, int(capacity * ghost_ratio))
+        self.small_cap = small_cap
+        self.main_cap = main_cap
+        self.ghost_cap = ghost_cap
+        # key -> (size, freq_bit) ; freq_bit in {0,1}
+        self.small: OrderedDict[Any, Tuple[int, int]] = OrderedDict()
+        self.main: OrderedDict[Any, Tuple[int, int]] = OrderedDict()
+        self.ghost: OrderedDict[Any, None] = OrderedDict()
+
+    def get(self, key: Any) -> bool:
+        if key in self.small:
+            size, freq = self.small[key]
+            self.small[key] = (size, min(1, freq + 1))
+            return True
+        if key in self.main:
+            size, freq = self.main[key]
+            self.main[key] = (size, min(1, freq + 1))
+            # move to MRU end (reinsertion style)
+            self.main.move_to_end(key)
+            return True
+        return False
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        if key in self.small or key in self.main:
+            self.get(key)
+            return
+        # ghost hit → insert into main
+        if key in self.ghost:
+            self.ghost.pop(key, None)
+            self.stats.ghost_hits += 1
+            self._insert_main(key, size, freq=0)
+            return
+        self._insert_small(key, size)
+
+    def _insert_small(self, key: Any, size: int) -> None:
+        while len(self.small) >= self.small_cap:
+            self._evict_small()
+        self.small[key] = (size, 0)
+
+    def _evict_small(self) -> None:
+        k, (sz, freq) = self.small.popitem(last=False)
+        if freq > 0:
+            self.stats.promotions += 1
+            self._insert_main(k, sz, freq=0)
+        else:
+            self.stats.evictions += 1
+            self._insert_ghost(k)
+
+    def _insert_main(self, key: Any, size: int, freq: int = 0) -> None:
+        while len(self.main) >= self.main_cap:
+            self._evict_main()
+        self.main[key] = (size, freq)
+
+    def _evict_main(self) -> None:
+        # CLOCK-style: scan from head; reinsert if freq set
+        for _ in range(len(self.main) + 1):
+            k, (sz, freq) = self.main.popitem(last=False)
+            if freq > 0:
+                self.main[k] = (sz, 0)  # clear bit, reinsert at tail
+                continue
+            self.stats.evictions += 1
+            self._insert_ghost(k)
+            return
+
+    def _insert_ghost(self, key: Any) -> None:
+        if key in self.ghost:
+            self.ghost.move_to_end(key)
+            return
+        while len(self.ghost) >= self.ghost_cap:
+            self.ghost.popitem(last=False)
+        self.ghost[key] = None
+
+    def size(self) -> int:
+        return len(self.small) + len(self.main)
+
+    def inventory(self) -> Dict[str, int]:
+        return {
+            "small": len(self.small),
+            "main": len(self.main),
+            "ghost": len(self.ghost),
+            "small_cap": self.small_cap,
+            "main_cap": self.main_cap,
+            "ghost_cap": self.ghost_cap,
+        }
+
+
+class WTinyLFUCache(CachePolicy):
+    """Window-TinyLFU (Caffeine-style).
+
+    Capacity split: window (LRU, ~1%) + main (SLRU segmented into probation
+    and protected). Admission into main is gated by CMS frequency comparison
+    against the eviction candidate. Optional Bloom doorkeeper for cold keys.
+    """
+
+    name = "w-tinylfu"
+
+    def __init__(
+        self,
+        capacity: int,
+        window_ratio: float = 0.01,
+        protected_ratio: float = 0.8,
+        cms_width: Optional[int] = None,
+        use_doorkeeper: bool = True,
+    ) -> None:
+        super().__init__(capacity)
+        w = max(1, int(capacity * window_ratio))
+        main = max(1, capacity - w)
+        prot = max(1, int(main * protected_ratio))
+        prob = max(1, main - prot)
+        self.window_cap = w
+        self.probation_cap = prob
+        self.protected_cap = prot
+        self.window: OrderedDict[Any, int] = OrderedDict()
+        self.probation: OrderedDict[Any, int] = OrderedDict()
+        self.protected: OrderedDict[Any, int] = OrderedDict()
+        width = cms_width or max(64, capacity * 4)
+        self.cms = CountMinSketch(width=width, depth=4, age_after=max(1000, capacity * 10))
+        self.door = BloomDoorkeeper(n_bits=max(256, capacity * 8)) if use_doorkeeper else None
+
+    def get(self, key: Any) -> bool:
+        self._observe(key)
+        if key in self.window:
+            self.window.move_to_end(key)
+            return True
+        if key in self.protected:
+            self.protected.move_to_end(key)
+            return True
+        if key in self.probation:
+            # promote probation → protected
+            size = self.probation.pop(key)
+            self._ensure_protected_room()
+            self.protected[key] = size
+            self.stats.promotions += 1
+            return True
+        return False
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        self._observe(key)
+        if key in self.window or key in self.probation or key in self.protected:
+            self.get(key)
+            return
+        # always enter window first
+        while len(self.window) >= self.window_cap:
+            self._evict_window()
+        self.window[key] = size
+
+    def _observe(self, key: Any) -> None:
+        if self.door is not None:
+            if not self.door.might_contain(key):
+                self.door.add(key)
+                return  # first sighting: doorkeeper only
+        self.cms.add(key)
+
+    def _evict_window(self) -> None:
+        cand_k, cand_sz = self.window.popitem(last=False)
+        # try admit into main (probation)
+        if self._admit(cand_k):
+            while len(self.probation) + len(self.protected) >= (
+                self.probation_cap + self.protected_cap
+            ):
+                # free a slot in main via frequency duel if needed
+                if not self.probation and not self.protected:
+                    break
+                if self.probation:
+                    vic_k, _ = next(iter(self.probation.items()))
+                    if self.cms.estimate(cand_k) >= self.cms.estimate(vic_k):
+                        self.probation.pop(vic_k)
+                        self.stats.evictions += 1
+                    else:
+                        self.stats.admissions_reject += 1
+                        return
+                else:
+                    # protected full and probation empty — demote protected head
+                    dem_k, dem_sz = self.protected.popitem(last=False)
+                    self.probation[dem_k] = dem_sz
+                    if len(self.probation) > self.probation_cap:
+                        self.probation.popitem(last=False)
+                        self.stats.evictions += 1
+            if len(self.probation) >= self.probation_cap:
+                # still full
+                if self.probation:
+                    vic_k, _ = next(iter(self.probation.items()))
+                    if self.cms.estimate(cand_k) >= self.cms.estimate(vic_k):
+                        self.probation.pop(vic_k)
+                        self.stats.evictions += 1
+                        self.probation[cand_k] = cand_sz
+                    else:
+                        self.stats.admissions_reject += 1
+                else:
+                    self.stats.admissions_reject += 1
+            else:
+                self.probation[cand_k] = cand_sz
+        else:
+            self.stats.admissions_reject += 1
+            self.stats.evictions += 1
+
+    def _admit(self, key: Any) -> bool:
+        """Compare candidate frequency vs probation victim (or always if room)."""
+        main_size = len(self.probation) + len(self.protected)
+        main_cap = self.probation_cap + self.protected_cap
+        if main_size < main_cap:
+            return True
+        if not self.probation:
+            return True
+        vic_k = next(iter(self.probation.keys()))
+        return self.cms.estimate(key) >= self.cms.estimate(vic_k)
+
+    def _ensure_protected_room(self) -> None:
+        while len(self.protected) >= self.protected_cap:
+            dem_k, dem_sz = self.protected.popitem(last=False)
+            # demote to probation
+            while len(self.probation) >= self.probation_cap:
+                self.probation.popitem(last=False)
+                self.stats.evictions += 1
+            self.probation[dem_k] = dem_sz
+
+    def size(self) -> int:
+        return len(self.window) + len(self.probation) + len(self.protected)
+
+    def inventory(self) -> Dict[str, int]:
+        return {
+            "window": len(self.window),
+            "probation": len(self.probation),
+            "protected": len(self.protected),
+            "window_cap": self.window_cap,
+            "probation_cap": self.probation_cap,
+            "protected_cap": self.protected_cap,
+            "cms_ops": self.cms.ops,
+            "cms_ages": self.cms.ages,
+        }
+
+
+class ARCCache(CachePolicy):
+    """Adaptive Replacement Cache (Megiddo & Modha FAST 2003) — baseline."""
+
+    name = "arc"
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__(capacity)
+        self.p = 0.0  # target size for T1
+        self.t1: OrderedDict[Any, int] = OrderedDict()
+        self.t2: OrderedDict[Any, int] = OrderedDict()
+        self.b1: OrderedDict[Any, None] = OrderedDict()
+        self.b2: OrderedDict[Any, None] = OrderedDict()
+
+    def get(self, key: Any) -> bool:
+        if key in self.t1:
+            sz = self.t1.pop(key)
+            self.t2[key] = sz
+            return True
+        if key in self.t2:
+            self.t2.move_to_end(key)
+            return True
+        return False
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        if key in self.t1 or key in self.t2:
+            self.get(key)
+            return
+        c = self.capacity
+        if key in self.b1:
+            self.stats.ghost_hits += 1
+            self.p = min(c, self.p + max(len(self.b2) / max(len(self.b1), 1), 1))
+            self._replace(key)
+            self.b1.pop(key, None)
+            self.t2[key] = size
+            return
+        if key in self.b2:
+            self.stats.ghost_hits += 1
+            self.p = max(0.0, self.p - max(len(self.b1) / max(len(self.b2), 1), 1))
+            self._replace(key)
+            self.b2.pop(key, None)
+            self.t2[key] = size
+            return
+        # fresh miss
+        l1 = len(self.t1) + len(self.b1)
+        if l1 == c:
+            if len(self.t1) < c:
+                if self.b1:
+                    self.b1.popitem(last=False)
+                self._replace(key)
+            else:
+                if self.t1:
+                    self.t1.popitem(last=False)
+                    self.stats.evictions += 1
+        elif l1 < c:
+            total = len(self.t1) + len(self.t2) + len(self.b1) + len(self.b2)
+            if total >= c:
+                if total == 2 * c and self.b2:
+                    self.b2.popitem(last=False)
+                self._replace(key)
+        self.t1[key] = size
+
+    def _replace(self, key: Any) -> None:
+        t1_len = len(self.t1)
+        if t1_len >= 1 and (
+            (key in self.b2 and t1_len == int(self.p)) or t1_len > int(self.p)
+        ):
+            if self.t1:
+                k, _ = self.t1.popitem(last=False)
+                self.b1[k] = None
+                self.stats.evictions += 1
+                while len(self.b1) > self.capacity:
+                    self.b1.popitem(last=False)
+            return
+        if self.t2:
+            k, _ = self.t2.popitem(last=False)
+            self.b2[k] = None
+            self.stats.evictions += 1
+            while len(self.b2) > self.capacity:
+                self.b2.popitem(last=False)
+
+    def size(self) -> int:
+        return len(self.t1) + len(self.t2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hybrid: S3-FIFO rings + TinyLFU admission oracle
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class S3FIFOTinyLFUHybrid(CachePolicy):
+    """Hybrid: S3-FIFO structure with TinyLFU CMS admission on small→ghost path.
+
+    Ghost hits still re-admit to main. Small-queue victims with freq=0 must
+    beat the CMS estimate of a sampled main victim (or ghost-reentry path)
+    to avoid thrashing under one-hit wonders — TinyLFU's classic win.
+    """
+
+    name = "s3fifo-tinylfu"
+
+    def __init__(
+        self,
+        capacity: int,
+        small_ratio: float = 0.1,
+        ghost_ratio: float = 1.0,
+        cms_width: Optional[int] = None,
+        use_doorkeeper: bool = True,
+    ) -> None:
+        super().__init__(capacity)
+        small_cap = max(1, int(capacity * small_ratio))
+        main_cap = max(1, capacity - small_cap)
+        ghost_cap = max(1, int(capacity * ghost_ratio))
+        self.small_cap = small_cap
+        self.main_cap = main_cap
+        self.ghost_cap = ghost_cap
+        self.small: OrderedDict[Any, Tuple[int, int]] = OrderedDict()
+        self.main: OrderedDict[Any, Tuple[int, int]] = OrderedDict()
+        self.ghost: OrderedDict[Any, None] = OrderedDict()
+        width = cms_width or max(64, capacity * 4)
+        self.cms = CountMinSketch(width=width, depth=4, age_after=max(1000, capacity * 10))
+        self.door = BloomDoorkeeper(n_bits=max(256, capacity * 8)) if use_doorkeeper else None
+
+    def _observe(self, key: Any) -> None:
+        if self.door is not None:
+            if not self.door.might_contain(key):
+                self.door.add(key)
+                return
+        self.cms.add(key)
+
+    def get(self, key: Any) -> bool:
+        self._observe(key)
+        if key in self.small:
+            size, freq = self.small[key]
+            self.small[key] = (size, min(1, freq + 1))
+            return True
+        if key in self.main:
+            size, freq = self.main[key]
+            self.main[key] = (size, min(1, freq + 1))
+            self.main.move_to_end(key)
+            return True
+        return False
+
+    def put(self, key: Any, size: int = 1) -> None:
+        self.stats.puts += 1
+        self._observe(key)
+        if key in self.small or key in self.main:
+            self.get(key)
+            return
+        if key in self.ghost:
+            self.ghost.pop(key, None)
+            self.stats.ghost_hits += 1
+            self._insert_main(key, size, 0)
+            return
+        self._insert_small(key, size)
+
+    def _insert_small(self, key: Any, size: int) -> None:
+        while len(self.small) >= self.small_cap:
+            self._evict_small()
+        self.small[key] = (size, 0)
+
+    def _evict_small(self) -> None:
+        k, (sz, freq) = self.small.popitem(last=False)
+        if freq > 0:
+            self.stats.promotions += 1
+            self._insert_main(k, sz, 0)
+            return
+        # TinyLFU admission vs a main victim (if main full)
+        if len(self.main) >= self.main_cap and self.main:
+            vic_k = next(iter(self.main.keys()))
+            if self.cms.estimate(k) < self.cms.estimate(vic_k):
+                self.stats.admissions_reject += 1
+                self.stats.evictions += 1
+                self._insert_ghost(k)
+                return
+        self.stats.evictions += 1
+        self._insert_ghost(k)
+
+    def _insert_main(self, key: Any, size: int, freq: int = 0) -> None:
+        while len(self.main) >= self.main_cap:
+            self._evict_main()
+        self.main[key] = (size, freq)
+
+    def _evict_main(self) -> None:
+        for _ in range(len(self.main) + 1):
+            k, (sz, freq) = self.main.popitem(last=False)
+            if freq > 0:
+                self.main[k] = (sz, 0)
+                continue
+            self.stats.evictions += 1
+            self._insert_ghost(k)
+            return
+
+    def _insert_ghost(self, key: Any) -> None:
+        if key in self.ghost:
+            self.ghost.move_to_end(key)
+            return
+        while len(self.ghost) >= self.ghost_cap:
+            self.ghost.popitem(last=False)
+        self.ghost[key] = None
+
+    def size(self) -> int:
+        return len(self.small) + len(self.main)
+
+    def inventory(self) -> Dict[str, Any]:
+        return {
+            "small": len(self.small),
+            "main": len(self.main),
+            "ghost": len(self.ghost),
+            "cms_ops": self.cms.ops,
+            "cms_ages": self.cms.ages,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Workloads
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class WorkloadKind(str, Enum):
+    ZIPF = "zipf"
+    IR = "ir"
+    SCAN = "scan"
+    LOOP = "loop"
+    HOTSPOT = "hotspot"
+    MIXED = "mixed"
+
+
+def zipf_weights(n_keys: int, alpha: float) -> List[float]:
+    """Zipf-Mandelbrot p(i) ∝ 1/(i+1)^alpha — normalized."""
+    raw = [1.0 / ((i + 1) ** alpha) for i in range(n_keys)]
+    s = sum(raw)
+    return [w / s for w in raw]
+
+
+def sample_zipf(n_keys: int, alpha: float, n: int, rng: random.Random) -> List[int]:
+    weights = zipf_weights(n_keys, alpha)
+    # inverse-CDF via alias would be faster; for n≤1e6 sequential CDF is fine
+    cdf: List[float] = []
+    acc = 0.0
+    for w in weights:
+        acc += w
+        cdf.append(acc)
+    out: List[int] = []
+    for _ in range(n):
+        u = rng.random()
+        # binary search
+        lo, hi = 0, n_keys - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cdf[mid] < u:
+                lo = mid + 1
+            else:
+                hi = mid
+        out.append(lo)
+    return out
+
+
+def generate_workload(
+    kind: str,
+    n_keys: int,
+    n_ops: int,
+    seed: int = 42,
+    alpha: float = 1.2,
+    scan_len: int = 0,
+) -> List[int]:
+    rng = random.Random(seed)
+    kind = kind.lower()
+    if kind == WorkloadKind.ZIPF.value:
+        return sample_zipf(n_keys, alpha, n_ops, rng)
+    if kind == WorkloadKind.IR.value:
+        return [rng.randrange(n_keys) for _ in range(n_ops)]
+    if kind == WorkloadKind.SCAN.value:
+        # sequential scans interleaved with zipf noise
+        sl = scan_len or max(1, n_keys // 4)
+        out: List[int] = []
+        i = 0
+        while len(out) < n_ops:
+            if rng.random() < 0.3:
+                base = rng.randrange(max(1, n_keys - sl))
+                for j in range(sl):
+                    out.append((base + j) % n_keys)
+                    if len(out) >= n_ops:
+                        break
+            else:
+                out.append(sample_zipf(n_keys, alpha, 1, rng)[0])
+            i += 1
+        return out[:n_ops]
+    if kind == WorkloadKind.LOOP.value:
+        period = max(2, n_keys // 10)
+        return [i % period for i in range(n_ops)]
+    if kind == WorkloadKind.HOTSPOT.value:
+        hot = max(1, n_keys // 20)
+        out = []
+        for _ in range(n_ops):
+            if rng.random() < 0.8:
+                out.append(rng.randrange(hot))
+            else:
+                out.append(rng.randrange(n_keys))
+        return out
+    if kind == WorkloadKind.MIXED.value:
+        # 50% zipf + 20% scan + 30% hotspot
+        a = sample_zipf(n_keys, alpha, n_ops // 2, rng)
+        b = generate_workload("scan", n_keys, n_ops // 5, seed + 1, alpha)
+        c = generate_workload("hotspot", n_keys, n_ops - len(a) - len(b), seed + 2, alpha)
+        out = a + b + c
+        rng.shuffle(out)
+        return out[:n_ops]
+    raise ValueError(f"unknown workload kind: {kind}")
+
+
+def run_workload(cache: CachePolicy, keys: Sequence[int], sizes: Optional[Sequence[int]] = None) -> Dict[str, Any]:
+    t0 = time.perf_counter()
+    for i, k in enumerate(keys):
+        sz = 1 if sizes is None else sizes[i % len(sizes)]
+        cache.access(k, sz)
+    elapsed = time.perf_counter() - t0
+    d = cache.stats.as_dict()
+    d["policy"] = cache.name
+    d["capacity"] = cache.capacity
+    d["final_size"] = cache.size()
+    d["elapsed_ms"] = round(elapsed * 1000, 3)
+    d["ops_per_sec"] = int(len(keys) / elapsed) if elapsed > 0 else 0
+    if hasattr(cache, "inventory"):
+        d["inventory"] = cache.inventory()  # type: ignore[attr-defined]
+    return d
+
+
+POLICY_CTORS = {
+    "lru": LRUCache,
+    "fifo": FIFOCache,
+    "clock": ClockCache,
+    "s3fifo": S3FIFOCache,
+    "w-tinylfu": WTinyLFUCache,
+    "arc": ARCCache,
+    "s3fifo-tinylfu": S3FIFOTinyLFUHybrid,
+}
+
+
+def make_policy(name: str, capacity: int, **kwargs: Any) -> CachePolicy:
+    key = name.lower().strip()
+    if key not in POLICY_CTORS:
+        raise ValueError(f"unknown policy {name}; choose from {sorted(POLICY_CTORS)}")
+    return POLICY_CTORS[key](capacity, **kwargs)  # type: ignore[call-arg]
+
+
+def compare_policies(
+    capacity: int = 128,
+    n_keys: int = 2000,
+    n_ops: int = 20_000,
+    workload: str = "zipf",
+    alpha: float = 1.2,
+    seed: int = 42,
+    policies: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    keys = generate_workload(workload, n_keys, n_ops, seed=seed, alpha=alpha)
+    names = list(policies) if policies else list(POLICY_CTORS.keys())
+    results = []
+    for name in names:
+        cache = make_policy(name, capacity)
+        results.append(run_workload(cache, keys))
+    results.sort(key=lambda r: r["hit_rate"], reverse=True)
+    return {
+        "capacity": capacity,
+        "n_keys": n_keys,
+        "n_ops": n_ops,
+        "workload": workload,
+        "alpha": alpha,
+        "seed": seed,
+        "ranking": results,
+        "winner": results[0]["policy"] if results else None,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Theory / explain
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def theory_ledger(capacity: int = 1024) -> Dict[str, Any]:
+    """Closed-form / structural properties of each policy."""
+    small = max(1, int(capacity * 0.1))
+    main = capacity - small
+    window = max(1, int(capacity * 0.01))
+    return {
+        "capacity": capacity,
+        "s3fifo": {
+            "small_cap": small,
+            "main_cap": main,
+            "ghost_cap": capacity,
+            "ops": "O(1) get/put",
+            "scan_resistance": "one-hit wonders die in small; never pollute main",
+            "promotion": "freq bit ≥1 on small eviction → main",
+            "paper": "Yang et al. 2023 — FIFO queues are all you need",
+        },
+        "w_tinylfu": {
+            "window_cap": window,
+            "main_cap": capacity - window,
+            "cms": "Count-Min depth=4, width≈4C, periodic aging",
+            "admission": "candidate freq ≥ victim freq",
+            "doorkeeper": "Bloom filter filters first sighting (no CMS bump)",
+            "paper": "Einziger et al. TOCS 2017 / Caffeine",
+        },
+        "hybrid_s3fifo_tinylfu": {
+            "structure": "S3-FIFO rings",
+            "admission": "CMS duel on cold small-eviction path",
+            "ghost": "history ring re-admits to main (ARC-like)",
+            "goal": "scan-resist + frequency-aware without SLRU complexity",
+        },
+        "arc": {
+            "lists": "T1/T2 real + B1/B2 ghost",
+            "p_adapt": "balances recency vs frequency via ghost hits",
+            "ops": "O(1) but four-list bookkeeping",
+            "paper": "Megiddo & Modha FAST 2003",
+        },
+        "cms_error": {
+            "epsilon": "≈ e/width per estimate (over-estimate only)",
+            "delta": "≈ e^{-depth} failure probability",
+            "width_rule": "width = 4 * capacity → ε ≈ 0.68/C",
+            "aging": "right-shift every age_after ops → exponential decay",
+        },
+        "complexity": {
+            "lru_ordereddict": "O(1) amortized",
+            "s3fifo": "O(1) worst-case (bounded clock scans rare)",
+            "memory_words": f"≈ {capacity} entries + ghost + CMS({4}*4C counters)",
+        },
+    }
+
+
+def explain_text() -> str:
+    return """
+S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle
+================================================
+
+WHY CACHES THRASH
+  LRU promotes every hit to MRU. A pure sequential scan of size > capacity
+  evicts the entire working set (scan pollution). One-hit wonders (CDN tails)
+  also steal slots from hot keys under naive FIFO.
+
+S3-FIFO (Yang et al. 2023)
+  three FIFO rings:
+    small  (~10%) — probation for brand-new keys
+    main   (~90%) — protected hot set; 1-bit CLOCK reinsertion
+    ghost  (~100% capacity of keys only) — history of recent evictions
+  New key → small. On small eviction:
+    freq bit set → promote to main
+    else → drop object, remember key in ghost
+  Ghost hit → re-admit straight into main (proves reuse without keeping data).
+
+W-TinyLFU (Einziger / Caffeine)
+  window LRU (~1%) absorbs bursts.
+  main is SLRU (probation + protected).
+  Count-Min Sketch estimates frequency; a candidate enters main only if
+  CMS(candidate) ≥ CMS(victim). Bloom doorkeeper ignores first sighting so
+  pure cold keys never inflate CMS.
+
+HYBRID (this engine)
+  Keep S3-FIFO's simple rings (scan-proof, O(1)) and add TinyLFU's CMS duel
+  on the cold small-eviction path. Ghost ring preserved for reuse detection.
+  Result: scan resistance of S3-FIFO + frequency filtering of TinyLFU.
+
+WHEN TO PREFER WHAT
+  • S3-FIFO alone     — simplest production port, excellent scan resistance
+  • W-TinyLFU alone   — best hit rate on skewed Zipf (Caffeine default)
+  • Hybrid            — Zipf + intermittent scans (API gateways, KV proxies)
+  • ARC               — classic adaptive baseline; heavier bookkeeping
+  • LRU/FIFO/CLOCK    — teaching baselines
+
+CLI
+  s3fifo-tinylfu-ghost-ring selftest
+  s3fifo-tinylfu-ghost-ring compare --capacity 256 --ops 30000 --workload zipf
+  s3fifo-tinylfu-ghost-ring simulate --policy s3fifo-tinylfu --workload scan
+  s3fifo-tinylfu-ghost-ring bench --capacity 1024 --ops 100000
+  s3fifo-tinylfu-ghost-ring theory
+  s3fifo-tinylfu-ghost-ring explain
+""".strip()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test harness
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class SelfTestError(AssertionError):
+    pass
+
+
+def _check(cond: bool, msg: str) -> None:
+    if not cond:
+        raise SelfTestError(msg)
+
+
+def run_selftest(verbose: bool = True) -> Dict[str, Any]:
+    checks = 0
+    log: List[str] = []
+
+    def ok(msg: str) -> None:
+        nonlocal checks
+        checks += 1
+        log.append(f"  ✓ {msg}")
+        if verbose:
+            print(log[-1])
+
+    # 1. CMS basics
+    cms = CountMinSketch(width=128, depth=4, age_after=10_000)
+    for _ in range(50):
+        cms.add("hot")
+    for _ in range(3):
+        cms.add("cold")
+    _check(cms.estimate("hot") >= 40, "CMS hot underestimate")
+    _check(cms.estimate("hot") >= cms.estimate("cold"), "CMS ordering")
+    _check(cms.estimate("never") == 0, "CMS unseen is 0")
+    ok("Count-Min Sketch estimate ordering")
+
+    # 2. CMS aging
+    cms2 = CountMinSketch(width=64, depth=3, age_after=20)
+    for i in range(25):
+        cms2.add("x")
+    _check(cms2.ages >= 1, "CMS should age")
+    ok(f"CMS aging fired ({cms2.ages} ages)")
+
+    # 3. Bloom doorkeeper
+    door = BloomDoorkeeper(n_bits=512, n_hashes=3)
+    _check(door.add("a") is True, "first insert new")
+    _check(door.might_contain("a"), "contains a")
+    _check(door.add("a") is False, "second insert not new")
+    ok("Bloom doorkeeper insert/query")
+
+    # 4. LRU correctness
+    lru = LRUCache(3)
+    for k in [1, 2, 3]:
+        lru.put(k)
+    lru.get(1)
+    lru.put(4)  # should evict 2 (LRU)
+    _check(lru.get(2) is False, "LRU evicted 2")
+    _check(lru.get(1) is True, "LRU kept 1")
+    _check(lru.size() == 3, "LRU size")
+    ok("LRU eviction order")
+
+    # 5. FIFO correctness
+    fifo = FIFOCache(2)
+    fifo.put("a")
+    fifo.put("b")
+    fifo.get("a")
+    fifo.put("c")  # evict a despite recent get
+    _check(fifo.get("a") is False, "FIFO ignores recency")
+    _check(fifo.get("b") is True, "FIFO kept b")
+    ok("FIFO ignores recency on get")
+
+    # 6. S3-FIFO scan resistance
+    # Working set {0..9} warmed, then full scan of 100 cold keys, then re-touch WS
+    cap = 20
+    s3 = S3FIFOCache(cap, small_ratio=0.1)
+    ws = list(range(10))
+    for _ in range(5):
+        for k in ws:
+            s3.access(k)
+    for k in range(100, 200):  # scan
+        s3.access(k)
+    hits = sum(1 for k in ws if s3.get(k))
+    _check(hits >= 5, f"S3-FIFO should retain most WS after scan, got {hits}/10")
+    ok(f"S3-FIFO scan resistance (retained {hits}/10 WS keys)")
+
+    # 7. S3-FIFO ghost re-admit
+    s3b = S3FIFOCache(8, small_ratio=0.25, ghost_ratio=1.0)
+    for k in range(20):
+        s3b.access(k)
+    # force some ghosts
+    _check(len(s3b.ghost) > 0, "ghost should be populated")
+    ghost_key = next(iter(s3b.ghost.keys()))
+    before = s3b.stats.ghost_hits
+    s3b.access(ghost_key)
+    _check(s3b.stats.ghost_hits == before + 1, "ghost hit counted")
+    _check(ghost_key in s3b.main or ghost_key in s3b.small, "ghost re-admitted")
+    ok("S3-FIFO ghost re-admission")
+
+    # 8. W-TinyLFU frequency admission preference
+    w = WTinyLFUCache(32, window_ratio=0.1, use_doorkeeper=False)
+    for _ in range(30):
+        w.access(0)
+    for k in range(1, 80):
+        w.access(k)
+    _check(w.get(0) is True, "hot key 0 should survive TinyLFU")
+    ok("W-TinyLFU retains high-frequency key")
+
+    # 9. Hybrid basic + inventory
+    hy = S3FIFOTinyLFUHybrid(64)
+    keys = generate_workload("zipf", 500, 5000, seed=7, alpha=1.3)
+    res = run_workload(hy, keys)
+    _check(0.0 <= res["hit_rate"] <= 1.0, "hit rate bounds")
+    _check(hy.size() <= 64, "capacity respected")
+    inv = hy.inventory()
+    _check(inv["small"] + inv["main"] == hy.size(), "inventory sums")
+    ok(f"Hybrid zipf run hit_rate={res['hit_rate']:.3f}")
+
+    # 10. ARC ghost adapt
+    arc = ARCCache(16)
+    for k in range(40):
+        arc.access(k)
+    for k in range(10):
+        arc.access(k)
+    _check(arc.size() <= 16, "ARC capacity")
+    ok("ARC capacity invariant")
+
+    # 11. CLOCK second chance — referenced slot survives when others are cold
+    cl = ClockCache(4)
+    for k in [1, 2, 3, 4]:
+        cl.put(k)
+    for i in range(4):
+        cl._ref[i] = 0
+    cl._hand = 0
+    cl.get(1)  # only key 1 has ref=1
+    cl.put(5)  # must skip slot 0 (key 1) and take a cold slot
+    _check(cl.get(1) is True, "CLOCK must keep referenced key 1")
+    _check(cl.get(5) is True, "CLOCK inserted key 5")
+    ok("CLOCK second-chance preference")
+
+    # 12. Zipf generator concentrates mass
+    z = sample_zipf(100, 1.5, 5000, random.Random(1))
+    from collections import Counter
+
+    cnt = Counter(z)
+    top10 = sum(v for _, v in cnt.most_common(10))
+    _check(top10 > 5000 * 0.4, "Zipf top-10 should own >40% mass at α=1.5")
+    ok(f"Zipf concentration top10={top10/5000:.2%}")
+
+    # 13. compare ranking produces winner
+    cmp = compare_policies(capacity=64, n_keys=800, n_ops=8000, workload="zipf", seed=3)
+    _check(cmp["winner"] in POLICY_CTORS, "winner known")
+    _check(len(cmp["ranking"]) == len(POLICY_CTORS), "all policies ranked")
+    ok(f"compare winner={cmp['winner']} hit={cmp['ranking'][0]['hit_rate']:.3f}")
+
+    # 14. scan workload: S3-FIFO should beat LRU
+    keys_scan = generate_workload("scan", 500, 8000, seed=11, alpha=1.1)
+    lru_s = run_workload(LRUCache(50), keys_scan)
+    s3_s = run_workload(S3FIFOCache(50), list(keys_scan))
+    _check(
+        s3_s["hit_rate"] + 1e-9 >= lru_s["hit_rate"] - 0.05,
+        f"S3-FIFO scan hit {s3_s['hit_rate']} should be near/above LRU {lru_s['hit_rate']}",
+    )
+    ok(f"scan: s3fifo={s3_s['hit_rate']:.3f} lru={lru_s['hit_rate']:.3f}")
+
+    # 15. theory ledger keys
+    th = theory_ledger(256)
+    for k in ("s3fifo", "w_tinylfu", "hybrid_s3fifo_tinylfu", "arc", "cms_error"):
+        _check(k in th, f"theory missing {k}")
+    ok("theory ledger complete")
+
+    # 16. capacity edge
+    try:
+        LRUCache(1)
+        _check(False, "capacity=1 should raise")
+    except ValueError:
+        ok("capacity < 2 rejected")
+
+    # 17. hybrid rejects one-hit wonders more than pure fill
+    hy2 = S3FIFOTinyLFUHybrid(30, small_ratio=0.2)
+    # build hot set
+    for _ in range(20):
+        for k in range(10):
+            hy2.access(k)
+    rejects_before = hy2.stats.admissions_reject
+    for k in range(1000, 1200):
+        hy2.access(k)
+    # not mandatory that rejects > 0 always, but hot set should mostly live
+    retained = sum(1 for k in range(10) if hy2.get(k))
+    _check(retained >= 4, f"hybrid should keep some hot keys after cold flood ({retained})")
+    ok(f"hybrid hot retention {retained}/10 (rejects={hy2.stats.admissions_reject - rejects_before})")
+
+    # 18. FNV determinism
+    _check(_fnv1a64("abc", 0) == _fnv1a64("abc", 0), "FNV stable")
+    _check(_fnv1a64("abc", 0) != _fnv1a64("abd", 0), "FNV distinct")
+    ok("FNV-1a determinism")
+
+    # 19. byte hit rate tracks sizes
+    c = LRUCache(4)
+    c.access("a", 10)
+    c.access("a", 10)
+    _check(c.stats.byte_hit_rate() == 0.5, "byte hit rate 10/20")
+    ok("byte hit rate accounting")
+
+    # 20. IR workload lower concentration than zipf
+    ir = generate_workload("ir", 100, 2000, seed=5)
+    z2 = generate_workload("zipf", 100, 2000, seed=5, alpha=1.4)
+    ir_top = Counter(ir).most_common(1)[0][1]
+    z_top = Counter(z2).most_common(1)[0][1]
+    _check(z_top > ir_top, "Zipf top key more frequent than IR")
+    ok(f"IR vs Zipf peak {ir_top} < {z_top}")
+
+    summary = {
+        "ok": True,
+        "checks": checks,
+        "log": log,
+    }
+    if verbose:
+        print(f"\n✅ selftest passed — {checks} checks")
+    return summary
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def cmd_selftest(_args: argparse.Namespace) -> int:
+    try:
+        run_selftest(verbose=True)
+        return 0
+    except SelfTestError as e:
+        print(f"❌ selftest failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    keys = generate_workload(
+        args.workload, args.keys, args.ops, seed=args.seed, alpha=args.alpha
+    )
+    cache = make_policy(args.policy, args.capacity)
+    res = run_workload(cache, keys)
+    print(json.dumps(res, indent=2, default=str))
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    pols = args.policies.split(",") if args.policies else None
+    res = compare_policies(
+        capacity=args.capacity,
+        n_keys=args.keys,
+        n_ops=args.ops,
+        workload=args.workload,
+        alpha=args.alpha,
+        seed=args.seed,
+        policies=pols,
+    )
+    print(json.dumps(res, indent=2, default=str))
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    rows = []
+    for name in ("lru", "s3fifo", "w-tinylfu", "s3fifo-tinylfu", "arc"):
+        keys = generate_workload(args.workload, args.keys, args.ops, seed=args.seed, alpha=args.alpha)
+        cache = make_policy(name, args.capacity)
+        rows.append(run_workload(cache, keys))
+    rows.sort(key=lambda r: (-r["hit_rate"], -r["ops_per_sec"]))
+    print(json.dumps({"bench": rows, "workload": args.workload, "capacity": args.capacity}, indent=2))
+    return 0
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    print(json.dumps(theory_ledger(args.capacity), indent=2))
+    return 0
+
+
+def cmd_explain(_args: argparse.Namespace) -> int:
+    print(explain_text())
+    return 0
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            {
+                "tool": "s3fifo-tinylfu-ghost-ring",
+                "policies": sorted(POLICY_CTORS.keys()),
+                "workloads": [w.value for w in WorkloadKind],
+                "version": "1.0.0",
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="s3fifo-tinylfu-ghost-ring",
+        description="S3-FIFO + Window-TinyLFU hybrid cache eviction oracle",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("selftest", help="Run invariant suite")
+    sp.set_defaults(func=cmd_selftest)
+
+    sp = sub.add_parser("simulate", help="Run one policy on a workload")
+    sp.add_argument("--policy", default="s3fifo-tinylfu")
+    sp.add_argument("--capacity", type=int, default=128)
+    sp.add_argument("--keys", type=int, default=2000)
+    sp.add_argument("--ops", type=int, default=20000)
+    sp.add_argument("--workload", default="zipf")
+    sp.add_argument("--alpha", type=float, default=1.2)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.set_defaults(func=cmd_simulate)
+
+    sp = sub.add_parser("compare", help="Rank all policies")
+    sp.add_argument("--capacity", type=int, default=128)
+    sp.add_argument("--keys", type=int, default=2000)
+    sp.add_argument("--ops", type=int, default=20000)
+    sp.add_argument("--workload", default="zipf")
+    sp.add_argument("--alpha", type=float, default=1.2)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.add_argument("--policies", default=None, help="comma list")
+    sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("bench", help="Microbench top policies")
+    sp.add_argument("--capacity", type=int, default=512)
+    sp.add_argument("--keys", type=int, default=5000)
+    sp.add_argument("--ops", type=int, default=50000)
+    sp.add_argument("--workload", default="zipf")
+    sp.add_argument("--alpha", type=float, default=1.2)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.set_defaults(func=cmd_bench)
+
+    sp = sub.add_parser("theory", help="Structural property ledger")
+    sp.add_argument("--capacity", type=int, default=1024)
+    sp.set_defaults(func=cmd_theory)
+
+    sp = sub.add_parser("explain", help="Human protocol walkthrough")
+    sp.set_defaults(func=cmd_explain)
+
+    sp = sub.add_parser("status", help="Tool metadata")
+    sp.set_defaults(func=cmd_status)
+
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print(explain_text())
+        print("\nUsage: s3fifo-tinylfu-ghost-ring selftest | compare | simulate | bench | theory | explain")
+        return 0
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

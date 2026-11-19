@@ -1,5 +1,22 @@
 [
   {
+    "id": "s3fifo-tinylfu-ghost-ring",
+    "title": "S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "S3-FIFO three-ring queues + Window-TinyLFU Count-Min Sketch admission hybrid with ghost history, Bloom doorkeeper, and LRU/FIFO/CLOCK/ARC baselines under Zipf/scan/hotspot workloads (Yang 2023, Einziger TOCS 2017).",
+    "cli": "s3fifo-tinylfu-ghost-ring",
+    "evolved_at": "2026-11-19T09:33:14+05:30",
+    "tags": [
+      "Caching",
+      "S3FIFO",
+      "TinyLFU",
+      "CountMinSketch",
+      "Eviction",
+      "Systems"
+    ]
+  },
+  {
     "id": "android-tv-control",
     "title": "Android TV Direct Control Engine",
     "category": "hardware",

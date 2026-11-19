@@ -1,6 +1,12 @@
 # 📜 Hermes Evolution Changelog
 
 
+
+### [2026-11-19 09:33:14] - Evolved `s3fifo-tinylfu-ghost-ring`
+- **Title**: S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle (Yang 2023 / Einziger TOCS 2017)
+- **Category**: systems
+- **Description**: Hybrid cache eviction oracle — S3-FIFO small/main/ghost rings, W-TinyLFU CMS admission, Bloom doorkeeper, ARC/LRU/FIFO/CLOCK baselines, Zipf+scan workloads, 20-check selftest + 22 pytest cases.
+
 ### [2026-11-19 06:33:29] - Evolved `pbft-byzantine-quorum`
 - **Title**: Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine (Castro & Liskov OSDI 1999)
 - **Category**: systems
