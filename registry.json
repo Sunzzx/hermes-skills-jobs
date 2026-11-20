@@ -1,5 +1,22 @@
 [
   {
+    "id": "hyperloglog-plusplus-cardinality",
+    "title": "HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "Streaming distinct-count sketches: classic HyperLogLog harmonic estimator, HLL++ sparse registers + linear-counting + bias correction, PCSA/Flajolet-Martin bitmaps, Linear Counting baseline, mergeable register-max unions, relative-error theory 1.04/sqrt(m) (AOFA 2007 / EDBT 2013).",
+    "cli": "hyperloglog-plusplus-cardinality",
+    "evolved_at": "2026-11-20T05:44:38+05:30",
+    "tags": [
+      "Cardinality",
+      "HyperLogLog",
+      "HLL++",
+      "StreamingSketches",
+      "LinearCounting",
+      "Systems"
+    ]
+  },
+  {
     "id": "xlstm-extended-memory",
     "title": "xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)",
     "category": "research",

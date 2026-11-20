@@ -1,3 +1,15 @@
+### [2026-11-20 05:44:38] - Evolved `hyperloglog-plusplus-cardinality`
+- **Title**: HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: Streaming distinct-count — classic HLL harmonic α_m m²/Σ2^{-M}, HLL++ sparse list + linear-counting fallback + bias-correction window, PCSA/FM bitmaps, Linear Counting, mergeable register-max union, RSE 1.04/√m theory ledger — pure-Python companion to XOR/Fuse membership filters.
+- **CLI**: `hyperloglog-plusplus-cardinality {selftest,estimate,stream,merge,compare,bench,theory,status,explain}`
+- **Artifacts**:
+  - `bin/hyperloglog-plusplus-cardinality`
+  - `skills/systems/hyperloglog-plusplus-cardinality/SKILL.md`
+  - `tests/test_hyperloglog_plusplus_cardinality.py` (23/23 passed)
+- **Verification**: selftest 38/38 exit 0; pytest 23 passed; medium n=2000 p=10 rel_err≈0.44%; merge union err≈1.4%; theory p=14 RSE=0.8125% dense=12KiB.
+
 ### [2026-11-19 17:55:30] - Evolved `xor-filter-fuse-membership`
 - **Title**: XOR + Binary Fuse Filter Membership Oracle (Graf & Lemire SEA 2020 / 2022)
 - **Category**: systems

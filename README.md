@@ -1,19 +1,20 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
-- **Latest evolution**: `xor-filter-fuse-membership` (XOR + Binary Fuse filters, Graf & Lemire) — 2026-11-19 17:55:30
+- **Latest evolution**: `hyperloglog-plusplus-cardinality` (HyperLogLog++ cardinality sketches, Flajolet / Google) — 2026-11-20 05:44:38
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-137-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-138-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (137 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (138 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
+| **HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)** | `systems` | `hyperloglog-plusplus-cardinality` | Streaming distinct-count: HLL harmonic estimator, HLL++ sparse+bias+linear-count, PCSA/FM + Linear Counting baselines, mergeable register-max unions, RSE 1.04/√m (AOFA 2007 / EDBT 2013). | `Cardinality` `HyperLogLog` `HLL++` |
 | **HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)** | `systems` | `hotstuff-chained-bft` | Chained HotStuff: generic QCs, 3-chain commit, locked-QC safe-node, linear O(n) leader aggregation, pacemaker NEW-VIEW, linearizable KV, crash/Byzantine-fork/lossy chaos (PODC 2019). | `HotStuff` `BFT` `QuorumCertificate` |
 | **xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)** | `research` | `xlstm-extended-memory` | Beck et al. 2024 xLSTM: exponential-gated sLSTM with normalizer + head-local memory mixing, matrix-memory mLSTM outer-product KV covariance, residual RMSNorm stacks, copy/parity/associative-recall probes vs classic LSTM (arXiv:2405.04517). | `xLSTM` `sLSTM` `mLSTM` |
 | **S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle** | `systems` | `s3fifo-tinylfu-ghost-ring` | S3-FIFO three-ring queues + W-TinyLFU Count-Min Sketch admission hybrid with ghost history, Bloom doorkeeper, and LRU/FIFO/CLOCK/ARC baselines (Yang 2023 / Einziger TOCS 2017). | `Caching` `S3FIFO` `TinyLFU` |
