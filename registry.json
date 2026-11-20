@@ -2403,5 +2403,23 @@
       "SEA2020",
       "HypergraphPeeling"
     ]
+  },
+  {
+    "id": "kll-tdigest-ddsketch-quantiles",
+    "title": "KLL + T-Digest + DDSketch Streaming Quantile Oracle (Karnin 2016 / Dunning 2019 / Masson 2019 / GK 2001)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "One-pass quantile/CDF sketches: KLL hierarchical compactors, T-Digest centroids, DDSketch relative-error \u03b3-buckets, Greenwald\u2013Khanna \u03b5-summaries; mergeable shards, multi-law benches, theory ledgers (FOCS 2016 / VLDB 2019 / SIGMOD 2001).",
+    "cli": "kll-tdigest-ddsketch-quantiles",
+    "evolved_at": "2026-11-20T09:22:56",
+    "tags": [
+      "Quantiles",
+      "KLL",
+      "TDigest",
+      "DDSketch",
+      "GreenwaldKhanna",
+      "Streaming",
+      "Sketches"
+    ]
   }
 ]

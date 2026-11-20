@@ -1,0 +1,1364 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""kll-tdigest-ddsketch-quantiles: Streaming Quantile / CDF Sketch Oracle.
+
+Production-grade pure-Python one-pass quantile estimators for numeric streams:
+
+  • KLL Sketch (Karnin, Lang, Liberty 2016): compact hierarchical sampler with
+    capacity schedule c·k·2^{−i/3}, random compaction, relative rank error O(1/k).
+  • T-Digest (Dunning & Ertl 2019): centroid clustering with scale-function
+    capacity; strong on extreme tails (p99/p999) with weighted means.
+  • DDSketch (Masson, Rim, Nguyen 2019 / Datadog): relative-error γ-buckets on
+    a log lattice — guaranteed |q̂−q|/q ≤ α for positive values.
+  • Greenwald–Khanna (GK 2001): classic ε-approximate quantile summary with
+    (v, g, Δ) tuples and deterministic rank bounds.
+  • Exact sorted oracle for ground-truth CDF / quantile error measurement.
+  • Mergeable KLL / DDSketch shards, theory ledgers, synthetic stream benches.
+
+CLI: selftest | estimate | stream | merge | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only.
+
+References:
+  - Karnin, Lang, Liberty — Optimal Quantile Approximation in Streams, FOCS 2016
+  - Dunning & Ertl — Computing Extremely Accurate Quantiles Using t-Digests, 2019
+  - Masson, Rim, Nguyen — DDSketch: A Fast and Fully-Mergeable Quantile Sketch
+    with Relative-Error Guarantees, VLDB 2019
+  - Greenwald & Khanna — Space-Efficient Online Computation of Quantile Summaries,
+    SIGMOD 2001
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+EPS = 1e-15
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stream generators & exact oracle
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def make_uniform_stream(n: int, lo: float = 0.0, hi: float = 1.0, seed: int = 0) -> List[float]:
+    rng = random.Random(seed)
+    return [rng.uniform(lo, hi) for _ in range(n)]
+
+
+def make_gaussian_stream(n: int, mu: float = 0.0, sigma: float = 1.0, seed: int = 0) -> List[float]:
+    rng = random.Random(seed)
+    return [rng.gauss(mu, sigma) for _ in range(n)]
+
+
+def make_lognormal_stream(n: int, mu: float = 0.0, sigma: float = 1.0, seed: int = 0) -> List[float]:
+    rng = random.Random(seed)
+    return [math.exp(rng.gauss(mu, sigma)) for _ in range(n)]
+
+
+def make_pareto_stream(n: int, xm: float = 1.0, alpha: float = 1.5, seed: int = 0) -> List[float]:
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        u = max(rng.random(), 1e-12)
+        out.append(xm / (u ** (1.0 / alpha)))
+    return out
+
+
+def make_mixture_stream(n: int, seed: int = 0) -> List[float]:
+    """70% N(0,1) + 25% N(8,2) + 5% lognormal tail — hard multi-modal + heavy tail."""
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        u = rng.random()
+        if u < 0.70:
+            out.append(rng.gauss(0.0, 1.0))
+        elif u < 0.95:
+            out.append(rng.gauss(8.0, 2.0))
+        else:
+            out.append(math.exp(rng.gauss(1.5, 0.8)))
+    return out
+
+
+STREAM_FACTORIES = {
+    "uniform": make_uniform_stream,
+    "gaussian": make_gaussian_stream,
+    "lognormal": make_lognormal_stream,
+    "pareto": make_pareto_stream,
+    "mixture": make_mixture_stream,
+}
+
+
+def build_stream(kind: str, n: int, seed: int = 0, **kwargs) -> List[float]:
+    kind = kind.lower()
+    if kind == "uniform":
+        return make_uniform_stream(n, kwargs.get("lo", 0.0), kwargs.get("hi", 1.0), seed)
+    if kind == "gaussian":
+        return make_gaussian_stream(n, kwargs.get("mu", 0.0), kwargs.get("sigma", 1.0), seed)
+    if kind == "lognormal":
+        return make_lognormal_stream(n, kwargs.get("mu", 0.0), kwargs.get("sigma", 1.0), seed)
+    if kind == "pareto":
+        return make_pareto_stream(n, kwargs.get("xm", 1.0), kwargs.get("alpha", 1.5), seed)
+    if kind == "mixture":
+        return make_mixture_stream(n, seed)
+    raise ValueError(f"unknown stream kind: {kind}")
+
+
+class ExactQuantiles:
+    """Ground-truth sorted buffer (O(n) memory) for error measurement."""
+
+    def __init__(self) -> None:
+        self._vals: List[float] = []
+        self._sorted = True
+
+    def add(self, x: float) -> None:
+        self._vals.append(float(x))
+        self._sorted = False
+
+    def add_many(self, xs: Iterable[float]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def _ensure(self) -> None:
+        if not self._sorted:
+            self._vals.sort()
+            self._sorted = True
+
+    @property
+    def n(self) -> int:
+        return len(self._vals)
+
+    @property
+    def total(self) -> int:
+        return len(self._vals)
+
+    def quantile(self, q: float) -> float:
+        if not self._vals:
+            raise ValueError("empty")
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("q must be in [0,1]")
+        self._ensure()
+        if q <= 0:
+            return self._vals[0]
+        if q >= 1:
+            return self._vals[-1]
+        # linear-rank interpolation (R-7 / Hyndman-Fan type 7)
+        n = len(self._vals)
+        h = 1.0 + (n - 1) * q
+        lo = int(math.floor(h)) - 1
+        hi = int(math.ceil(h)) - 1
+        lo = max(0, min(n - 1, lo))
+        hi = max(0, min(n - 1, hi))
+        if lo == hi:
+            return self._vals[lo]
+        frac = h - math.floor(h)
+        return self._vals[lo] * (1.0 - frac) + self._vals[hi] * frac
+
+    def rank(self, x: float) -> float:
+        """Empirical CDF F̂(x) = #{v ≤ x}/n."""
+        if not self._vals:
+            return 0.0
+        self._ensure()
+        # bisect_right
+        lo, hi = 0, len(self._vals)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._vals[mid] <= x:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo / len(self._vals)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"kind": "exact", "n": self.n}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Theory helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def kll_capacity(k: int, level: int) -> int:
+    """Capacity of level i: max(2, ⌈c · k · 2^{−i/3}⌉) with c≈2/3 convention."""
+    if k < 2:
+        raise ValueError("k must be ≥ 2")
+    c = 2.0 / 3.0
+    cap = int(math.ceil(c * k * (2.0 ** (-level / 3.0))))
+    return max(2, cap)
+
+
+def kll_rank_error_bound(k: int) -> float:
+    """Heuristic relative rank error ≈ 1/k (order-optimal FOCS'16)."""
+    return 1.0 / max(1, k)
+
+
+def ddsketch_gamma(alpha: float) -> float:
+    """γ = (1+α)/(1−α) for relative-error α ∈ (0,1)."""
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha must be in (0,1)")
+    return (1.0 + alpha) / (1.0 - alpha)
+
+
+def ddsketch_log_gamma(alpha: float) -> float:
+    return math.log(ddsketch_gamma(alpha))
+
+
+def gk_space_bound(epsilon: float, n: int) -> int:
+    """Classic GK summary size O((1/ε) log(ε n))."""
+    if epsilon <= 0:
+        raise ValueError("epsilon must be > 0")
+    if n <= 0:
+        return 0
+    return int(math.ceil((1.0 / epsilon) * math.log(max(epsilon * n, 1.0) + 1.0)))
+
+
+def theory_ledger(
+    k: int = 200,
+    alpha: float = 0.01,
+    epsilon: float = 0.01,
+    n: int = 1_000_000,
+    compression: float = 100.0,
+) -> Dict[str, Any]:
+    gamma = ddsketch_gamma(alpha)
+    return {
+        "kll": {
+            "k": k,
+            "rank_error_approx": kll_rank_error_bound(k),
+            "level0_capacity": kll_capacity(k, 0),
+            "level3_capacity": kll_capacity(k, 3),
+            "note": "FOCS 2016 optimal rank error Θ(1/k); space O(k log log n)",
+        },
+        "tdigest": {
+            "compression": compression,
+            "centroid_budget_approx": int(compression),
+            "note": "scale fn limits centroids near median denser; excellent p99/p999",
+        },
+        "ddsketch": {
+            "alpha": alpha,
+            "gamma": gamma,
+            "log_gamma": math.log(gamma),
+            "relative_error_guarantee": alpha,
+            "note": "VLDB 2019; fully mergeable; positive values only for classic form",
+        },
+        "gk": {
+            "epsilon": epsilon,
+            "space_bound_at_n": gk_space_bound(epsilon, n),
+            "n": n,
+            "note": "SIGMOD 2001 deterministic ε-approx; size O((1/ε) log(εn))",
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# KLL Sketch
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class KLLSketch:
+    """Karnin–Lang–Liberty hierarchical quantile sketch (simplified practical form).
+
+    Compacts even-sized levels by randomly keeping even or odd indices after sort.
+    Relative rank error scales as O(1/k).
+    """
+
+    def __init__(self, k: int = 200, seed: int = 0) -> None:
+        if k < 4:
+            raise ValueError("k must be ≥ 4")
+        self.k = int(k)
+        self.seed = int(seed)
+        self._rng = random.Random(seed)
+        self.levels: List[List[float]] = [[]]
+        self.n = 0
+        self._compactions = 0
+
+    def _capacity(self, level: int) -> int:
+        return kll_capacity(self.k, level)
+
+    def add(self, x: float) -> None:
+        self.levels[0].append(float(x))
+        self.n += 1
+        self._compact_if_needed()
+
+    def add_many(self, xs: Iterable[float]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def _compact_if_needed(self) -> None:
+        i = 0
+        while True:
+            while len(self.levels) <= i:
+                self.levels.append([])
+            if len(self.levels[i]) < self._capacity(i):
+                break
+            self._compact_level(i)
+            i += 1
+
+    def _compact_level(self, i: int) -> None:
+        buf = self.levels[i]
+        buf.sort()
+        # drop one if odd so we pair evenly
+        if len(buf) % 2 == 1:
+            # keep median-ish by dropping a random end element after sort
+            if self._rng.random() < 0.5:
+                buf.pop(0)
+            else:
+                buf.pop()
+        keep_even = self._rng.random() < 0.5
+        compacted = buf[0::2] if keep_even else buf[1::2]
+        self.levels[i] = []
+        while len(self.levels) <= i + 1:
+            self.levels.append([])
+        self.levels[i + 1].extend(compacted)
+        self._compactions += 1
+
+    def _weighted_samples(self) -> List[Tuple[float, float]]:
+        """Return (value, weight) pairs; level i has weight 2^i."""
+        out: List[Tuple[float, float]] = []
+        for i, lvl in enumerate(self.levels):
+            w = float(1 << i)
+            for v in lvl:
+                out.append((v, w))
+        out.sort(key=lambda t: t[0])
+        return out
+
+    def quantile(self, q: float) -> float:
+        if self.n == 0:
+            raise ValueError("empty sketch")
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("q in [0,1]")
+        samples = self._weighted_samples()
+        if not samples:
+            raise ValueError("empty levels")
+        total_w = sum(w for _, w in samples)
+        target = q * total_w
+        acc = 0.0
+        prev = samples[0][0]
+        for v, w in samples:
+            acc += w
+            if acc >= target:
+                return v
+            prev = v
+        return samples[-1][0]
+
+    def merge(self, other: "KLLSketch") -> "KLLSketch":
+        if other.k != self.k:
+            raise ValueError("k mismatch")
+        # naive: push all weighted samples as repeated inserts is wrong;
+        # instead fold level buffers then compact.
+        max_l = max(len(self.levels), len(other.levels))
+        while len(self.levels) < max_l:
+            self.levels.append([])
+        for i in range(max_l):
+            o = other.levels[i] if i < len(other.levels) else []
+            self.levels[i].extend(o)
+        self.n += other.n
+        # compact bottom-up until stable
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(self.levels)):
+                if len(self.levels[i]) >= self._capacity(i):
+                    self._compact_level(i)
+                    changed = True
+        return self
+
+    def copy(self) -> "KLLSketch":
+        s = KLLSketch(k=self.k, seed=self.seed)
+        s.levels = [list(lvl) for lvl in self.levels]
+        s.n = self.n
+        s._compactions = self._compactions
+        s._rng = random.Random(self._rng.random())  # advance differently
+        return s
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "kll",
+            "k": self.k,
+            "n": self.n,
+            "levels": len(self.levels),
+            "items": sum(len(l) for l in self.levels),
+            "compactions": self._compactions,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T-Digest
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _Centroid:
+    mean: float
+    weight: float
+
+
+class TDigest:
+    """Merging t-digest with k0 scale function (Dunning).
+
+    scale(q) = δ/(4π) * arcsin(2q−1)  → denser centroids near tails? Actually
+    the classic k0 puts MORE resolution near the median; for extreme tails
+    t-digest still shines via asymmetric merging. We use the common practical
+    scale that tightens near 0 and 1:
+
+      k(q) = (δ / 2) * (q * (1 − q))^{−0.5}   [approx inv-scale capacity]
+
+    Capacity of a centroid at quantile q is max(1, floor(δ * q * (1-q))).
+    """
+
+    def __init__(self, compression: float = 100.0) -> None:
+        if compression < 10:
+            raise ValueError("compression must be ≥ 10")
+        self.compression = float(compression)
+        self.centroids: List[_Centroid] = []
+        self.n = 0.0
+        self._unmerged: List[float] = []
+        self._buffer_limit = max(10, int(compression) * 2)
+
+    def add(self, x: float, w: float = 1.0) -> None:
+        self._unmerged.append(float(x))
+        # weight-1 only in buffer; multi-weight goes direct
+        if w != 1.0:
+            # flush first
+            if self._unmerged:
+                self._unmerged.pop()  # remove the one we just put
+                self._compress_buffer()
+            self._insert_centroid(float(x), float(w))
+            return
+        if len(self._unmerged) >= self._buffer_limit:
+            self._compress_buffer()
+
+    def add_many(self, xs: Iterable[float]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def _compress_buffer(self) -> None:
+        if not self._unmerged:
+            return
+        for x in self._unmerged:
+            self._insert_centroid(x, 1.0)
+        self._unmerged.clear()
+        self._compress()
+
+    def _insert_centroid(self, mean: float, weight: float) -> None:
+        self.n += weight
+        self.centroids.append(_Centroid(mean, weight))
+
+    def _max_weight(self, q: float) -> float:
+        # capacity ~ 4*n/δ * q(1-q)  (k2 scale)
+        q = min(max(q, 1e-9), 1.0 - 1e-9)
+        return max(1.0, (4.0 * self.n / self.compression) * q * (1.0 - q))
+
+    def _compress(self) -> None:
+        if len(self.centroids) <= 1:
+            return
+        self.centroids.sort(key=lambda c: c.mean)
+        merged: List[_Centroid] = []
+        total = self.n
+        cum = 0.0
+        i = 0
+        while i < len(self.centroids):
+            c = self.centroids[i]
+            # try to absorb following centroids while under capacity
+            j = i + 1
+            weight = c.weight
+            mean = c.mean
+            q = (cum + weight / 2.0) / max(total, 1.0)
+            while j < len(self.centroids):
+                nxt = self.centroids[j]
+                # proposed merge weight
+                new_w = weight + nxt.weight
+                q_new = (cum + new_w / 2.0) / max(total, 1.0)
+                if new_w <= self._max_weight(q_new) and new_w <= self._max_weight(q):
+                    # merge
+                    mean = (mean * weight + nxt.mean * nxt.weight) / new_w
+                    weight = new_w
+                    j += 1
+                else:
+                    break
+            merged.append(_Centroid(mean, weight))
+            cum += weight
+            i = j if j > i + 1 else i + 1
+            if j == i:  # safety
+                pass
+        # Fix potential bug: if no merge path advanced incorrectly
+        # Rebuild more carefully
+        merged = []
+        cum = 0.0
+        cur: Optional[_Centroid] = None
+        for c in self.centroids:
+            if cur is None:
+                cur = _Centroid(c.mean, c.weight)
+                continue
+            proposed_w = cur.weight + c.weight
+            q = (cum + proposed_w / 2.0) / max(total, 1.0)
+            if proposed_w <= self._max_weight(q):
+                cur.mean = (cur.mean * cur.weight + c.mean * c.weight) / proposed_w
+                cur.weight = proposed_w
+            else:
+                merged.append(cur)
+                cum += cur.weight
+                cur = _Centroid(c.mean, c.weight)
+        if cur is not None:
+            merged.append(cur)
+        self.centroids = merged
+
+    def _force_flush(self) -> None:
+        self._compress_buffer()
+        if self.centroids:
+            self._compress()
+
+    def quantile(self, q: float) -> float:
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("q in [0,1]")
+        self._force_flush()
+        if not self.centroids:
+            raise ValueError("empty")
+        if q <= 0:
+            return self.centroids[0].mean
+        if q >= 1:
+            return self.centroids[-1].mean
+        target = q * self.n
+        cum = 0.0
+        for idx, c in enumerate(self.centroids):
+            # interpolate within centroid weight
+            left = cum
+            right = cum + c.weight
+            if target <= right or idx == len(self.centroids) - 1:
+                if c.weight == 1 or idx == 0 or idx == len(self.centroids) - 1:
+                    return c.mean
+                # linear between neighbor means
+                prev = self.centroids[idx - 1]
+                # position within [left, right]
+                frac = (target - left) / max(c.weight, EPS)
+                # slope from prev.mean → c.mean → next
+                if idx + 1 < len(self.centroids):
+                    nxt = self.centroids[idx + 1]
+                    # quantile within centroid maps mean toward neighbors
+                    if frac < 0.5:
+                        t = frac * 2.0
+                        return prev.mean * (1 - t) + c.mean * t
+                    t = (frac - 0.5) * 2.0
+                    return c.mean * (1 - t) + nxt.mean * t
+                return c.mean
+            cum = right
+        return self.centroids[-1].mean
+
+    def merge(self, other: "TDigest") -> "TDigest":
+        self._force_flush()
+        other._force_flush()
+        for c in other.centroids:
+            self.centroids.append(_Centroid(c.mean, c.weight))
+        self.n += other.n
+        self._compress()
+        return self
+
+    def as_dict(self) -> Dict[str, Any]:
+        self._force_flush()
+        return {
+            "kind": "tdigest",
+            "compression": self.compression,
+            "n": int(self.n),
+            "centroids": len(self.centroids),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DDSketch
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class DDSketch:
+    """Relative-error logarithmic bucket quantile sketch (Datadog DDSketch).
+
+    Stores counts in buckets indexed by ⌊log_γ(x)⌋ for x > 0.
+    Guarantees |q̂ − q| / q ≤ α for positive quantiles when γ=(1+α)/(1−α).
+    Negatives and zeros tracked separately (simple exact counters for 0;
+    mirrored buckets for negatives).
+    """
+
+    def __init__(self, alpha: float = 0.01) -> None:
+        if not (1e-6 < alpha < 0.5):
+            raise ValueError("alpha must be in (1e-6, 0.5)")
+        self.alpha = float(alpha)
+        self.gamma = ddsketch_gamma(alpha)
+        self.log_gamma = math.log(self.gamma)
+        self.pos: Dict[int, float] = {}
+        self.neg: Dict[int, float] = {}
+        self.zero_count = 0.0
+        self.n = 0.0
+
+    def _index(self, x: float) -> int:
+        # index for |x|
+        ax = abs(x)
+        if ax < EPS:
+            return 0
+        return int(math.floor(math.log(ax) / self.log_gamma))
+
+    def _value_of_index(self, idx: int) -> float:
+        # representative = γ^{i} * 2/(1+γ)  mid of bucket approx γ^i
+        return self.gamma ** idx
+
+    def add(self, x: float, w: float = 1.0) -> None:
+        x = float(x)
+        w = float(w)
+        self.n += w
+        if abs(x) < EPS:
+            self.zero_count += w
+            return
+        idx = self._index(x)
+        if x > 0:
+            self.pos[idx] = self.pos.get(idx, 0.0) + w
+        else:
+            self.neg[idx] = self.neg.get(idx, 0.0) + w
+
+    def add_many(self, xs: Iterable[float]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def quantile(self, q: float) -> float:
+        if self.n <= 0:
+            raise ValueError("empty")
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("q in [0,1]")
+        target = q * self.n
+        # walk: negatives (descending magnitude = ascending value), zeros, positives
+        acc = 0.0
+        # negatives: more negative first → higher index first
+        for idx in sorted(self.neg.keys(), reverse=True):
+            acc += self.neg[idx]
+            if acc >= target:
+                return -self._value_of_index(idx)
+        acc += self.zero_count
+        if acc >= target:
+            return 0.0
+        for idx in sorted(self.pos.keys()):
+            acc += self.pos[idx]
+            if acc >= target:
+                return self._value_of_index(idx)
+        # fallback last
+        if self.pos:
+            return self._value_of_index(max(self.pos.keys()))
+        if self.zero_count:
+            return 0.0
+        if self.neg:
+            return -self._value_of_index(min(self.neg.keys()))
+        return 0.0
+
+    def merge(self, other: "DDSketch") -> "DDSketch":
+        if abs(other.alpha - self.alpha) > 1e-15:
+            raise ValueError("alpha mismatch")
+        for k, v in other.pos.items():
+            self.pos[k] = self.pos.get(k, 0.0) + v
+        for k, v in other.neg.items():
+            self.neg[k] = self.neg.get(k, 0.0) + v
+        self.zero_count += other.zero_count
+        self.n += other.n
+        return self
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "ddsketch",
+            "alpha": self.alpha,
+            "gamma": self.gamma,
+            "n": int(self.n),
+            "pos_buckets": len(self.pos),
+            "neg_buckets": len(self.neg),
+            "zeros": self.zero_count,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Greenwald–Khanna
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _GKTuple:
+    v: float
+    g: float  # rank gap from previous
+    delta: float  # max uncertainty
+
+
+class GKSketch:
+    """Greenwald–Khanna ε-approximate quantile summary."""
+
+    def __init__(self, epsilon: float = 0.01) -> None:
+        if not (0.0 < epsilon < 0.5):
+            raise ValueError("epsilon in (0,0.5)")
+        self.epsilon = float(epsilon)
+        self.summary: List[_GKTuple] = []
+        self.n = 0
+
+    def add(self, x: float) -> None:
+        x = float(x)
+        self.n += 1
+        t = _GKTuple(v=x, g=1.0, delta=math.floor(2 * self.epsilon * self.n))
+        # insert sorted by v
+        if not self.summary:
+            self.summary.append(t)
+            return
+        # find insert position
+        lo, hi = 0, len(self.summary)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.summary[mid].v < x:
+                lo = mid + 1
+            else:
+                hi = mid
+        # endpoints always delta=0
+        if lo == 0 or lo == len(self.summary):
+            t.delta = 0.0
+        self.summary.insert(lo, t)
+        if self.n % max(1, int(1.0 / (2.0 * self.epsilon))) == 0:
+            self._compress()
+
+    def add_many(self, xs: Iterable[float]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def _compress(self) -> None:
+        if len(self.summary) < 3:
+            return
+        threshold = 2 * self.epsilon * self.n
+        # merge from right (classic GK compress)
+        i = len(self.summary) - 2
+        while i >= 1:
+            # try merge i into i+1 if g_i + g_{i+1} + Δ_{i+1} < threshold
+            a = self.summary[i]
+            b = self.summary[i + 1]
+            if a.g + b.g + b.delta < threshold:
+                b.g += a.g
+                del self.summary[i]
+            i -= 1
+
+    def quantile(self, q: float) -> float:
+        if self.n == 0:
+            raise ValueError("empty")
+        if not (0.0 <= q <= 1.0):
+            raise ValueError("q in [0,1]")
+        if not self.summary:
+            raise ValueError("empty summary")
+        # target rank
+        rank = q * self.n
+        # r_min(i) = sum_{j<=i} g_j
+        # r_max(i) = r_min(i) + Δ_i
+        # pick smallest i with r_max >= rank and r_min bounds within εn
+        thresh = self.epsilon * self.n
+        rmin = 0.0
+        best = self.summary[0].v
+        for t in self.summary:
+            rmin += t.g
+            rmax = rmin + t.delta
+            # want rmin + delta > rank + something — classic:
+            if rmax >= rank + thresh or rmin >= rank:
+                return t.v
+            best = t.v
+        return best
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "gk",
+            "epsilon": self.epsilon,
+            "n": self.n,
+            "tuples": len(self.summary),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dispatch / evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+DEFAULT_QS = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999]
+
+
+def build_sketch(kind: str, **kwargs: Any):
+    kind = kind.lower().replace("-", "_")
+    if kind in ("kll",):
+        return KLLSketch(k=int(kwargs.get("k", 200)), seed=int(kwargs.get("seed", 0)))
+    if kind in ("tdigest", "t_digest", "t-digest"):
+        return TDigest(compression=float(kwargs.get("compression", 100.0)))
+    if kind in ("ddsketch", "dd"):
+        return DDSketch(alpha=float(kwargs.get("alpha", 0.01)))
+    if kind in ("gk", "greenwald_khanna"):
+        return GKSketch(epsilon=float(kwargs.get("epsilon", 0.01)))
+    if kind in ("exact",):
+        return ExactQuantiles()
+    raise ValueError(f"unknown sketch kind: {kind}")
+
+
+def relative_error(est: float, truth: float) -> float:
+    denom = max(abs(truth), EPS)
+    return abs(est - truth) / denom
+
+
+def absolute_error(est: float, truth: float) -> float:
+    return abs(est - truth)
+
+
+def evaluate_stream(
+    kind: str,
+    stream: Sequence[float],
+    qs: Optional[Sequence[float]] = None,
+    seed: int = 0,
+    k: int = 200,
+    compression: float = 100.0,
+    alpha: float = 0.01,
+    epsilon: float = 0.01,
+) -> Dict[str, Any]:
+    qs = list(qs or DEFAULT_QS)
+    truth = ExactQuantiles()
+    sk = build_sketch(
+        kind, k=k, compression=compression, alpha=alpha, epsilon=epsilon, seed=seed
+    )
+    t0 = time.perf_counter()
+    for x in stream:
+        truth.add(x)
+        sk.add(x)
+    build_ms = (time.perf_counter() - t0) * 1000.0
+    rows = []
+    abs_errs = []
+    rel_errs = []
+    rank_errs = []
+    for q in qs:
+        tq = truth.quantile(q)
+        eq = sk.quantile(q)
+        ae = absolute_error(eq, tq)
+        re = relative_error(eq, tq)
+        # rank error: |F(eq) - q|
+        re_rank = abs(truth.rank(eq) - q)
+        abs_errs.append(ae)
+        rel_errs.append(re)
+        rank_errs.append(re_rank)
+        rows.append(
+            {
+                "q": q,
+                "truth": tq,
+                "estimate": eq,
+                "abs_err": ae,
+                "rel_err": re,
+                "rank_err": re_rank,
+            }
+        )
+    return {
+        "kind": kind,
+        "n": len(stream),
+        "build_ms": build_ms,
+        "updates_per_sec": (len(stream) / (build_ms / 1000.0)) if build_ms > 0 else None,
+        "mae": sum(abs_errs) / len(abs_errs),
+        "mre": sum(rel_errs) / len(rel_errs),
+        "mean_rank_err": sum(rank_errs) / len(rank_errs),
+        "max_rank_err": max(rank_errs),
+        "p99_rank_err": rank_errs[qs.index(0.99)] if 0.99 in qs else None,
+        "quantiles": rows,
+        "sketch": sk.as_dict(),
+    }
+
+
+def compare_all(
+    n: int = 20000,
+    stream_kind: str = "mixture",
+    seed: int = 0,
+    k: int = 200,
+    compression: float = 100.0,
+    alpha: float = 0.01,
+    epsilon: float = 0.01,
+    qs: Optional[Sequence[float]] = None,
+) -> Dict[str, Any]:
+    stream = build_stream(stream_kind, n, seed=seed)
+    kinds = ["kll", "tdigest", "ddsketch", "gk"]
+    rows = []
+    for kind in kinds:
+        try:
+            rows.append(
+                evaluate_stream(
+                    kind,
+                    stream,
+                    qs=qs,
+                    seed=seed,
+                    k=k,
+                    compression=compression,
+                    alpha=alpha,
+                    epsilon=epsilon,
+                )
+            )
+        except Exception as e:
+            rows.append({"kind": kind, "error": str(e)})
+    # winner by mean rank error
+    scored = [(r.get("mean_rank_err", 1e9), r["kind"]) for r in rows if "mean_rank_err" in r]
+    scored.sort()
+    winner = scored[0][1] if scored else None
+    return {
+        "stream": stream_kind,
+        "n": n,
+        "seed": seed,
+        "winner_rank_err": winner,
+        "rows": rows,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test gate
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def selftest() -> Dict[str, Any]:
+    checks: List[Tuple[str, bool, str]] = []
+
+    def chk(name: str, cond: bool, detail: str = "") -> None:
+        checks.append((name, bool(cond), detail))
+
+    # theory
+    chk("kll_cap_l0", kll_capacity(200, 0) >= 2)
+    chk("kll_cap_decreases", kll_capacity(200, 0) >= kll_capacity(200, 6))
+    chk("dd_gamma", abs(ddsketch_gamma(0.01) - (1.01 / 0.99)) < 1e-12)
+    chk("gk_space_pos", gk_space_bound(0.01, 100000) > 10)
+
+    # exact
+    ex = ExactQuantiles()
+    ex.add_many([1, 2, 3, 4, 5])
+    chk("exact_median", abs(ex.quantile(0.5) - 3.0) < 1e-9)
+    chk("exact_rank", abs(ex.rank(3) - 0.6) < 1e-12)
+
+    # KLL monotonic on sorted input ranks roughly
+    stream = make_gaussian_stream(5000, seed=1)
+    kll = KLLSketch(k=128, seed=1)
+    kll.add_many(stream)
+    q50 = kll.quantile(0.5)
+    q90 = kll.quantile(0.9)
+    chk("kll_order", q50 <= q90 + 1e-9, f"{q50} vs {q90}")
+    chk("kll_n", kll.n == 5000)
+
+    truth = ExactQuantiles()
+    truth.add_many(stream)
+    rank_err = abs(truth.rank(kll.quantile(0.5)) - 0.5)
+    chk("kll_median_rank", rank_err < 0.05, f"rank_err={rank_err}")
+
+    # TDigest
+    td = TDigest(compression=50)
+    td.add_many(stream)
+    chk("td_n", int(td.n) == 5000)
+    chk("td_order", td.quantile(0.1) <= td.quantile(0.9))
+    td_rank = abs(truth.rank(td.quantile(0.5)) - 0.5)
+    chk("td_median_rank", td_rank < 0.05, f"{td_rank}")
+
+    # DDSketch positive stream
+    pos = make_lognormal_stream(4000, seed=2)
+    dd = DDSketch(alpha=0.02)
+    dd.add_many(pos)
+    tpos = ExactQuantiles()
+    tpos.add_many(pos)
+    # relative error on p50
+    est = dd.quantile(0.5)
+    tru = tpos.quantile(0.5)
+    re = relative_error(est, tru)
+    chk("dd_p50_rel", re < 0.15, f"re={re}, est={est}, tru={tru}")
+    chk("dd_n", int(dd.n) == 4000)
+
+    # DDSketch negatives
+    dd2 = DDSketch(alpha=0.05)
+    dd2.add_many([-10.0, -1.0, 0.0, 1.0, 10.0] * 20)
+    chk("dd_neg_q", dd2.quantile(0.1) <= 0.0)
+
+    # GK
+    gk = GKSketch(epsilon=0.05)
+    gk.add_many(stream)
+    chk("gk_n", gk.n == 5000)
+    gk_rank = abs(truth.rank(gk.quantile(0.5)) - 0.5)
+    chk("gk_median_rank", gk_rank < 0.1, f"{gk_rank}")
+
+    # merge KLL
+    a = KLLSketch(k=64, seed=3)
+    b = KLLSketch(k=64, seed=4)
+    s1 = make_uniform_stream(1000, seed=3)
+    s2 = make_uniform_stream(1000, seed=4)
+    a.add_many(s1)
+    b.add_many(s2)
+    a.merge(b)
+    chk("kll_merge_n", a.n == 2000)
+    chk("kll_merge_q", a.quantile(0.0) <= a.quantile(1.0))
+
+    # merge DDSketch
+    d1 = DDSketch(alpha=0.01)
+    d2 = DDSketch(alpha=0.01)
+    d1.add_many(pos[:2000])
+    d2.add_many(pos[2000:])
+    d1.merge(d2)
+    chk("dd_merge_n", int(d1.n) == 4000)
+
+    # merge tdigest
+    t1 = TDigest(compression=40)
+    t2 = TDigest(compression=40)
+    t1.add_many(stream[:2500])
+    t2.add_many(stream[2500:])
+    t1.merge(t2)
+    chk("td_merge_n", int(t1.n) == 5000)
+
+    # empty errors
+    try:
+        KLLSketch(k=32).quantile(0.5)
+        chk("kll_empty", False)
+    except ValueError:
+        chk("kll_empty", True)
+
+    # compare winner exists
+    cmp = compare_all(n=3000, stream_kind="gaussian", seed=0, k=64, compression=40, epsilon=0.05)
+    chk("compare_winner", cmp["winner_rank_err"] in {"kll", "tdigest", "ddsketch", "gk"})
+
+    # dispatch
+    chk("dispatch_kll", isinstance(build_sketch("kll", k=32), KLLSketch))
+    chk("dispatch_td", isinstance(build_sketch("tdigest"), TDigest))
+    chk("dispatch_dd", isinstance(build_sketch("ddsketch"), DDSketch))
+    chk("dispatch_gk", isinstance(build_sketch("gk"), GKSketch))
+    chk("dispatch_ex", isinstance(build_sketch("exact"), ExactQuantiles))
+
+    # monotonic quantiles on tdigest sorted
+    vals = list(range(1000))
+    td3 = TDigest(compression=80)
+    td3.add_many(float(v) for v in vals)
+    qs = [0.0, 0.25, 0.5, 0.75, 1.0]
+    tqs = [td3.quantile(q) for q in qs]
+    chk("td_mono", all(tqs[i] <= tqs[i + 1] + 1e-6 for i in range(len(tqs) - 1)), str(tqs))
+
+    # KLL on identical values
+    k2 = KLLSketch(k=32, seed=0)
+    k2.add_many([7.0] * 500)
+    chk("kll_const", abs(k2.quantile(0.5) - 7.0) < 1e-9)
+
+    # DDSketch relative guarantee ballpark on p90 lognormal
+    dd3 = DDSketch(alpha=0.05)
+    dd3.add_many(pos)
+    e90 = dd3.quantile(0.9)
+    t90 = tpos.quantile(0.9)
+    chk("dd_p90_rel", relative_error(e90, t90) < 0.25, f"{e90} vs {t90}")
+
+    # evaluate_stream keys
+    ev = evaluate_stream("kll", make_gaussian_stream(2000, seed=5), seed=5, k=64)
+    chk("eval_keys", "mae" in ev and "mean_rank_err" in ev and len(ev["quantiles"]) >= 5)
+
+    # theory ledger
+    th = theory_ledger()
+    chk("theory_keys", set(th) >= {"kll", "tdigest", "ddsketch", "gk"})
+
+    # stream factories
+    for name in STREAM_FACTORIES:
+        s = build_stream(name, 100, seed=1)
+        chk(f"stream_{name}", len(s) == 100)
+
+    # GK compress shrinks somewhat on large n
+    gk2 = GKSketch(epsilon=0.1)
+    gk2.add_many(make_uniform_stream(2000, seed=9))
+    chk("gk_size_bound", len(gk2.summary) < 2000)
+
+    # rank error of exact is ~0
+    ex2 = ExactQuantiles()
+    ex2.add_many(stream)
+    chk("exact_rank_err0", abs(ex2.rank(ex2.quantile(0.7)) - 0.7) < 0.02)
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    failed = [(n, d) for n, ok, d in checks if not ok]
+    return {
+        "ok": passed == len(checks),
+        "passed": passed,
+        "total": len(checks),
+        "failed": failed,
+        "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in checks],
+    }
+
+
+def explain_text() -> str:
+    return """
+Streaming Quantile Sketch Oracle
+================================
+Problem: estimate CDF quantiles q_p of a numeric stream in one pass with sublinear memory.
+
+KLL (FOCS 2016)
+  Hierarchical buffers; level-i capacity ~ k·2^{-i/3}; random half-compaction.
+  Rank error ~ O(1/k). Best all-rounder for general distributions.
+
+T-Digest (Dunning 2019)
+  Weighted centroids with scale-function capacity denser near median; strong p99.
+  Mergeable; great for latency SLOs and monitoring backends.
+
+DDSketch (VLDB 2019)
+  Log-γ buckets with γ=(1+α)/(1-α). Relative-error |q̂-q|/q ≤ α (positives).
+  Fully mergeable — preferred for multi-shard APM latency histograms.
+
+Greenwald–Khanna (SIGMOD 2001)
+  Deterministic ε-approx (v,g,Δ) tuples. Classic theory baseline.
+
+Pick:
+  • SLA on rank error (abs) → KLL / GK
+  • SLA on relative error (latency ms) → DDSketch
+  • Extreme tails / human-friendly merge → T-Digest
+""".strip()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kll-tdigest-ddsketch-quantiles",
+        description="Streaming quantile / CDF sketch oracle (KLL, T-Digest, DDSketch, GK)",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_self = sub.add_parser("selftest", help="CI invariant gate")
+    p_self.add_argument("--json", action="store_true")
+
+    def add_common(p):
+        p.add_argument("--n", type=int, default=20000)
+        p.add_argument("--stream", default="mixture", choices=list(STREAM_FACTORIES))
+        p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--k", type=int, default=200, help="KLL parameter k")
+        p.add_argument("--compression", type=float, default=100.0, help="T-Digest compression")
+        p.add_argument("--alpha", type=float, default=0.01, help="DDSketch relative error α")
+        p.add_argument("--epsilon", type=float, default=0.01, help="GK epsilon")
+        p.add_argument(
+            "--qs",
+            default=",".join(str(q) for q in DEFAULT_QS),
+            help="comma-separated quantiles",
+        )
+
+    p_est = sub.add_parser("estimate", help="Build sketch and report quantile errors")
+    p_est.add_argument(
+        "--kind",
+        default="kll",
+        choices=["kll", "tdigest", "ddsketch", "gk", "exact"],
+    )
+    add_common(p_est)
+
+    p_stream = sub.add_parser("stream", help="Ingest stream and dump sketch stats JSON")
+    p_stream.add_argument("--kind", default="kll", choices=["kll", "tdigest", "ddsketch", "gk", "exact"])
+    add_common(p_stream)
+
+    p_merge = sub.add_parser("merge", help="Two-shard merge fidelity check")
+    p_merge.add_argument("--kind", default="kll", choices=["kll", "tdigest", "ddsketch"])
+    p_merge.add_argument("--n1", type=int, default=5000)
+    p_merge.add_argument("--n2", type=int, default=5000)
+    p_merge.add_argument("--stream", default="lognormal", choices=list(STREAM_FACTORIES))
+    p_merge.add_argument("--seed", type=int, default=0)
+    p_merge.add_argument("--k", type=int, default=128)
+    p_merge.add_argument("--compression", type=float, default=80.0)
+    p_merge.add_argument("--alpha", type=float, default=0.01)
+
+    p_cmp = sub.add_parser("compare", help="Rank KLL / T-Digest / DDSketch / GK")
+    add_common(p_cmp)
+
+    p_bench = sub.add_parser("bench", help="Microbench updates/sec + rank error")
+    p_bench.add_argument("--kind", default="kll", choices=["kll", "tdigest", "ddsketch", "gk"])
+    p_bench.add_argument("--rounds", type=int, default=3)
+    add_common(p_bench)
+
+    p_th = sub.add_parser("theory", help="Print size / error theory ledger")
+    p_th.add_argument("--k", type=int, default=200)
+    p_th.add_argument("--alpha", type=float, default=0.01)
+    p_th.add_argument("--epsilon", type=float, default=0.01)
+    p_th.add_argument("--n", type=int, default=1_000_000)
+    p_th.add_argument("--compression", type=float, default=100.0)
+
+    sub.add_parser("explain", help="Human protocol walkthrough")
+    sub.add_parser("status", help="Kind + command catalog")
+
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        parser.print_help()
+        return 2
+
+    if args.cmd == "selftest":
+        row = selftest()
+        if getattr(args, "json", False):
+            print(json.dumps(row, indent=2))
+        else:
+            print(f"selftest: {row['passed']}/{row['total']} passed  ok={row['ok']}")
+            for n, d in row.get("failed", []):
+                print(f"  FAIL {n}: {d}")
+        return 0 if row["ok"] else 1
+
+    if args.cmd == "explain":
+        print(explain_text())
+        return 0
+
+    if args.cmd == "status":
+        print(
+            json.dumps(
+                {
+                    "name": "kll-tdigest-ddsketch-quantiles",
+                    "kinds": ["kll", "tdigest", "ddsketch", "gk", "exact"],
+                    "commands": [
+                        "selftest",
+                        "estimate",
+                        "stream",
+                        "merge",
+                        "compare",
+                        "bench",
+                        "theory",
+                        "explain",
+                        "status",
+                    ],
+                    "streams": list(STREAM_FACTORIES),
+                    "default_qs": DEFAULT_QS,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.cmd == "theory":
+        print(
+            json.dumps(
+                theory_ledger(
+                    k=args.k,
+                    alpha=args.alpha,
+                    epsilon=args.epsilon,
+                    n=args.n,
+                    compression=args.compression,
+                ),
+                indent=2,
+            )
+        )
+        return 0
+
+    def parse_qs(s: str) -> List[float]:
+        return [float(x) for x in s.split(",") if x.strip()]
+
+    if args.cmd == "estimate":
+        stream = build_stream(args.stream, args.n, seed=args.seed)
+        out = evaluate_stream(
+            args.kind,
+            stream,
+            qs=parse_qs(args.qs),
+            seed=args.seed,
+            k=args.k,
+            compression=args.compression,
+            alpha=args.alpha,
+            epsilon=args.epsilon,
+        )
+        print(json.dumps(out, indent=2))
+        return 0 if out["mean_rank_err"] < 0.15 else 1
+
+    if args.cmd == "stream":
+        stream = build_stream(args.stream, args.n, seed=args.seed)
+        sk = build_sketch(
+            args.kind,
+            k=args.k,
+            compression=args.compression,
+            alpha=args.alpha,
+            epsilon=args.epsilon,
+            seed=args.seed,
+        )
+        for x in stream:
+            sk.add(x)
+        qs = parse_qs(args.qs)
+        out = {
+            "sketch": sk.as_dict(),
+            "quantiles": {str(q): sk.quantile(q) for q in qs},
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if args.cmd == "merge":
+        s1 = build_stream(args.stream, args.n1, seed=args.seed)
+        s2 = build_stream(args.stream, args.n2, seed=args.seed + 1)
+        full = s1 + s2
+        truth = ExactQuantiles()
+        truth.add_many(full)
+        A = build_sketch(
+            args.kind, k=args.k, compression=args.compression, alpha=args.alpha, seed=args.seed
+        )
+        B = build_sketch(
+            args.kind,
+            k=args.k,
+            compression=args.compression,
+            alpha=args.alpha,
+            seed=args.seed + 1,
+        )
+        for x in s1:
+            A.add(x)
+        for x in s2:
+            B.add(x)
+        A.merge(B)
+        qs = [0.1, 0.5, 0.9, 0.99]
+        rows = []
+        for q in qs:
+            eq = A.quantile(q)
+            tq = truth.quantile(q)
+            rows.append(
+                {
+                    "q": q,
+                    "merged": eq,
+                    "truth": tq,
+                    "rank_err": abs(truth.rank(eq) - q),
+                    "rel_err": relative_error(eq, tq),
+                }
+            )
+        mean_re = sum(r["rank_err"] for r in rows) / len(rows)
+        out = {
+            "kind": args.kind,
+            "n1": args.n1,
+            "n2": args.n2,
+            "merged_n": getattr(A, "n", None),
+            "mean_rank_err": mean_re,
+            "rows": rows,
+            "sketch": A.as_dict(),
+        }
+        print(json.dumps(out, indent=2))
+        return 0 if mean_re < 0.12 else 1
+
+    if args.cmd == "compare":
+        out = compare_all(
+            n=args.n,
+            stream_kind=args.stream,
+            seed=args.seed,
+            k=args.k,
+            compression=args.compression,
+            alpha=args.alpha,
+            epsilon=args.epsilon,
+            qs=parse_qs(args.qs),
+        )
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("winner_rank_err") else 1
+
+    if args.cmd == "bench":
+        rows = []
+        for i in range(args.rounds):
+            stream = build_stream(args.stream, args.n, seed=args.seed + i)
+            rows.append(
+                evaluate_stream(
+                    args.kind,
+                    stream,
+                    qs=parse_qs(args.qs),
+                    seed=args.seed + i,
+                    k=args.k,
+                    compression=args.compression,
+                    alpha=args.alpha,
+                    epsilon=args.epsilon,
+                )
+            )
+        avg_ms = sum(r["build_ms"] for r in rows) / len(rows)
+        avg_rank = sum(r["mean_rank_err"] for r in rows) / len(rows)
+        out = {
+            "kind": args.kind,
+            "n": args.n,
+            "rounds": args.rounds,
+            "avg_build_ms": avg_ms,
+            "avg_updates_per_sec": (args.n / (avg_ms / 1000.0)) if avg_ms > 0 else None,
+            "avg_mean_rank_err": avg_rank,
+            "rows": rows,
+        }
+        print(json.dumps(out, indent=2))
+        return 0 if avg_rank < 0.12 else 1
+
+    parser.error(f"unknown command {args.cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

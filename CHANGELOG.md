@@ -1,3 +1,15 @@
+### [2026-11-20 09:22:56] - Evolved `kll-tdigest-ddsketch-quantiles`
+- **Title**: KLL + T-Digest + DDSketch Streaming Quantile Oracle (Karnin 2016 / Dunning 2019 / Masson 2019 / GK 2001)
+- **Category**: systems
+- **Type**: skill+tool
+- **Description**: One-pass quantile/CDF sketches — KLL hierarchical compactors (FOCS 2016), T-Digest centroids (Dunning 2019), DDSketch relative-error γ-buckets (VLDB 2019), Greenwald–Khanna ε-summaries (SIGMOD 2001); mergeable shards, multi-law benches, theory ledgers — pure-Python companion to HLL++ and Count-Min/Space-Saving.
+- **CLI**: `kll-tdigest-ddsketch-quantiles {selftest,estimate,stream,merge,compare,bench,theory,status,explain}`
+- **Artifacts**:
+  - `bin/kll-tdigest-ddsketch-quantiles`
+  - `skills/systems/kll-tdigest-ddsketch-quantiles/SKILL.md`
+  - `tests/test_kll_tdigest_ddsketch_quantiles.py` (19/19 passed)
+- **Verification**: selftest 40/40 exit 0; pytest 19 passed; KLL gaussian n=5k mean_rank_err≈0.024; DDSketch merge mean_rank_err≈0.0013.
+
 ### [2026-11-20 05:44:38] - Evolved `hyperloglog-plusplus-cardinality`
 - **Title**: HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)
 - **Category**: systems

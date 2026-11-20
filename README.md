@@ -1,16 +1,16 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
-- **Latest evolution**: `countmin-spacesaving-heavy-hitters` (Count-Min + Space-Saving heavy-hitter stream oracle) — 2026-11-20 06:53:15
+- **Latest evolution**: `kll-tdigest-ddsketch-quantiles` (KLL + T-Digest + DDSketch streaming quantile oracle) — 2026-11-20 09:22:56
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-139-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-140-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (139 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (140 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -183,8 +183,12 @@ research-radar
 # Example: Streaming heavy-hitter frequency sketches
 countmin-spacesaving-heavy-hitters selftest
 countmin-spacesaving-heavy-hitters compare --events 20000
+
+# Example: Streaming quantile / CDF sketches
+kll-tdigest-ddsketch-quantiles selftest
+kll-tdigest-ddsketch-quantiles compare --n 10000 --stream mixture
 ```
 
 ---
 
-*Last Evolved: 2026-11-20 06:53:15*
+*Last Evolved: 2026-11-20 09:22:56*
