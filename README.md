@@ -1,25 +1,23 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
-- **Latest evolution**: `hyperloglog-plusplus-cardinality` (HyperLogLog++ cardinality sketches, Flajolet / Google) — 2026-11-20 05:44:38
+- **Latest evolution**: `countmin-spacesaving-heavy-hitters` (Count-Min + Space-Saving heavy-hitter stream oracle) — 2026-11-20 06:53:15
 
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-138-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-139-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (138 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (139 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
-| **HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)** | `systems` | `hyperloglog-plusplus-cardinality` | Streaming distinct-count: HLL harmonic estimator, HLL++ sparse+bias+linear-count, PCSA/FM + Linear Counting baselines, mergeable register-max unions, RSE 1.04/√m (AOFA 2007 / EDBT 2013). | `Cardinality` `HyperLogLog` `HLL++` |
-| **HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)** | `systems` | `hotstuff-chained-bft` | Chained HotStuff: generic QCs, 3-chain commit, locked-QC safe-node, linear O(n) leader aggregation, pacemaker NEW-VIEW, linearizable KV, crash/Byzantine-fork/lossy chaos (PODC 2019). | `HotStuff` `BFT` `QuorumCertificate` |
-| **xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)** | `research` | `xlstm-extended-memory` | Beck et al. 2024 xLSTM: exponential-gated sLSTM with normalizer + head-local memory mixing, matrix-memory mLSTM outer-product KV covariance, residual RMSNorm stacks, copy/parity/associative-recall probes vs classic LSTM (arXiv:2405.04517). | `xLSTM` `sLSTM` `mLSTM` |
-| **S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle** | `systems` | `s3fifo-tinylfu-ghost-ring` | S3-FIFO three-ring queues + W-TinyLFU Count-Min Sketch admission hybrid with ghost history, Bloom doorkeeper, and LRU/FIFO/CLOCK/ARC baselines (Yang 2023 / Einziger TOCS 2017). | `Caching` `S3FIFO` `TinyLFU` |
-| **Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine** | `systems` | `pbft-byzantine-quorum` | PBFT for n=3f+1: three-phase certificates, view-change prepared-cert recovery, checkpoints, linearizable KV, crash/mute/equivocate chaos under discrete-event networks (Castro & Liskov OSDI 1999). | `DistributedSystems` `PBFT` `ByzantineFaultTolerance` |
-| **InfLLM Training-Free Block Memory Engine** | `inference` | `infllm-block-memory-engine` | Training-free infinite-context KV: block partition, representative sketches, host offload, top-k block retrieval by query-rep cosine (arXiv:2402.04617). | `Frontier-AI` `InfLLM` `BlockMemory` `LongContext` |
+| **Count-Min + Space-Saving Heavy-Hitter Stream Oracle (Cormode 2005 / Metwally 2005 / Misra-Gries 1982)** | `systems` | `countmin-spacesaving-heavy-hitters` | One-pass frequency & top-k heavy hitters: Count-Min Sketch (+ conservative), Count-Sketch, Space-Saving, Misra-Gries; mergeable CMS shards, Zipf top-k F1, theory ledgers (J. Algorithms 2005 / ICDT 2005 / SCP 1982). | `HeavyHitters` `CountMin` `SpaceSaving` |
+| **HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)** | `systems` | `hyperloglog-plusplus-cardinality` | Streaming distinct-count sketches: classic HyperLogLog harmonic estimator, HLL++ sparse registers + linear-counting + bias correction, PCSA/Flajolet-Martin bitmaps, Linear Counting baseline, mergeable register-max unions, relative-error theory 1.04/sqrt(m) (AOFA 2007 / EDBT 2013). | `Cardinality` `HyperLogLog` `HLL++` |
+| **xLSTM Extended Long Short-Term Memory Engine (sLSTM + mLSTM)** | `research` | `xlstm-extended-memory` | Beck et al. 2024 xLSTM: exponential-gated sLSTM with normalizer + head-local memory mixing, matrix-memory mLSTM with outer-product KV covariance updates, residual RMSNorm stacks, and copy/parity/associative-recall probes vs classic LSTM (arXiv:2405.04517). | `Frontier-AI` `xLSTM` `sLSTM` |
+| **S3-FIFO + Window-TinyLFU Ghost Ring Cache Oracle** | `systems` | `s3fifo-tinylfu-ghost-ring` | S3-FIFO three-ring queues + Window-TinyLFU Count-Min Sketch admission hybrid with ghost history, Bloom doorkeeper, and LRU/FIFO/CLOCK/ARC baselines under Zipf/scan/hotspot workloads (Yang 2023, Einziger TOCS 2017). | `Caching` `S3FIFO` `TinyLFU` |
 | **Android TV Direct Control Engine** | `hardware` | `tv` | Control Android TV directly via ADB: launch streaming apps (YouTube, SonyLIV, Crunchyroll, Hotstar), control volume/playback, type text, and cast video URLs. | `Hardware` `AndroidTV` `ADB` |
 | **Kaggle Grandmaster Autopilot** | `data-science` | `kaggle-autopilot` | Elite autonomous Kaggle competition intelligence system: research, enter, inspect, engineer features, train GBDTs/ensembles, cross-validate, submit, and climb leaderboards autonomously. | `MachineLearning` `Kaggle` `Autopilot` |
 | **Mac SysDoctor & Performance Accelerator** | `productivity` | `sysdoctor` | Autonomous macOS performance doctor: inspects memory pressure, detects rogue CPU hogging processes, purges dead caches, audits thermal throttling, and optimizes battery life. | `macOS` `Performance` `SystemOptimization` |
@@ -55,7 +53,7 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **BitNet b1.58 Ternary Quantization & Inference Engine** | `research` | `bitnet` | 1.58-bit ternary quantization kernel (weights in {-1, 0, +1}) with activation absmax scaling, memory-efficient packed ternary GEMM, and perplexity evaluation. | `Frontier-AI` `BitNet` `Quantization` |
 | **2D Incompressible Navier-Stokes Fluid Simulator** | `computational-science` | `fluid2d` | Chorin projection method fluid dynamics engine with advection, diffusion, pressure Poisson iteration, and terminal ASCII vorticity visualization. | `ComputationalPhysics` `FluidDynamics` `NavierStokes` |
 | **Polyphonic 6-Operator Algorithmic FM Synthesizer & Phase Modulation DSP Engine** | `creative` | `fm-synth` | All 32 Yamaha DX7 routing topologies, 4-Rate/4-Level exponential envelopes, feedback anti-aliasing loops, 16-voice dynamic polyphony with priority voice stealing, Braille oscilloscope, and 16-bit 44.1kHz stereo WAV export. | `Audio-DSP` `FM-Synthesis` `Phase-Modulation` |
-| **Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine** | `computational-science` | `lbm-cfd, sph-hydrodynamics` | Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer. | `ComputationalPhysics` `FluidDynamics` `LatticeBoltzmann` |
+| **Lattice Boltzmann 2D D2Q9 Computational Fluid Dynamics Engine** | `computational-science` | `lbm-cfd` | Production-grade 2D D2Q9 Lattice Boltzmann Method (LBM) fluid dynamics solver with BGK collision operator, Zou-He boundaries, momentum exchange drag/lift calculation, and real-time Unicode Braille vorticity visualizer. | `ComputationalPhysics` `FluidDynamics` `LatticeBoltzmann` |
 | **Binaural 3D Spatial Audio & Ambisonics DSP Engine** | `creative` | `spatial-audio` | Production-grade 3D binaural spatial audio engine: Woodworth spherical head diffraction ITD with cubic Lagrange fractional delay, Duda-Brown ILD head shadow biquad filtering, pinna elevation spectral notch cues, Ambisonics B-format spherical harmonics encoding, Image Source Method room acoustics, FDN reverberation, Braille polar soundfield radar, and 16-bit 44.1kHz stereo WAV export. | `Audio-DSP` `Spatial-Audio` `Binaural` |
 | **Extended Berkeley Packet Filter (eBPF) 64-bit Register VM & Verifier Engine** | `systems` | `ebpf-engine` | Production-grade 64-bit eBPF register virtual machine, static abstract interpretation safety verifier (DAG termination, packet bounds verification, stack frame isolation, zero-division prevention), stateful BPF maps (Hash, Array, RingBuffer), high-speed XDP SYN-flood DDoS firewall, assembly disassembler, and ingress microbenchmark suite. | `SystemsArchitecture` `eBPF` `LinuxKernel` |
 | **FlashAttention-2 & Online Softmax IO-Aware Tiling Engine** | `research` | `flash-attn` | FlashAttention-2 and online softmax IO-aware tiling engine with causal diagonal skipping, exact backward pass without N x N storage, and FlashDecoding split-KV. | `Frontier-AI` `FlashAttention` `OnlineSoftmax` |
@@ -149,6 +147,12 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **Sarathi-Serve: Chunked-Prefill & Stall-Free Piggyback Batching Engine (OSDI 2024)** | `inference` | `sarathi-chunked-prefill` | Chunked prefill & stall-free piggyback batching scheduler for high-throughput LLM serving, eliminating ITL/TBT bubbles via uniform iteration budgets (OSDI 2024). | `sarathi-serve` `chunked-prefill` `piggyback-batching` |
 | **KeyDiff: Key Similarity-Based KV Cache Eviction Engine (NeurIPS 2025)** | `inference` | `keydiff-kv-engine` | Training-free KV cache eviction via geometric key distinctiveness (farthest-point sampling) without attention scores — FlashAttention-compatible needle retention under hard memory budgets. | `Frontier-AI` `KV-Cache` `KeyDiff` |
 | **CurDKV: Value-Guided KV Compression via Approximated CUR Decomposition (NeurIPS 2025)** | `inference` | `curdkv-value-cur-engine` | Training-free value-centric KV cache compression using approximated CUR column leverage scores on the attention-output contribution matrix — preserves Y=softmax(QK^T)V under hard budgets while rejecting high-attention near-zero value decoys that SnapKV/H2O retain. | `Frontier-AI` `KV-Cache` `CurDKV` |
+| **InfLLM: Training-Free Block Memory for Infinite Context (arXiv:2402.04617)** | `inference` | `infllm-block-memory-engine` | Training-free long-context KV engine that partitions past tokens into blocks, keeps representative-token sketches, offloads full block KV to host memory, and retrieves top-k blocks by query-representative cosine — preserving distant needles under a small GPU working set (sinks + local + retrieved blocks). | `Frontier-AI` `KV-Cache` `InfLLM` |
+| **SPH 2D Smoothed Particle Hydrodynamics Fluid Engine (Monaghan WCSPH)** | `computational-science` | `sph-hydrodynamics` | Mesh-free Lagrangian WCSPH: cubic-spline + Wendland C2 kernels, density summation, Tait EOS (γ=7), Monaghan artificial viscosity, XSPH, leapfrog/Verlet, spatial-hash neighbours, dam-break/hydrostatic/droplet/shear scenarios — pure-Python stdlib CFD companion to LBM and Eulerian NS. | `ComputationalPhysics` `FluidDynamics` `SPH` |
+| **Practical Byzantine Fault Tolerance (PBFT) Quorum Consensus Engine (Castro & Liskov OSDI 1999)** | `systems` | `pbft-byzantine-quorum` | PBFT for n=3f+1: PRE-PREPARE/PREPARE/COMMIT certificates, view-change with prepared-cert recovery, checkpoints, linearizable KV, and chaos models (crash, mute, equivocate) under discrete-event lossy networks — Byzantine complement to Raft. | `DistributedSystems` `PBFT` `ByzantineFaultTolerance` |
+| **HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)** | `systems` | `hotstuff-chained-bft` | Chained HotStuff with generic Quorum Certificates, 3-chain commit, locked-QC safe-node voting, linear O(n) leader-aggregated messaging, pacemaker NEW-VIEW recovery, linearizable KV SM, and crash/Byzantine-fork/lossy chaos — pure-Python companion to PBFT with linearity and responsiveness (PODC 2019 / arXiv:1803.05069). | `DistributedSystems` `HotStuff` `BFT` |
+| **SWIM Gossip Failure Detector & Membership Engine (Das et al. DSN 2002)** | `systems` | `swim-gossip-membership` | SWIM scalable weakly-consistent infection-style membership: direct+indirect ping failure detection, suspicion/confirm with incarnation refutation, epidemic piggyback gossip, O(n) vs O(n²) mesh heartbeat ledger, crash/mute/lossy/partition chaos — pure-Python companion to Kademlia/Raft/HotStuff (DSN 2002). | `DistributedSystems` `SWIM` `Gossip` |
+| **XOR + Binary Fuse Filter Membership Oracle (Graf & Lemire SEA 2020 / 2022)** | `systems` | `xor-filter-fuse-membership` | Static approximate set membership: classic + blocked Bloom baselines, XOR filters via 3-uniform hypergraph peeling (~1.23n fingerprints), Binary Fuse layered windows with adaptive peel, 8/16-bit FPR ledgers, bits/key theory, and query microbench — pure-Python companion to S3-FIFO/LSM bloom paths (arXiv:1912.08258). | `Filters` `XORFilter` `BinaryFuse` |
 
 ---
 
@@ -176,11 +180,11 @@ ports free 3000
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
 
-# Example: CurDKV value-guided CUR KV compression (NeurIPS 2025)
-curdkv-value-cur-engine selftest
-curdkv-value-cur-engine compare --seq-len 320 --budget-ratio 0.22
+# Example: Streaming heavy-hitter frequency sketches
+countmin-spacesaving-heavy-hitters selftest
+countmin-spacesaving-heavy-hitters compare --events 20000
 ```
 
 ---
 
-*Last Evolved: 2026-11-19 17:55:30*
+*Last Evolved: 2026-11-20 06:53:15*

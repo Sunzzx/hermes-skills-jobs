@@ -1197,4 +1197,11 @@ options:
 ### [2026-11-14 10:56:45] - Evolved `radix-attention-cache`
 - **Title**: RadixAttention: Radix Tree KV Cache Sharing Engine (SGLang / LMSYS, arXiv:2312.07104)
 - **Category**: inference
-- **Description**: 
+- **Description**:
+
+### [2026-11-20 06:53:15] - Evolved `countmin-spacesaving-heavy-hitters`
+- **Title**: Count-Min + Space-Saving Heavy-Hitter Stream Oracle (Cormode 2005 / Metwally 2005 / Misra-Gries 1982)
+- **Category**: systems
+- **Description**: One-pass frequency & top-k heavy hitters: Count-Min Sketch (+ conservative), Count-Sketch, Space-Saving, Misra-Gries; mergeable CMS shards, Zipf top-k F1, theory ledgers (J. Algorithms 2005 / ICDT 2005 / SCP 1982).
+- **CLI**: `countmin-spacesaving-heavy-hitters`
+- **Verification**: selftest 38/38, pytest 22 passed

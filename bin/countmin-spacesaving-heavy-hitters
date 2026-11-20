@@ -1,0 +1,1252 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""countmin-spacesaving-heavy-hitters: Streaming Heavy-Hitter Frequency Oracle.
+
+Production-grade pure-Python frequency / heavy-hitter estimators for one-pass streams:
+
+  • Count-Min Sketch (Cormode & Muthukrishnan 2005): d × w integer counters,
+    pairwise-independent hash rows, point query = min over rows; additive error
+    ≤ ε‖f‖₁ with failure ≤ δ when w=⌈e/ε⌉, d=⌈ln(1/δ)⌉.
+  • Conservative Count-Min (Estan & Varghese): only counters equal to the current
+    min are incremented — strictly tighter overestimate, same worst-case bound.
+  • Count-Sketch (Charikar, Chen, Farach-Colton 2002): signed ±1 hash per row;
+    median of row estimates; unbiased for point queries, better for ℓ₂ heavy hitters.
+  • Space-Saving (Metwally, Agrawal, Abbadi 2005): k tracked counters; on miss
+    replace the min and set count = min+c (deterministic overestimate bound).
+  • Misra–Gries / Frequent (Misra & Gries 1982): classic deterministic k-counter
+    majority generalization — find all items with frequency > n/(k+1).
+  • Exact dict oracle for ground-truth ranking and residual-error measurement.
+  • Mergeable CMS (counter-wise SUM), theory ledgers, Zipf stream benches, JSON I/O.
+
+CLI: selftest | estimate | stream | topk | merge | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only.
+
+References:
+  - Cormode & Muthukrishnan — An Improved Data Stream Summary: The Count-Min Sketch
+    and its Applications, J. Algorithms 2005
+  - Charikar, Chen, Farach-Colton — Finding Frequent Items in Data Streams,
+    ICALP 2002 (Count-Sketch)
+  - Metwally, Agrawal, Abbadi — Efficient Computation of Frequent and Top-k Elements
+    in Data Streams, ICDT 2005 (Space-Saving)
+  - Misra & Gries — Finding Repeated Elements, Science of Computer Programming 1982
+  - Estan & Varghese — New Directions in Traffic Measurement and Accounting, SIGCOMM 2002
+"""
+
+from __future__ import annotations
+
+import argparse
+import heapq
+import json
+import math
+import random
+import struct
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hash primitives (64-bit avalanche)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MASK64 = 0xFFFFFFFFFFFFFFFF
+_FNV_OFFSET = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+_GOLDEN = 0x9E3779B97F4A7C15
+
+
+def _to_bytes(key: Any) -> bytes:
+    if isinstance(key, bytes):
+        return key
+    if isinstance(key, str):
+        return key.encode("utf-8")
+    if isinstance(key, bool):
+        return b"\x01" if key else b"\x00"
+    if isinstance(key, int):
+        return struct.pack("<q", key & 0xFFFFFFFFFFFFFFFF)
+    if isinstance(key, float):
+        return struct.pack("<d", key)
+    return repr(key).encode("utf-8")
+
+
+def fnv1a64(key: Any, seed: int = 0) -> int:
+    h = (_FNV_OFFSET ^ (seed & _MASK64)) & _MASK64
+    for b in _to_bytes(key):
+        h ^= b
+        h = (h * _FNV_PRIME) & _MASK64
+    return h
+
+
+def splitmix64(x: int) -> int:
+    z = (x + _GOLDEN) & _MASK64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return (z ^ (z >> 31)) & _MASK64
+
+
+def hash64(key: Any, seed: int = 0) -> int:
+    """Stable 64-bit keyed hash (FNV-1a mixed through splitmix)."""
+    return splitmix64(fnv1a64(key, seed) ^ ((seed * _GOLDEN) & _MASK64))
+
+
+def hash_pair(key: Any, row: int, seed: int = 0) -> Tuple[int, int]:
+    """Return (bucket in [0, 2^32), sign in {+1,-1}) for row `row`."""
+    h = hash64(key, seed ^ (row * 0x85EBCA77C2B2AE63 & _MASK64))
+    bucket = h & 0xFFFFFFFF
+    sign = 1 if ((h >> 32) & 1) == 0 else -1
+    return bucket, sign
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Theory helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def cms_width(epsilon: float) -> int:
+    """w = ⌈e/ε⌉ — classic Cormode width for additive error ε‖f‖₁."""
+    if epsilon <= 0:
+        raise ValueError("epsilon must be > 0")
+    return max(1, int(math.ceil(math.e / epsilon)))
+
+
+def cms_depth(delta: float) -> int:
+    """d = ⌈ln(1/δ)⌉ — failure probability δ."""
+    if not (0 < delta < 1):
+        raise ValueError("delta must be in (0,1)")
+    return max(1, int(math.ceil(math.log(1.0 / delta))))
+
+
+def cms_bytes(depth: int, width: int) -> int:
+    """Approximate memory: d*w int64 counters + small metadata."""
+    return depth * width * 8 + 64
+
+
+def spacesaving_threshold(n: int, k: int) -> float:
+    """Any item with true freq > n/k is guaranteed tracked (overestimate ≤ n/k)."""
+    if k <= 0:
+        raise ValueError("k must be > 0")
+    return n / float(k)
+
+
+def misra_gries_threshold(n: int, k: int) -> float:
+    """Items with freq > n/(k+1) are guaranteed survivors of MG."""
+    if k <= 0:
+        raise ValueError("k must be > 0")
+    return n / float(k + 1)
+
+
+def relative_error(est: float, truth: float) -> float:
+    if truth == 0:
+        return 0.0 if est == 0 else float("inf")
+    return abs(est - truth) / abs(truth)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Exact oracle
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ExactCounter:
+    """Ground-truth multiset frequency map."""
+
+    def __init__(self) -> None:
+        self._c: Counter = Counter()
+        self.total = 0
+
+    def add(self, key: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        self._c[key] += count
+        self.total += count
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def estimate(self, key: Any) -> int:
+        return int(self._c.get(key, 0))
+
+    def topk(self, k: int) -> List[Tuple[Any, int]]:
+        return self._c.most_common(k)
+
+    def items(self) -> List[Tuple[Any, int]]:
+        return list(self._c.items())
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"kind": "exact", "total": self.total, "unique": len(self._c)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Count-Min Sketch (+ conservative update)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class CountMinSketch:
+    """Cormode–Muthukrishnan Count-Min Sketch with optional conservative updates."""
+
+    depth: int = 5
+    width: int = 2048
+    seed: int = 0
+    conservative: bool = False
+    _table: List[List[int]] = field(default_factory=list, repr=False)
+    total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.depth < 1 or self.width < 1:
+            raise ValueError("depth and width must be ≥ 1")
+        self._table = [[0] * self.width for _ in range(self.depth)]
+
+    @classmethod
+    def from_eps_delta(
+        cls,
+        epsilon: float = 0.001,
+        delta: float = 1e-4,
+        seed: int = 0,
+        conservative: bool = False,
+    ) -> "CountMinSketch":
+        return cls(
+            depth=cms_depth(delta),
+            width=cms_width(epsilon),
+            seed=seed,
+            conservative=conservative,
+        )
+
+    def _positions(self, key: Any) -> List[int]:
+        pos = []
+        for r in range(self.depth):
+            b, _ = hash_pair(key, r, self.seed)
+            pos.append(b % self.width)
+        return pos
+
+    def add(self, key: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        pos = self._positions(key)
+        if not self.conservative:
+            for r, j in enumerate(pos):
+                self._table[r][j] += count
+        else:
+            # Estan–Varghese conservative update: only raise counters at the floor
+            vals = [self._table[r][j] for r, j in enumerate(pos)]
+            floor = min(vals)
+            target = floor + count
+            for r, j in enumerate(pos):
+                if self._table[r][j] < target:
+                    self._table[r][j] = target
+        self.total += count
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def estimate(self, key: Any) -> int:
+        pos = self._positions(key)
+        return min(self._table[r][j] for r, j in enumerate(pos))
+
+    def merge(self, other: "CountMinSketch") -> "CountMinSketch":
+        if (
+            self.depth != other.depth
+            or self.width != other.width
+            or self.seed != other.seed
+            or self.conservative != other.conservative
+        ):
+            raise ValueError("CMS merge requires identical (depth, width, seed, conservative)")
+        for r in range(self.depth):
+            row = self._table[r]
+            orow = other._table[r]
+            for j in range(self.width):
+                row[j] += orow[j]
+        self.total += other.total
+        return self
+
+    def bytes_est(self) -> int:
+        return cms_bytes(self.depth, self.width)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "cms_conservative" if self.conservative else "cms",
+            "depth": self.depth,
+            "width": self.width,
+            "seed": self.seed,
+            "conservative": self.conservative,
+            "total": self.total,
+            "bytes_est": self.bytes_est(),
+            "epsilon_theory": math.e / self.width,
+            "delta_theory": math.exp(-self.depth),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Count-Sketch
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class CountSketch:
+    """Charikar Count-Sketch: signed counters + median estimator."""
+
+    depth: int = 5
+    width: int = 2048
+    seed: int = 0
+    _table: List[List[int]] = field(default_factory=list, repr=False)
+    total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.depth < 1 or self.width < 1:
+            raise ValueError("depth and width must be ≥ 1")
+        self._table = [[0] * self.width for _ in range(self.depth)]
+
+    def add(self, key: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        for r in range(self.depth):
+            b, s = hash_pair(key, r, self.seed)
+            self._table[r][b % self.width] += s * count
+        self.total += count
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def estimate(self, key: Any) -> int:
+        estimates = []
+        for r in range(self.depth):
+            b, s = hash_pair(key, r, self.seed)
+            estimates.append(s * self._table[r][b % self.width])
+        estimates.sort()
+        mid = len(estimates) // 2
+        if len(estimates) % 2 == 1:
+            return int(estimates[mid])
+        # even: average of two middle, then round toward nearest int
+        return int(round(0.5 * (estimates[mid - 1] + estimates[mid])))
+
+    def merge(self, other: "CountSketch") -> "CountSketch":
+        if self.depth != other.depth or self.width != other.width or self.seed != other.seed:
+            raise ValueError("CountSketch merge requires identical shape/seed")
+        for r in range(self.depth):
+            for j in range(self.width):
+                self._table[r][j] += other._table[r][j]
+        self.total += other.total
+        return self
+
+    def bytes_est(self) -> int:
+        return cms_bytes(self.depth, self.width)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "count_sketch",
+            "depth": self.depth,
+            "width": self.width,
+            "seed": self.seed,
+            "total": self.total,
+            "bytes_est": self.bytes_est(),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Space-Saving
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class SpaceSaving:
+    """Metwally Space-Saving top-k counter with guaranteed overestimate bound."""
+
+    capacity: int = 100
+    _counts: Dict[Any, int] = field(default_factory=dict, repr=False)
+    _errors: Dict[Any, int] = field(default_factory=dict, repr=False)  # ε_i overestimate floor
+    total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.capacity < 1:
+            raise ValueError("capacity must be ≥ 1")
+
+    def add(self, key: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        self.total += count
+        if key in self._counts:
+            self._counts[key] += count
+            return
+        if len(self._counts) < self.capacity:
+            self._counts[key] = count
+            self._errors[key] = 0
+            return
+        # Evict minimum; new count = min + count; error floor = min
+        victim, vmin = min(self._counts.items(), key=lambda kv: kv[1])
+        del self._counts[victim]
+        del self._errors[victim]
+        self._counts[key] = vmin + count
+        self._errors[key] = vmin
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def estimate(self, key: Any) -> int:
+        return int(self._counts.get(key, 0))
+
+    def estimate_range(self, key: Any) -> Tuple[int, int]:
+        """Return (lower, upper) where lower = count - error, upper = count."""
+        if key not in self._counts:
+            # Not tracked → true count ≤ min counter (or 0 if empty)
+            if not self._counts:
+                return 0, 0
+            vmin = min(self._counts.values())
+            return 0, vmin
+        c = self._counts[key]
+        e = self._errors.get(key, 0)
+        return max(0, c - e), c
+
+    def topk(self, k: int) -> List[Tuple[Any, int]]:
+        items = sorted(self._counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+        return items[:k]
+
+    def guaranteed_heavy(self, phi: float) -> List[Tuple[Any, int]]:
+        """Items whose lower bound exceeds phi * total."""
+        if self.total <= 0:
+            return []
+        thr = phi * self.total
+        out = []
+        for key, c in self._counts.items():
+            lo, _ = self.estimate_range(key)
+            if lo > thr:
+                out.append((key, c))
+        out.sort(key=lambda kv: -kv[1])
+        return out
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "space_saving",
+            "capacity": self.capacity,
+            "tracked": len(self._counts),
+            "total": self.total,
+            "threshold_n_over_k": spacesaving_threshold(self.total, self.capacity)
+            if self.total
+            else 0.0,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Misra–Gries
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class MisraGries:
+    """Misra–Gries frequent-items algorithm (k counters)."""
+
+    capacity: int = 100
+    _counts: Dict[Any, int] = field(default_factory=dict, repr=False)
+    total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.capacity < 1:
+            raise ValueError("capacity must be ≥ 1")
+
+    def add(self, key: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        for _ in range(count):
+            self._add_one(key)
+            self.total += 1
+
+    def _add_one(self, key: Any) -> None:
+        if key in self._counts:
+            self._counts[key] += 1
+            return
+        if len(self._counts) < self.capacity:
+            self._counts[key] = 1
+            return
+        # Decrement all; drop zeros
+        dead = []
+        for k in self._counts:
+            self._counts[k] -= 1
+            if self._counts[k] <= 0:
+                dead.append(k)
+        for k in dead:
+            del self._counts[k]
+        if len(self._counts) < self.capacity:
+            self._counts[key] = 1
+
+    def add_many(self, keys: Iterable[Any]) -> None:
+        for k in keys:
+            self.add(k)
+
+    def estimate(self, key: Any) -> int:
+        return int(self._counts.get(key, 0))
+
+    def topk(self, k: int) -> List[Tuple[Any, int]]:
+        items = sorted(self._counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+        return items[:k]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "misra_gries",
+            "capacity": self.capacity,
+            "tracked": len(self._counts),
+            "total": self.total,
+            "threshold_n_over_k_plus_1": misra_gries_threshold(self.total, self.capacity)
+            if self.total
+            else 0.0,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stream generators
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def make_keys(n: int, seed: int = 0, prefix: str = "k") -> List[str]:
+    rng = random.Random(seed)
+    # stable unique labels
+    return [f"{prefix}{i:08d}_{rng.randrange(1 << 20):05x}" for i in range(n)]
+
+
+def make_zipf_stream(
+    n_events: int,
+    n_unique: int,
+    alpha: float = 1.1,
+    seed: int = 0,
+    prefix: str = "z",
+) -> List[str]:
+    """Zipf-distributed multiset stream over `n_unique` keys."""
+    if n_unique < 1:
+        raise ValueError("n_unique must be ≥ 1")
+    rng = random.Random(seed)
+    keys = [f"{prefix}{i:06d}" for i in range(n_unique)]
+    # weights ∝ 1/(rank+1)^alpha
+    weights = [1.0 / ((i + 1) ** alpha) for i in range(n_unique)]
+    total_w = sum(weights)
+    cdf = []
+    acc = 0.0
+    for w in weights:
+        acc += w / total_w
+        cdf.append(acc)
+    out: List[str] = []
+    for _ in range(n_events):
+        u = rng.random()
+        # binary search CDF
+        lo, hi = 0, n_unique - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cdf[mid] < u:
+                lo = mid + 1
+            else:
+                hi = mid
+        out.append(keys[lo])
+    return out
+
+
+def make_uniform_stream(n_events: int, n_unique: int, seed: int = 0, prefix: str = "u") -> List[str]:
+    rng = random.Random(seed)
+    keys = [f"{prefix}{i:06d}" for i in range(n_unique)]
+    return [keys[rng.randrange(n_unique)] for _ in range(n_events)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Evaluation helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+KINDS = ("cms", "cms_cons", "count_sketch", "space_saving", "misra_gries", "exact")
+
+
+def build_sketch(
+    kind: str,
+    depth: int = 5,
+    width: int = 2048,
+    capacity: int = 100,
+    seed: int = 0,
+):
+    k = kind.lower().replace("-", "_")
+    if k in ("cms", "count_min", "countmin"):
+        return CountMinSketch(depth=depth, width=width, seed=seed, conservative=False)
+    if k in ("cms_cons", "cms_conservative", "conservative"):
+        return CountMinSketch(depth=depth, width=width, seed=seed, conservative=True)
+    if k in ("count_sketch", "cs", "countsketch"):
+        return CountSketch(depth=depth, width=width, seed=seed)
+    if k in ("space_saving", "ss", "spacesaving"):
+        return SpaceSaving(capacity=capacity)
+    if k in ("misra_gries", "mg", "misra"):
+        return MisraGries(capacity=capacity)
+    if k == "exact":
+        return ExactCounter()
+    raise ValueError(f"unknown kind: {kind}")
+
+
+def point_errors(
+    sketch: Any,
+    truth: ExactCounter,
+    keys: Sequence[Any],
+) -> Dict[str, float]:
+    abs_errs = []
+    rel_errs = []
+    over = 0
+    under = 0
+    for key in keys:
+        t = truth.estimate(key)
+        e = max(0, int(sketch.estimate(key)))  # CMS never negative; CS may be
+        # For fair CMS/SS compare, clamp CS at 0 for residual stats
+        if isinstance(sketch, CountSketch):
+            e_report = e
+        else:
+            e_report = e
+        abs_errs.append(abs(e_report - t))
+        if t > 0:
+            rel_errs.append(abs(e_report - t) / t)
+        if e_report > t:
+            over += 1
+        elif e_report < t:
+            under += 1
+    n = max(1, len(keys))
+    return {
+        "n_keys": len(keys),
+        "mae": sum(abs_errs) / n,
+        "max_abs": max(abs_errs) if abs_errs else 0.0,
+        "mre": (sum(rel_errs) / len(rel_errs)) if rel_errs else 0.0,
+        "overestimate_keys": over,
+        "underestimate_keys": under,
+    }
+
+
+def topk_precision_recall(
+    predicted: Sequence[Tuple[Any, int]],
+    truth_topk: Sequence[Tuple[Any, int]],
+) -> Dict[str, float]:
+    truth_set = {k for k, _ in truth_topk}
+    pred_set = {k for k, _ in predicted}
+    if not truth_set:
+        return {"precision": 1.0, "recall": 1.0, "f1": 1.0, "jaccard": 1.0}
+    tp = len(truth_set & pred_set)
+    prec = tp / len(pred_set) if pred_set else 0.0
+    rec = tp / len(truth_set) if truth_set else 0.0
+    f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+    jac = tp / len(truth_set | pred_set) if (truth_set | pred_set) else 1.0
+    return {"precision": prec, "recall": rec, "f1": f1, "jaccard": jac, "overlap": tp}
+
+
+def evaluate_stream(
+    kind: str,
+    stream: Sequence[Any],
+    depth: int = 5,
+    width: int = 2048,
+    capacity: int = 64,
+    seed: int = 0,
+    top_k: int = 10,
+    probe_keys: Optional[Sequence[Any]] = None,
+) -> Dict[str, Any]:
+    truth = ExactCounter()
+    sketch = build_sketch(kind, depth=depth, width=width, capacity=capacity, seed=seed)
+    t0 = time.perf_counter()
+    for item in stream:
+        truth.add(item)
+        sketch.add(item)
+    ms = (time.perf_counter() - t0) * 1000.0
+
+    truth_top = truth.topk(top_k)
+    if hasattr(sketch, "topk"):
+        pred_top = sketch.topk(top_k)
+    else:
+        # CMS / CS: score candidate universe = truth keys (oracle probe) or stream uniques sample
+        candidates = probe_keys if probe_keys is not None else [k for k, _ in truth.items()]
+        scored = [(k, max(0, int(sketch.estimate(k)))) for k in candidates]
+        scored.sort(key=lambda kv: (-kv[1], str(kv[0])))
+        pred_top = scored[:top_k]
+
+    pr = topk_precision_recall(pred_top, truth_top)
+    # Point error on true top-k + a sample of tail keys
+    probe = [k for k, _ in truth_top]
+    tail = [k for k, _ in truth.items() if k not in set(probe)]
+    rng = random.Random(seed)
+    if tail:
+        probe += rng.sample(tail, min(50, len(tail)))
+    pe = point_errors(sketch, truth, probe)
+
+    # CMS additive error vs ‖f‖₁
+    l1 = truth.total
+    eps_emp = pe["max_abs"] / l1 if l1 else 0.0
+
+    meta = sketch.as_dict() if hasattr(sketch, "as_dict") else {"kind": kind}
+    return {
+        "kind": kind,
+        "n_events": len(stream),
+        "n_unique": len(truth._c),
+        "build_ms": round(ms, 3),
+        "updates_per_sec": (len(stream) / (ms / 1000.0)) if ms > 0 else None,
+        "topk": pr,
+        "point_errors": pe,
+        "eps_empirical_l1": eps_emp,
+        "truth_topk": [(str(k), c) for k, c in truth_top],
+        "pred_topk": [(str(k), int(c)) for k, c in pred_top],
+        "sketch": meta,
+    }
+
+
+def compare_all(
+    n_events: int = 20000,
+    n_unique: int = 2000,
+    alpha: float = 1.2,
+    depth: int = 5,
+    width: int = 1024,
+    capacity: int = 64,
+    top_k: int = 10,
+    seed: int = 0,
+) -> Dict[str, Any]:
+    stream = make_zipf_stream(n_events, n_unique, alpha=alpha, seed=seed)
+    rows = []
+    for kind in ("exact", "cms", "cms_cons", "count_sketch", "space_saving", "misra_gries"):
+        rows.append(
+            evaluate_stream(
+                kind,
+                stream,
+                depth=depth,
+                width=width,
+                capacity=capacity,
+                seed=seed,
+                top_k=top_k,
+            )
+        )
+    # Rank by top-k F1 then MAE
+    ranked = sorted(
+        [r for r in rows if r["kind"] != "exact"],
+        key=lambda r: (-r["topk"]["f1"], r["point_errors"]["mae"]),
+    )
+    return {
+        "n_events": n_events,
+        "n_unique": n_unique,
+        "alpha": alpha,
+        "depth": depth,
+        "width": width,
+        "capacity": capacity,
+        "top_k": top_k,
+        "winner_f1": ranked[0]["kind"] if ranked else None,
+        "rows": rows,
+    }
+
+
+def theory_ledger(
+    epsilon: float = 0.001,
+    delta: float = 1e-4,
+    capacity: int = 100,
+    n: int = 1_000_000,
+) -> Dict[str, Any]:
+    w = cms_width(epsilon)
+    d = cms_depth(delta)
+    return {
+        "count_min": {
+            "epsilon": epsilon,
+            "delta": delta,
+            "width": w,
+            "depth": d,
+            "bytes_est": cms_bytes(d, w),
+            "error_bound": f"|ê - f| ≤ {epsilon}·‖f‖₁ with prob ≥ {1 - delta}",
+            "note": "CMS never underestimates; error is one-sided.",
+        },
+        "count_sketch": {
+            "width": w,
+            "depth": d,
+            "bytes_est": cms_bytes(d, w),
+            "note": "Median of signed estimates; unbiased, good for ℓ₂ heavy hitters.",
+        },
+        "space_saving": {
+            "capacity": capacity,
+            "guarantee": f"Any item with f > n/{capacity} is tracked; overestimate ≤ n/{capacity}",
+            "threshold_at_n": spacesaving_threshold(n, capacity),
+            "bytes_est_approx": capacity * 48,
+        },
+        "misra_gries": {
+            "capacity": capacity,
+            "guarantee": f"All items with f > n/({capacity}+1) survive",
+            "threshold_at_n": misra_gries_threshold(n, capacity),
+            "bytes_est_approx": capacity * 40,
+        },
+        "n": n,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test suite
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def selftest() -> Dict[str, Any]:
+    checks: List[Tuple[str, bool, str]] = []
+
+    def chk(name: str, cond: bool, detail: str = "") -> None:
+        checks.append((name, bool(cond), detail))
+
+    # Hash stability
+    chk("hash_stable", hash64("hermes", 0) == hash64("hermes", 0))
+    chk("hash_seeded", hash64("hermes", 0) != hash64("hermes", 1))
+    chk("fnv_bytes_str", fnv1a64(b"abc") == fnv1a64("abc"))
+
+    # Theory formulas
+    chk("cms_width_e001", cms_width(0.001) == int(math.ceil(math.e / 0.001)))
+    chk("cms_depth_1e-4", cms_depth(1e-4) == int(math.ceil(math.log(1e4))))
+    chk("ss_threshold", abs(spacesaving_threshold(1000, 10) - 100.0) < 1e-12)
+    chk("mg_threshold", abs(misra_gries_threshold(1000, 9) - 100.0) < 1e-12)
+
+    # Empty sketches
+    cms = CountMinSketch(depth=3, width=64, seed=1)
+    chk("cms_empty_zero", cms.estimate("x") == 0)
+    cs = CountSketch(depth=3, width=64, seed=1)
+    chk("cs_empty_zero", cs.estimate("x") == 0)
+    ss = SpaceSaving(capacity=5)
+    chk("ss_empty_zero", ss.estimate("x") == 0)
+    mg = MisraGries(capacity=5)
+    chk("mg_empty_zero", mg.estimate("x") == 0)
+
+    # CMS never underestimates on simple stream
+    stream = make_zipf_stream(5000, 200, alpha=1.3, seed=7)
+    truth = ExactCounter()
+    cms = CountMinSketch(depth=5, width=512, seed=7)
+    cms_c = CountMinSketch(depth=5, width=512, seed=7, conservative=True)
+    for x in stream:
+        truth.add(x)
+        cms.add(x)
+        cms_c.add(x)
+    under_cms = sum(1 for k, c in truth.items() if cms.estimate(k) < c)
+    under_cons = sum(1 for k, c in truth.items() if cms_c.estimate(k) < c)
+    chk("cms_never_under", under_cms == 0, f"under={under_cms}")
+    chk("cms_cons_never_under", under_cons == 0, f"under={under_cons}")
+    # Conservative ≤ classic pointwise
+    cons_le = all(cms_c.estimate(k) <= cms.estimate(k) for k, _ in truth.items())
+    chk("cms_cons_le_classic", cons_le)
+
+    # CMS error within ~few × ε‖f‖₁ on this small instance
+    eps = math.e / 512
+    bound = 4.0 * eps * truth.total + 5  # generous finite-sample slack
+    max_err = max(cms.estimate(k) - c for k, c in truth.items())
+    chk("cms_error_band", max_err <= bound, f"max_err={max_err} bound={bound:.1f}")
+
+    # Count-Sketch reasonable MAE on heavy hitters
+    cs = CountSketch(depth=7, width=1024, seed=7)
+    for x in stream:
+        cs.add(x)
+    heavies = [k for k, _ in truth.topk(10)]
+    cs_mae = sum(abs(cs.estimate(k) - truth.estimate(k)) for k in heavies) / len(heavies)
+    chk("cs_heavy_mae", cs_mae < 50.0, f"mae={cs_mae:.2f}")
+
+    # Space-Saving: true heavy hitters with f > n/k are tracked
+    k_cap = 30
+    ss = SpaceSaving(capacity=k_cap)
+    for x in stream:
+        ss.add(x)
+    thr = spacesaving_threshold(ss.total, k_cap)
+    missing = [k for k, c in truth.items() if c > thr and ss.estimate(k) == 0]
+    chk("ss_guarantee", len(missing) == 0, f"missing={missing[:5]}")
+    # Overestimate property: estimate ≥ true for tracked keys
+    over_ok = all(ss.estimate(k) >= truth.estimate(k) for k in ss._counts)
+    chk("ss_overestimate", over_ok)
+
+    # Misra-Gries: items with f > n/(k+1) survive
+    mg = MisraGries(capacity=k_cap)
+    for x in stream:
+        mg.add(x)
+    thr_mg = misra_gries_threshold(mg.total, k_cap)
+    missing_mg = [k for k, c in truth.items() if c > thr_mg and mg.estimate(k) == 0]
+    chk("mg_guarantee", len(missing_mg) == 0, f"missing={missing_mg[:5]}")
+
+    # Merge CMS
+    a = CountMinSketch(depth=4, width=128, seed=3)
+    b = CountMinSketch(depth=4, width=128, seed=3)
+    a.add_many(["x"] * 10 + ["y"] * 5)
+    b.add_many(["x"] * 7 + ["z"] * 3)
+    a.merge(b)
+    chk("cms_merge_x", a.estimate("x") >= 17)
+    chk("cms_merge_y", a.estimate("y") >= 5)
+    chk("cms_merge_z", a.estimate("z") >= 3)
+    chk("cms_merge_total", a.total == 25)
+
+    # Merge Count-Sketch
+    ca = CountSketch(depth=5, width=256, seed=2)
+    cb = CountSketch(depth=5, width=256, seed=2)
+    ca.add_many(["p"] * 20)
+    cb.add_many(["p"] * 5 + ["q"] * 8)
+    ca.merge(cb)
+    chk("cs_merge_p", abs(ca.estimate("p") - 25) <= 5)
+    chk("cs_merge_total", ca.total == 33)
+
+    # Space-Saving topk F1 on Zipf
+    stream2 = make_zipf_stream(8000, 500, alpha=1.4, seed=11)
+    ev = evaluate_stream("space_saving", stream2, capacity=40, top_k=10, seed=11)
+    chk("ss_topk_f1", ev["topk"]["f1"] >= 0.5, f"f1={ev['topk']['f1']:.3f}")
+
+    # CMS topk F1 with candidate probe = all uniques (oracle universe)
+    ev_cms = evaluate_stream("cms", stream2, depth=5, width=1024, top_k=10, seed=11)
+    chk("cms_topk_f1", ev_cms["topk"]["f1"] >= 0.5, f"f1={ev_cms['topk']['f1']:.3f}")
+
+    # Exact topk identity
+    ex = ExactCounter()
+    ex.add_many(["a"] * 5 + ["b"] * 3 + ["c"])
+    chk("exact_topk", ex.topk(2) == [("a", 5), ("b", 3)])
+
+    # relative_error helper
+    chk("rel_err_zero", relative_error(0, 0) == 0.0)
+    chk("rel_err_half", abs(relative_error(5, 10) - 0.5) < 1e-12)
+
+    # SS estimate_range lower ≤ upper
+    ss2 = SpaceSaving(capacity=3)
+    ss2.add_many(["a"] * 10 + ["b"] * 8 + ["c"] * 6 + ["d"] * 4 + ["e"] * 2)
+    lo, hi = ss2.estimate_range("a")
+    chk("ss_range_order", lo <= hi)
+    chk("ss_range_hi_ge_est", hi == ss2.estimate("a") or ss2.estimate("a") == 0)
+
+    # from_eps_delta factory
+    cms_f = CountMinSketch.from_eps_delta(0.01, 0.01, seed=0)
+    chk("factory_width", cms_f.width == cms_width(0.01))
+    chk("factory_depth", cms_f.depth == cms_depth(0.01))
+
+    # Uniform stream no crash + finite estimates
+    uni = make_uniform_stream(1000, 50, seed=1)
+    ss_u = SpaceSaving(capacity=20)
+    ss_u.add_many(uni)
+    chk("uniform_ss_total", ss_u.total == 1000)
+
+    # MG capacity bound
+    chk("mg_cap_bound", len(mg._counts) <= k_cap)
+
+    # CMS bytes positive
+    chk("cms_bytes", cms.bytes_est() > 0)
+
+    # Duplicate add count
+    cms_d = CountMinSketch(depth=3, width=32, seed=0)
+    cms_d.add("k", 5)
+    cms_d.add("k", 3)
+    chk("cms_multiplicity", cms_d.estimate("k") >= 8)
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    failed = [(n, d) for n, ok, d in checks if not ok]
+    return {
+        "passed": passed,
+        "total": len(checks),
+        "ok": passed == len(checks),
+        "failed": failed,
+        "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in checks],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def cmd_explain() -> None:
+    text = """
+Count-Min / Space-Saving / Misra–Gries Heavy-Hitter Oracle
+==========================================================
+
+Problem
+  One pass over a multiset stream; answer (1) approximate frequency of any key,
+  (2) the top-k / φ-heavy hitters — without storing the full counter map.
+
+Count-Min Sketch (Cormode & Muthukrishnan 2005)
+  Maintain d independent hash rows of w counters. On insert, increment one
+  counter per row. Point query = MIN over the d counters. Never underestimates.
+  Parameters: w = ⌈e/ε⌉, d = ⌈ln(1/δ)⌉ ⇒ |ê−f| ≤ ε‖f‖₁ w.p. ≥ 1−δ.
+
+Conservative CMS (Estan & Varghese)
+  Only raise counters currently equal to the min; same worst-case bound, often
+  much tighter in practice on skewed streams.
+
+Count-Sketch (Charikar et al. 2002)
+  Each row uses a ±1 hash; estimate = MEDIAN of signed counters. Unbiased;
+  preferred when you care about ℓ₂-heavy hitters / residual noise.
+
+Space-Saving (Metwally et al. 2005)
+  Keep exactly k (key → count) slots. On a miss, replace the current minimum m
+  and set new_count = m + c (error floor ε_i = m). Deterministic: every item
+  with true frequency > n/k is present; overestimate ≤ n/k.
+
+Misra–Gries (1982)
+  k counters; on miss with a full table, decrement ALL counters and drop zeros.
+  Guarantees every item with f > n/(k+1) survives. Counts are lower bounds.
+
+When to pick what
+  • Need mergeable shard sketches + arbitrary point queries → CMS / Count-Sketch
+  • Need deterministic top-k with tiny RAM → Space-Saving
+  • Classic teaching / majority generalization → Misra–Gries
+  • Pair with HyperLogLog++ for "how many uniques?" vs "who is hot?"
+""".strip()
+    print(text)
+
+
+def cmd_status() -> None:
+    print(
+        json.dumps(
+            {
+                "name": "countmin-spacesaving-heavy-hitters",
+                "kinds": list(KINDS),
+                "commands": [
+                    "selftest",
+                    "estimate",
+                    "stream",
+                    "topk",
+                    "merge",
+                    "compare",
+                    "bench",
+                    "theory",
+                    "explain",
+                    "status",
+                ],
+                "stdlib_only": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="countmin-spacesaving-heavy-hitters",
+        description="Streaming heavy-hitter frequency oracle (CMS / CS / Space-Saving / Misra-Gries)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("selftest", help="Run invariant CI gate")
+    sub.add_parser("explain", help="Protocol walkthrough")
+    sub.add_parser("status", help="Catalog JSON")
+
+    pe = sub.add_parser("estimate", help="Point-query errors on Zipf stream")
+    pe.add_argument("--events", type=int, default=20000)
+    pe.add_argument("--unique", type=int, default=2000)
+    pe.add_argument("--alpha", type=float, default=1.2)
+    pe.add_argument("--kind", default="cms", choices=list(KINDS))
+    pe.add_argument("--depth", type=int, default=5)
+    pe.add_argument("--width", type=int, default=2048)
+    pe.add_argument("--capacity", type=int, default=100)
+    pe.add_argument("--seed", type=int, default=0)
+    pe.add_argument("--top-k", type=int, default=10)
+
+    ps = sub.add_parser("stream", help="Ingest Zipf stream and report sketch stats")
+    ps.add_argument("--events", type=int, default=15000)
+    ps.add_argument("--unique", type=int, default=1500)
+    ps.add_argument("--alpha", type=float, default=1.1)
+    ps.add_argument("--kind", default="space_saving")
+    ps.add_argument("--depth", type=int, default=5)
+    ps.add_argument("--width", type=int, default=1024)
+    ps.add_argument("--capacity", type=int, default=64)
+    ps.add_argument("--seed", type=int, default=0)
+    ps.add_argument("--top-k", type=int, default=10)
+
+    pt = sub.add_parser("topk", help="Top-k recovery precision/recall")
+    pt.add_argument("--events", type=int, default=25000)
+    pt.add_argument("--unique", type=int, default=3000)
+    pt.add_argument("--alpha", type=float, default=1.3)
+    pt.add_argument("--kind", default="space_saving")
+    pt.add_argument("--depth", type=int, default=5)
+    pt.add_argument("--width", type=int, default=2048)
+    pt.add_argument("--capacity", type=int, default=50)
+    pt.add_argument("--seed", type=int, default=1)
+    pt.add_argument("--top-k", type=int, default=15)
+
+    pm = sub.add_parser("merge", help="Merge two CMS shards")
+    pm.add_argument("--n1", type=int, default=5000)
+    pm.add_argument("--n2", type=int, default=5000)
+    pm.add_argument("--overlap-keys", type=int, default=50)
+    pm.add_argument("--depth", type=int, default=5)
+    pm.add_argument("--width", type=int, default=1024)
+    pm.add_argument("--seed", type=int, default=0)
+    pm.add_argument("--kind", default="cms", choices=("cms", "cms_cons", "count_sketch"))
+
+    pc = sub.add_parser("compare", help="Rank all estimators on one Zipf stream")
+    pc.add_argument("--events", type=int, default=20000)
+    pc.add_argument("--unique", type=int, default=2000)
+    pc.add_argument("--alpha", type=float, default=1.2)
+    pc.add_argument("--depth", type=int, default=5)
+    pc.add_argument("--width", type=int, default=1024)
+    pc.add_argument("--capacity", type=int, default=64)
+    pc.add_argument("--top-k", type=int, default=10)
+    pc.add_argument("--seed", type=int, default=0)
+
+    pb = sub.add_parser("bench", help="Microbench updates/sec + error")
+    pb.add_argument("--events", type=int, default=30000)
+    pb.add_argument("--unique", type=int, default=2500)
+    pb.add_argument("--alpha", type=float, default=1.2)
+    pb.add_argument("--kind", default="cms")
+    pb.add_argument("--depth", type=int, default=5)
+    pb.add_argument("--width", type=int, default=2048)
+    pb.add_argument("--capacity", type=int, default=100)
+    pb.add_argument("--rounds", type=int, default=3)
+    pb.add_argument("--seed", type=int, default=0)
+    pb.add_argument("--top-k", type=int, default=10)
+
+    pth = sub.add_parser("theory", help="Parameter → memory / guarantee ledger")
+    pth.add_argument("--epsilon", type=float, default=0.001)
+    pth.add_argument("--delta", type=float, default=1e-4)
+    pth.add_argument("--capacity", type=int, default=100)
+    pth.add_argument("--n", type=int, default=1_000_000)
+
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.cmd == "selftest":
+        row = selftest()
+        print(json.dumps(row, indent=2))
+        return 0 if row.get("ok") else 1
+
+    if args.cmd == "explain":
+        cmd_explain()
+        return 0
+
+    if args.cmd == "status":
+        cmd_status()
+        return 0
+
+    if args.cmd == "theory":
+        print(
+            json.dumps(
+                theory_ledger(
+                    epsilon=args.epsilon,
+                    delta=args.delta,
+                    capacity=args.capacity,
+                    n=args.n,
+                ),
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.cmd in ("estimate", "stream", "topk"):
+        stream = make_zipf_stream(
+            args.events, args.unique, alpha=args.alpha, seed=args.seed
+        )
+        out = evaluate_stream(
+            args.kind,
+            stream,
+            depth=getattr(args, "depth", 5),
+            width=getattr(args, "width", 2048),
+            capacity=getattr(args, "capacity", 100),
+            seed=args.seed,
+            top_k=args.top_k,
+        )
+        print(json.dumps(out, indent=2))
+        # Success gates
+        if args.cmd == "topk":
+            return 0 if out["topk"]["f1"] >= 0.4 else 1
+        if args.kind in ("cms", "cms_cons"):
+            return 0 if out["point_errors"]["underestimate_keys"] == 0 else 1
+        return 0 if out["topk"]["f1"] >= 0.3 or out["kind"] == "exact" else 1
+
+    if args.cmd == "merge":
+        # Shared heavy keys + disjoint tails
+        rng = random.Random(args.seed)
+        shared = [f"shared{i:04d}" for i in range(args.overlap_keys)]
+        tail_a = [f"a{i:05d}" for i in range(200)]
+        tail_b = [f"b{i:05d}" for i in range(200)]
+
+        def synth(n: int, tails: List[str]) -> List[str]:
+            pool = shared + tails
+            # bias toward shared
+            weights = [5.0] * len(shared) + [1.0] * len(tails)
+            total = sum(weights)
+            cdf = []
+            acc = 0.0
+            for w in weights:
+                acc += w / total
+                cdf.append(acc)
+            out = []
+            for _ in range(n):
+                u = rng.random()
+                lo, hi = 0, len(pool) - 1
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if cdf[mid] < u:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                out.append(pool[lo])
+            return out
+
+        s1 = synth(args.n1, tail_a)
+        s2 = synth(args.n2, tail_b)
+        kind = args.kind
+        A = build_sketch(kind, depth=args.depth, width=args.width, seed=args.seed)
+        B = build_sketch(kind, depth=args.depth, width=args.width, seed=args.seed)
+        truth = ExactCounter()
+        for x in s1:
+            A.add(x)
+            truth.add(x)
+        for x in s2:
+            B.add(x)
+            truth.add(x)
+        A.merge(B)
+        errs = []
+        for k in shared:
+            errs.append(abs(int(A.estimate(k)) - truth.estimate(k)))
+        out = {
+            "kind": kind,
+            "n1": args.n1,
+            "n2": args.n2,
+            "overlap_keys": args.overlap_keys,
+            "merged_total": A.total,
+            "truth_total": truth.total,
+            "shared_mae": sum(errs) / max(1, len(errs)),
+            "shared_max_abs": max(errs) if errs else 0,
+            "sketch": A.as_dict(),
+        }
+        print(json.dumps(out, indent=2))
+        return 0 if out["merged_total"] == truth.total else 1
+
+    if args.cmd == "compare":
+        out = compare_all(
+            n_events=args.events,
+            n_unique=args.unique,
+            alpha=args.alpha,
+            depth=args.depth,
+            width=args.width,
+            capacity=args.capacity,
+            top_k=args.top_k,
+            seed=args.seed,
+        )
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("winner_f1") else 1
+
+    if args.cmd == "bench":
+        rows = []
+        for i in range(args.rounds):
+            stream = make_zipf_stream(
+                args.events, args.unique, alpha=args.alpha, seed=args.seed + i
+            )
+            rows.append(
+                evaluate_stream(
+                    args.kind,
+                    stream,
+                    depth=args.depth,
+                    width=args.width,
+                    capacity=args.capacity,
+                    seed=args.seed + i,
+                    top_k=args.top_k,
+                )
+            )
+        avg_ms = sum(r["build_ms"] for r in rows) / len(rows)
+        avg_f1 = sum(r["topk"]["f1"] for r in rows) / len(rows)
+        avg_mae = sum(r["point_errors"]["mae"] for r in rows) / len(rows)
+        out = {
+            "kind": args.kind,
+            "events": args.events,
+            "unique": args.unique,
+            "rounds": args.rounds,
+            "avg_build_ms": avg_ms,
+            "avg_updates_per_sec": (args.events / (avg_ms / 1000.0)) if avg_ms > 0 else None,
+            "avg_topk_f1": avg_f1,
+            "avg_mae": avg_mae,
+            "rows": rows,
+        }
+        print(json.dumps(out, indent=2))
+        return 0 if avg_f1 >= 0.3 else 1
+
+    parser.error(f"unknown command {args.cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

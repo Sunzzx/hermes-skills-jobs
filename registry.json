@@ -1,5 +1,23 @@
 [
   {
+    "id": "countmin-spacesaving-heavy-hitters",
+    "title": "Count-Min + Space-Saving Heavy-Hitter Stream Oracle (Cormode 2005 / Metwally 2005 / Misra-Gries 1982)",
+    "category": "systems",
+    "type": "skill+tool",
+    "description": "One-pass frequency & top-k heavy hitters: Count-Min Sketch (+ conservative), Count-Sketch, Space-Saving, Misra-Gries; mergeable CMS shards, Zipf top-k F1, theory ledgers (J. Algorithms 2005 / ICDT 2005 / SCP 1982).",
+    "cli": "countmin-spacesaving-heavy-hitters",
+    "evolved_at": "2026-11-20T06:53:15.732885+05:30",
+    "tags": [
+      "HeavyHitters",
+      "CountMin",
+      "SpaceSaving",
+      "MisraGries",
+      "Streaming",
+      "Sketches",
+      "Systems"
+    ]
+  },
+  {
     "id": "hyperloglog-plusplus-cardinality",
     "title": "HyperLogLog++ Cardinality Sketch Oracle (Flajolet 2007 / Google HLL++ 2013)",
     "category": "systems",
