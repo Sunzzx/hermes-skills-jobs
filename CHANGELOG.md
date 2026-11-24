@@ -1217,3 +1217,8 @@ options:
 - **Description**: One-pass frequency & top-k heavy hitters: Count-Min Sketch (+ conservative), Count-Sketch, Space-Saving, Misra-Gries; mergeable CMS shards, Zipf top-k F1, theory ledgers (J. Algorithms 2005 / ICDT 2005 / SCP 1982).
 - **CLI**: `countmin-spacesaving-heavy-hitters`
 - **Verification**: selftest 38/38, pytest 22 passed
+
+### [2026-11-24 07:58:11] - Evolved `speculative-decoding-verifier`
+- **Title**: Speculative Decoding Logit Acceptance & Rejection Engine
+- **Category**: inference
+- **Description**: Draft-target verification engine for speculative sampling in autoregressive LLMs, implementing unbiased token acceptance/rejection and distribution recovery.

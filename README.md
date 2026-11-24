@@ -1,16 +1,14 @@
 # ⚡ Hermes Autonomous Evolution Engine: Skills & Jobs
 
-- **Latest evolution**: `kll-tdigest-ddsketch-quantiles` (KLL + T-Digest + DDSketch streaming quantile oracle) — 2026-11-20 09:22:56
-
 [![Hermes Evolution](https://img.shields.io/badge/Evolution-Hourly-blueviolet.svg)](#)
-[![Total Capabilities](https://img.shields.io/badge/Capabilities-140-success.svg)](#)
+[![Total Capabilities](https://img.shields.io/badge/Capabilities-141-success.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Autonomous, continuous hourly evolution system for **Hermes**. Every single hour, Hermes invents, builds, tests, installs, and commits a new production-grade skill, automated job, or system tool designed to maximize operator leverage, developer speed, and AI capabilities.
 
 ---
 
-## 🚀 Live Capability Registry (140 Evolved Skills & Jobs)
+## 🚀 Live Capability Registry (141 Evolved Skills & Jobs)
 
 | Skill / Job | Category | Global CLI | Description | Focus Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -153,6 +151,8 @@ Autonomous, continuous hourly evolution system for **Hermes**. Every single hour
 | **HotStuff Chained BFT Consensus Engine (Yin et al. PODC 2019)** | `systems` | `hotstuff-chained-bft` | Chained HotStuff with generic Quorum Certificates, 3-chain commit, locked-QC safe-node voting, linear O(n) leader-aggregated messaging, pacemaker NEW-VIEW recovery, linearizable KV SM, and crash/Byzantine-fork/lossy chaos — pure-Python companion to PBFT with linearity and responsiveness (PODC 2019 / arXiv:1803.05069). | `DistributedSystems` `HotStuff` `BFT` |
 | **SWIM Gossip Failure Detector & Membership Engine (Das et al. DSN 2002)** | `systems` | `swim-gossip-membership` | SWIM scalable weakly-consistent infection-style membership: direct+indirect ping failure detection, suspicion/confirm with incarnation refutation, epidemic piggyback gossip, O(n) vs O(n²) mesh heartbeat ledger, crash/mute/lossy/partition chaos — pure-Python companion to Kademlia/Raft/HotStuff (DSN 2002). | `DistributedSystems` `SWIM` `Gossip` |
 | **XOR + Binary Fuse Filter Membership Oracle (Graf & Lemire SEA 2020 / 2022)** | `systems` | `xor-filter-fuse-membership` | Static approximate set membership: classic + blocked Bloom baselines, XOR filters via 3-uniform hypergraph peeling (~1.23n fingerprints), Binary Fuse layered windows with adaptive peel, 8/16-bit FPR ledgers, bits/key theory, and query microbench — pure-Python companion to S3-FIFO/LSM bloom paths (arXiv:1912.08258). | `Filters` `XORFilter` `BinaryFuse` |
+| **KLL + T-Digest + DDSketch Streaming Quantile Oracle (Karnin 2016 / Dunning 2019 / Masson 2019 / GK 2001)** | `systems` | `kll-tdigest-ddsketch-quantiles` | One-pass quantile/CDF sketches: KLL hierarchical compactors, T-Digest centroids, DDSketch relative-error γ-buckets, Greenwald–Khanna ε-summaries; mergeable shards, multi-law benches, theory ledgers (FOCS 2016 / VLDB 2019 / SIGMOD 2001). | `Quantiles` `KLL` `TDigest` |
+| **Speculative Decoding Logit Acceptance & Rejection Engine** | `inference` | `spec-verify` | Draft-target verification engine for speculative sampling in autoregressive LLMs, implementing unbiased token acceptance/rejection and distribution recovery. | `SpeculativeDecoding` `LLMInference` `LogitVerification` |
 
 ---
 
@@ -179,16 +179,8 @@ ports free 3000
 
 # Example: Fetch latest arXiv frontier AI breakthrough papers
 research-radar
-
-# Example: Streaming heavy-hitter frequency sketches
-countmin-spacesaving-heavy-hitters selftest
-countmin-spacesaving-heavy-hitters compare --events 20000
-
-# Example: Streaming quantile / CDF sketches
-kll-tdigest-ddsketch-quantiles selftest
-kll-tdigest-ddsketch-quantiles compare --n 10000 --stream mixture
 ```
 
 ---
 
-*Last Evolved: 2026-11-20 09:22:56*
+*Last Evolved: 2026-11-24 07:58:11*

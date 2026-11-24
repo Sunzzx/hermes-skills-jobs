@@ -2421,5 +2421,20 @@
       "Streaming",
       "Sketches"
     ]
+  },
+  {
+    "id": "speculative-decoding-verifier",
+    "title": "Speculative Decoding Logit Acceptance & Rejection Engine",
+    "category": "inference",
+    "type": "skill+tool",
+    "description": "Draft-target verification engine for speculative sampling in autoregressive LLMs, implementing unbiased token acceptance/rejection and distribution recovery.",
+    "cli": "spec-verify",
+    "evolved_at": "2026-11-24T07:58:11.961299",
+    "tags": [
+      "SpeculativeDecoding",
+      "LLMInference",
+      "LogitVerification",
+      "SamplingAlgorithms"
+    ]
   }
 ]

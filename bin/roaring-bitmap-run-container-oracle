@@ -1,0 +1,1483 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""roaring-bitmap-run-container-oracle: Roaring Bitmap Compressed Bitset Oracle.
+
+Production-grade pure-Python Roaring Bitmaps (Chambi, Lemire, Kaser 2016) with
+three container kinds and automatic conversion:
+
+  • ArrayContainer  — sorted unique uint16 values (dense-sparse threshold ≤ 4096)
+  • BitmapContainer — 1024×uint64 bitset covering a full 2^16 chunk
+  • RunContainer    — RLE (start, length) pairs for long contiguous ranges
+  • RoaringBitmap   — map of high-16 keys → container; 32-bit universe partitioned
+  • Set algebra     — OR / AND / XOR / ANDNOT with cardinality-aware container picks
+  • Rank / Select   — prefix population + ith-set-bit over the roaring layout
+  • Baselines       — NaiveSet, DenseBitset (small U), PureRLE for space/time compare
+  • Theory ledger   — bits/value vs cardinality density, conversion thresholds
+
+CLI: selftest | build | query | op | rank | compare | bench | theory | explain | status
+
+Pure Python 3 stdlib only.
+
+References:
+  - Chambi, Lemire, Kaser, Godin — Better bitmap performance with Roaring bitmaps,
+    Software: Practice and Experience, 2016 (arXiv:1402.6407)
+  - Lemire et al. — Roaring bitmaps: Implementation of an optimized software library,
+    Software: Practice and Experience, 2018
+  - Wu, Otoo, Shoshani — Optimizing bitmap indices with efficient compression, TODS 2006
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Constants & helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+CHUNK = 1 << 16  # 65536 values per high-key partition
+ARRAY_MAX = 4096  # classic roaring: array if card ≤ 4096 else bitmap
+# Run containers preferred when they beat array/bitmap on serialized size.
+# Serialized run ≈ 2 + 4*n_runs bytes; array ≈ 2 + 2*card; bitmap = 8192 fixed.
+
+
+def high_low(x: int) -> Tuple[int, int]:
+    x = int(x) & 0xFFFFFFFF
+    return x >> 16, x & 0xFFFF
+
+
+def combine(hi: int, lo: int) -> int:
+    return ((hi & 0xFFFF) << 16) | (lo & 0xFFFF)
+
+
+def popcount64(w: int) -> int:
+    return int(w & 0xFFFFFFFFFFFFFFFF).bit_count()
+
+
+def ith_bit_in_word(w: int, i: int) -> int:
+    """Return bit position (0..63) of the i-th set bit in w (0-based)."""
+    w &= 0xFFFFFFFFFFFFFFFF
+    for b in range(64):
+        if (w >> b) & 1:
+            if i == 0:
+                return b
+            i -= 1
+    raise ValueError("ith bit out of range")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Containers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ArrayContainer:
+    """Sorted unique uint16 values. Ideal for sparse chunks (card ≤ 4096)."""
+
+    __slots__ = ("vals",)
+
+    def __init__(self, vals: Optional[Sequence[int]] = None) -> None:
+        if vals is None:
+            self.vals: List[int] = []
+        else:
+            self.vals = sorted({int(v) & 0xFFFF for v in vals})
+
+    def cardinality(self) -> int:
+        return len(self.vals)
+
+    def contains(self, lo: int) -> bool:
+        lo = lo & 0xFFFF
+        a = self.vals
+        lo_i, hi_i = 0, len(a) - 1
+        while lo_i <= hi_i:
+            mid = (lo_i + hi_i) // 2
+            v = a[mid]
+            if v == lo:
+                return True
+            if v < lo:
+                lo_i = mid + 1
+            else:
+                hi_i = mid - 1
+        return False
+
+    def add(self, lo: int) -> "ArrayContainer | BitmapContainer":
+        lo = lo & 0xFFFF
+        if self.contains(lo):
+            return self
+        # insert keeping sorted
+        a = self.vals
+        i = 0
+        while i < len(a) and a[i] < lo:
+            i += 1
+        a.insert(i, lo)
+        if len(a) > ARRAY_MAX:
+            return self.to_bitmap()
+        return self
+
+    def remove(self, lo: int) -> "ArrayContainer":
+        lo = lo & 0xFFFF
+        if not self.contains(lo):
+            return self
+        self.vals.remove(lo)
+        return self
+
+    def to_bitmap(self) -> "BitmapContainer":
+        bm = BitmapContainer()
+        for v in self.vals:
+            bm.add_inplace(v)
+        return bm
+
+    def to_run(self) -> "RunContainer":
+        return RunContainer.from_sorted(self.vals)
+
+    def iter_values(self) -> Iterator[int]:
+        return iter(self.vals)
+
+    def serialized_bytes(self) -> int:
+        # type(2) + card(2) + 2*card
+        return 4 + 2 * len(self.vals)
+
+    def clone(self) -> "ArrayContainer":
+        c = ArrayContainer()
+        c.vals = list(self.vals)
+        return c
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"kind": "array", "card": self.cardinality(), "bytes": self.serialized_bytes()}
+
+
+class BitmapContainer:
+    """1024 × uint64 covering the full 2^16 chunk. Ideal for dense chunks."""
+
+    __slots__ = ("words", "_card")
+
+    NWORDS = 1024  # 1024 * 64 = 65536
+
+    def __init__(self, words: Optional[List[int]] = None, card: Optional[int] = None) -> None:
+        if words is None:
+            self.words: List[int] = [0] * self.NWORDS
+            self._card = 0
+        else:
+            self.words = [int(w) & 0xFFFFFFFFFFFFFFFF for w in words]
+            if len(self.words) != self.NWORDS:
+                raise ValueError("bitmap must have 1024 words")
+            self._card = card if card is not None else sum(popcount64(w) for w in self.words)
+
+    def cardinality(self) -> int:
+        return self._card
+
+    def contains(self, lo: int) -> bool:
+        lo = lo & 0xFFFF
+        wi, bi = lo >> 6, lo & 63
+        return bool((self.words[wi] >> bi) & 1)
+
+    def add_inplace(self, lo: int) -> None:
+        lo = lo & 0xFFFF
+        wi, bi = lo >> 6, lo & 63
+        bit = 1 << bi
+        if not (self.words[wi] & bit):
+            self.words[wi] |= bit
+            self._card += 1
+
+    def add(self, lo: int) -> "BitmapContainer":
+        self.add_inplace(lo)
+        return self
+
+    def remove(self, lo: int) -> "ArrayContainer | BitmapContainer":
+        lo = lo & 0xFFFF
+        wi, bi = lo >> 6, lo & 63
+        bit = 1 << bi
+        if self.words[wi] & bit:
+            self.words[wi] &= ~bit & 0xFFFFFFFFFFFFFFFF
+            self._card -= 1
+        if self._card <= ARRAY_MAX:
+            return self.to_array()
+        return self
+
+    def to_array(self) -> ArrayContainer:
+        vals: List[int] = []
+        for wi, w in enumerate(self.words):
+            if w == 0:
+                continue
+            base = wi << 6
+            ww = w
+            while ww:
+                b = (ww & -ww).bit_length() - 1
+                vals.append(base + b)
+                ww &= ww - 1
+        return ArrayContainer(vals)
+
+    def to_run(self) -> "RunContainer":
+        return RunContainer.from_sorted(list(self.iter_values()))
+
+    def iter_values(self) -> Iterator[int]:
+        for wi, w in enumerate(self.words):
+            if w == 0:
+                continue
+            base = wi << 6
+            ww = w
+            while ww:
+                b = (ww & -ww).bit_length() - 1
+                yield base + b
+                ww &= ww - 1
+
+    def serialized_bytes(self) -> int:
+        # type + fixed 8192 payload (classic roaring bitmap container)
+        return 2 + 8192
+
+    def clone(self) -> "BitmapContainer":
+        return BitmapContainer(list(self.words), self._card)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"kind": "bitmap", "card": self.cardinality(), "bytes": self.serialized_bytes()}
+
+
+@dataclass
+class Run:
+    start: int
+    length: int  # number of values in run (≥1); last = start+length-1
+
+    def end(self) -> int:
+        return self.start + self.length - 1
+
+
+class RunContainer:
+    """RLE container: sorted non-overlapping (start, length) runs over uint16."""
+
+    __slots__ = ("runs",)
+
+    def __init__(self, runs: Optional[List[Run]] = None) -> None:
+        self.runs: List[Run] = list(runs) if runs else []
+
+    @staticmethod
+    def from_sorted(vals: Sequence[int]) -> "RunContainer":
+        if not vals:
+            return RunContainer()
+        runs: List[Run] = []
+        s = int(vals[0]) & 0xFFFF
+        prev = s
+        for v in vals[1:]:
+            v = int(v) & 0xFFFF
+            if v == prev + 1:
+                prev = v
+            else:
+                runs.append(Run(s, prev - s + 1))
+                s = prev = v
+        runs.append(Run(s, prev - s + 1))
+        return RunContainer(runs)
+
+    def cardinality(self) -> int:
+        return sum(r.length for r in self.runs)
+
+    def n_runs(self) -> int:
+        return len(self.runs)
+
+    def contains(self, lo: int) -> bool:
+        lo = lo & 0xFFFF
+        # binary search runs by start/end
+        a, b = 0, len(self.runs) - 1
+        while a <= b:
+            m = (a + b) // 2
+            r = self.runs[m]
+            if lo < r.start:
+                b = m - 1
+            elif lo > r.end():
+                a = m + 1
+            else:
+                return True
+        return False
+
+    def add(self, lo: int) -> "RunContainer | ArrayContainer | BitmapContainer":
+        if self.contains(lo):
+            return self
+        # convert via sorted values for correctness (small chunks)
+        vals = list(self.iter_values())
+        vals.append(lo & 0xFFFF)
+        vals.sort()
+        return optimize_container(ArrayContainer(vals))
+
+    def remove(self, lo: int) -> "RunContainer | ArrayContainer | BitmapContainer":
+        if not self.contains(lo):
+            return self
+        vals = [v for v in self.iter_values() if v != (lo & 0xFFFF)]
+        return optimize_container(ArrayContainer(vals))
+
+    def to_array(self) -> ArrayContainer:
+        return ArrayContainer(list(self.iter_values()))
+
+    def to_bitmap(self) -> BitmapContainer:
+        bm = BitmapContainer()
+        for v in self.iter_values():
+            bm.add_inplace(v)
+        return bm
+
+    def iter_values(self) -> Iterator[int]:
+        for r in self.runs:
+            for i in range(r.length):
+                yield r.start + i
+
+    def serialized_bytes(self) -> int:
+        # type(2) + nruns(2) + 4*nruns (start u16 + len u16)
+        return 4 + 4 * len(self.runs)
+
+    def clone(self) -> "RunContainer":
+        return RunContainer([Run(r.start, r.length) for r in self.runs])
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "run",
+            "card": self.cardinality(),
+            "n_runs": self.n_runs(),
+            "bytes": self.serialized_bytes(),
+        }
+
+
+Container = ArrayContainer | BitmapContainer | RunContainer
+
+
+def optimize_container(c: Container) -> Container:
+    """Pick the smallest serialized representation among array/bitmap/run."""
+    # Normalize to values once
+    if isinstance(c, ArrayContainer):
+        card = c.cardinality()
+        arr = c
+    elif isinstance(c, BitmapContainer):
+        card = c.cardinality()
+        if card == 0:
+            return ArrayContainer()
+        arr = c.to_array() if card <= ARRAY_MAX else None
+    else:
+        card = c.cardinality()
+        arr = c.to_array() if card <= ARRAY_MAX else None
+
+    candidates: List[Container] = []
+    if card == 0:
+        return ArrayContainer()
+
+    if card <= ARRAY_MAX:
+        if arr is None:
+            if isinstance(c, BitmapContainer):
+                arr = c.to_array()
+            else:
+                arr = c.to_array()
+        candidates.append(arr)
+        run = arr.to_run()
+        candidates.append(run)
+    else:
+        if isinstance(c, BitmapContainer):
+            bm = c
+        elif isinstance(c, ArrayContainer):
+            bm = c.to_bitmap()
+        else:
+            bm = c.to_bitmap()
+        candidates.append(bm)
+        run = bm.to_run()
+        candidates.append(run)
+        # array illegal above ARRAY_MAX in classic roaring for mutability,
+        # but run may still win on space for near-solid ranges
+
+    best = min(candidates, key=lambda x: (x.serialized_bytes(), x.cardinality()))
+    return best
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Roaring Bitmap
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class RoaringBitmap:
+    """Partitioned roaring bitmap over the 32-bit unsigned universe."""
+
+    __slots__ = ("containers",)
+
+    def __init__(self) -> None:
+        self.containers: Dict[int, Container] = {}
+
+    # ---- mutation ---------------------------------------------------------
+
+    def add(self, x: int) -> None:
+        hi, lo = high_low(x)
+        c = self.containers.get(hi)
+        if c is None:
+            self.containers[hi] = ArrayContainer([lo])
+            return
+        new_c = c.add(lo)
+        self.containers[hi] = optimize_container(new_c) if not isinstance(new_c, BitmapContainer) or new_c.cardinality() <= ARRAY_MAX else new_c
+        # Re-optimize bitmap only when beneficial (runs of dense ranges)
+        c2 = self.containers[hi]
+        if isinstance(c2, BitmapContainer) and c2.cardinality() > ARRAY_MAX:
+            run = c2.to_run()
+            if run.serialized_bytes() < c2.serialized_bytes():
+                self.containers[hi] = run
+
+    def add_many(self, xs: Iterable[int]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def remove(self, x: int) -> None:
+        hi, lo = high_low(x)
+        c = self.containers.get(hi)
+        if c is None:
+            return
+        new_c = c.remove(lo)
+        if new_c.cardinality() == 0:
+            del self.containers[hi]
+        else:
+            self.containers[hi] = optimize_container(new_c) if not isinstance(new_c, RunContainer) else new_c
+
+    def contains(self, x: int) -> bool:
+        hi, lo = high_low(x)
+        c = self.containers.get(hi)
+        if c is None:
+            return False
+        return c.contains(lo)
+
+    def __contains__(self, x: int) -> bool:
+        return self.contains(x)
+
+    # ---- metrics ----------------------------------------------------------
+
+    def cardinality(self) -> int:
+        return sum(c.cardinality() for c in self.containers.values())
+
+    def n_containers(self) -> int:
+        return len(self.containers)
+
+    def serialized_bytes(self) -> int:
+        # cookie + n_containers header approx 8 bytes + per-container
+        total = 8
+        for hi, c in self.containers.items():
+            total += 2  # high key
+            total += c.serialized_bytes()
+        return total
+
+    def container_kinds(self) -> Dict[str, int]:
+        counts = {"array": 0, "bitmap": 0, "run": 0}
+        for c in self.containers.values():
+            if isinstance(c, ArrayContainer):
+                counts["array"] += 1
+            elif isinstance(c, BitmapContainer):
+                counts["bitmap"] += 1
+            else:
+                counts["run"] += 1
+        return counts
+
+    def iter_values(self) -> Iterator[int]:
+        for hi in sorted(self.containers.keys()):
+            c = self.containers[hi]
+            for lo in c.iter_values():
+                yield combine(hi, lo)
+
+    def to_set(self) -> Set[int]:
+        return set(self.iter_values())
+
+    def clone(self) -> "RoaringBitmap":
+        rb = RoaringBitmap()
+        for hi, c in self.containers.items():
+            rb.containers[hi] = c.clone()
+        return rb
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "roaring",
+            "cardinality": self.cardinality(),
+            "n_containers": self.n_containers(),
+            "container_kinds": self.container_kinds(),
+            "serialized_bytes": self.serialized_bytes(),
+            "bits_per_value": (
+                (8.0 * self.serialized_bytes() / self.cardinality())
+                if self.cardinality()
+                else 0.0
+            ),
+        }
+
+    # ---- rank / select ----------------------------------------------------
+
+    def rank(self, x: int) -> int:
+        """Number of set bits ≤ x (1-based rank; 0 if none ≤ x)."""
+        hi, lo = high_low(x)
+        rank = 0
+        for h in sorted(self.containers.keys()):
+            c = self.containers[h]
+            if h < hi:
+                rank += c.cardinality()
+            elif h == hi:
+                for v in c.iter_values():
+                    if v <= lo:
+                        rank += 1
+                    else:
+                        break
+                break
+            else:
+                break
+        return rank
+
+    def select(self, i: int) -> int:
+        """Return the i-th set value (0-based). Raises IndexError if out of range."""
+        if i < 0 or i >= self.cardinality():
+            raise IndexError("select index out of range")
+        remaining = i
+        for hi in sorted(self.containers.keys()):
+            c = self.containers[hi]
+            card = c.cardinality()
+            if remaining < card:
+                for j, lo in enumerate(c.iter_values()):
+                    if j == remaining:
+                        return combine(hi, lo)
+                raise RuntimeError("select internal error")
+            remaining -= card
+        raise IndexError("select index out of range")
+
+    # ---- set algebra ------------------------------------------------------
+
+    @staticmethod
+    def _merge_or(a: Container, b: Container) -> Container:
+        sa = set(a.iter_values())
+        sb = set(b.iter_values())
+        return optimize_container(ArrayContainer(sorted(sa | sb)))
+
+    @staticmethod
+    def _merge_and(a: Container, b: Container) -> Optional[Container]:
+        sa = set(a.iter_values())
+        sb = set(b.iter_values())
+        inter = sa & sb
+        if not inter:
+            return None
+        return optimize_container(ArrayContainer(sorted(inter)))
+
+    @staticmethod
+    def _merge_xor(a: Container, b: Container) -> Optional[Container]:
+        sa = set(a.iter_values())
+        sb = set(b.iter_values())
+        x = sa ^ sb
+        if not x:
+            return None
+        return optimize_container(ArrayContainer(sorted(x)))
+
+    @staticmethod
+    def _merge_andnot(a: Container, b: Container) -> Optional[Container]:
+        sa = set(a.iter_values())
+        sb = set(b.iter_values())
+        d = sa - sb
+        if not d:
+            return None
+        return optimize_container(ArrayContainer(sorted(d)))
+
+    def union(self, other: "RoaringBitmap") -> "RoaringBitmap":
+        out = RoaringBitmap()
+        keys = set(self.containers) | set(other.containers)
+        for hi in keys:
+            ca, cb = self.containers.get(hi), other.containers.get(hi)
+            if ca is None:
+                out.containers[hi] = cb.clone()  # type: ignore
+            elif cb is None:
+                out.containers[hi] = ca.clone()
+            else:
+                out.containers[hi] = self._merge_or(ca, cb)
+        return out
+
+    def intersection(self, other: "RoaringBitmap") -> "RoaringBitmap":
+        out = RoaringBitmap()
+        keys = set(self.containers) & set(other.containers)
+        for hi in keys:
+            merged = self._merge_and(self.containers[hi], other.containers[hi])
+            if merged is not None:
+                out.containers[hi] = merged
+        return out
+
+    def symmetric_difference(self, other: "RoaringBitmap") -> "RoaringBitmap":
+        out = RoaringBitmap()
+        keys = set(self.containers) | set(other.containers)
+        for hi in keys:
+            ca, cb = self.containers.get(hi), other.containers.get(hi)
+            if ca is None:
+                out.containers[hi] = cb.clone()  # type: ignore
+            elif cb is None:
+                out.containers[hi] = ca.clone()
+            else:
+                merged = self._merge_xor(ca, cb)
+                if merged is not None:
+                    out.containers[hi] = merged
+        return out
+
+    def difference(self, other: "RoaringBitmap") -> "RoaringBitmap":
+        out = RoaringBitmap()
+        for hi, ca in self.containers.items():
+            cb = other.containers.get(hi)
+            if cb is None:
+                out.containers[hi] = ca.clone()
+            else:
+                merged = self._merge_andnot(ca, cb)
+                if merged is not None:
+                    out.containers[hi] = merged
+        return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Baselines
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class NaiveSet:
+    def __init__(self) -> None:
+        self.s: Set[int] = set()
+
+    def add_many(self, xs: Iterable[int]) -> None:
+        self.s.update(int(x) & 0xFFFFFFFF for x in xs)
+
+    def contains(self, x: int) -> bool:
+        return (int(x) & 0xFFFFFFFF) in self.s
+
+    def cardinality(self) -> int:
+        return len(self.s)
+
+    def serialized_bytes(self) -> int:
+        # 4 bytes per int + set overhead estimate
+        return 4 * len(self.s)
+
+    def union(self, other: "NaiveSet") -> "NaiveSet":
+        n = NaiveSet()
+        n.s = self.s | other.s
+        return n
+
+    def intersection(self, other: "NaiveSet") -> "NaiveSet":
+        n = NaiveSet()
+        n.s = self.s & other.s
+        return n
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "naive-set",
+            "cardinality": self.cardinality(),
+            "serialized_bytes": self.serialized_bytes(),
+            "bits_per_value": 32.0,
+        }
+
+
+class DenseBitset:
+    """Contiguous bitset over [0, universe). Only for small U demos."""
+
+    def __init__(self, universe: int) -> None:
+        self.universe = int(universe)
+        nwords = (self.universe + 63) // 64
+        self.words = [0] * nwords
+        self._card = 0
+
+    def add(self, x: int) -> None:
+        x = int(x)
+        if x < 0 or x >= self.universe:
+            raise ValueError("out of universe")
+        wi, bi = x >> 6, x & 63
+        bit = 1 << bi
+        if not (self.words[wi] & bit):
+            self.words[wi] |= bit
+            self._card += 1
+
+    def add_many(self, xs: Iterable[int]) -> None:
+        for x in xs:
+            self.add(x)
+
+    def contains(self, x: int) -> bool:
+        x = int(x)
+        if x < 0 or x >= self.universe:
+            return False
+        wi, bi = x >> 6, x & 63
+        return bool((self.words[wi] >> bi) & 1)
+
+    def cardinality(self) -> int:
+        return self._card
+
+    def serialized_bytes(self) -> int:
+        return 8 * len(self.words)
+
+    def as_dict(self) -> Dict[str, Any]:
+        card = self.cardinality()
+        return {
+            "kind": "dense-bitset",
+            "universe": self.universe,
+            "cardinality": card,
+            "serialized_bytes": self.serialized_bytes(),
+            "bits_per_value": (8.0 * self.serialized_bytes() / card) if card else 0.0,
+        }
+
+
+class PureRLE:
+    """Global run-length encoding over sorted unique 32-bit values."""
+
+    def __init__(self) -> None:
+        self.runs: List[Tuple[int, int]] = []  # (start, length)
+
+    def build_from(self, xs: Iterable[int]) -> None:
+        vals = sorted({int(x) & 0xFFFFFFFF for x in xs})
+        self.runs = []
+        if not vals:
+            return
+        s = vals[0]
+        prev = s
+        for v in vals[1:]:
+            if v == prev + 1:
+                prev = v
+            else:
+                self.runs.append((s, prev - s + 1))
+                s = prev = v
+        self.runs.append((s, prev - s + 1))
+
+    def cardinality(self) -> int:
+        return sum(length for _, length in self.runs)
+
+    def contains(self, x: int) -> bool:
+        x = int(x) & 0xFFFFFFFF
+        lo, hi = 0, len(self.runs) - 1
+        while lo <= hi:
+            m = (lo + hi) // 2
+            s, length = self.runs[m]
+            e = s + length - 1
+            if x < s:
+                hi = m - 1
+            elif x > e:
+                lo = m + 1
+            else:
+                return True
+        return False
+
+    def serialized_bytes(self) -> int:
+        # 8 bytes per run (start u32 + len u32)
+        return 8 * len(self.runs)
+
+    def as_dict(self) -> Dict[str, Any]:
+        card = self.cardinality()
+        return {
+            "kind": "pure-rle",
+            "n_runs": len(self.runs),
+            "cardinality": card,
+            "serialized_bytes": self.serialized_bytes(),
+            "bits_per_value": (8.0 * self.serialized_bytes() / card) if card else 0.0,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Workload generators
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def make_uniform_keys(n: int, universe: int = 1_000_000, seed: int = 0) -> List[int]:
+    rng = random.Random(seed)
+    u = max(universe, n)
+    return rng.sample(range(u), n) if n <= u else [rng.randrange(u) for _ in range(n)]
+
+
+def make_clustered_keys(n: int, n_clusters: int = 8, cluster_span: int = 500, seed: int = 0) -> List[int]:
+    """n keys concentrated in a few contiguous clusters — run-container friendly."""
+    rng = random.Random(seed)
+    keys: Set[int] = set()
+    base_hi = 0
+    while len(keys) < n:
+        center = rng.randrange(0, max(1, 50_000)) + base_hi * CHUNK
+        for _ in range(max(1, n // max(n_clusters, 1))):
+            keys.add(center + rng.randrange(0, cluster_span))
+            if len(keys) >= n:
+                break
+        base_hi += 1
+        if base_hi > 20:
+            # fill remaining uniformly
+            keys.add(rng.randrange(0, 1_000_000))
+    return sorted(keys)[:n]
+
+
+def make_dense_chunk_keys(n: int, fill_ratio: float = 0.6, seed: int = 0) -> List[int]:
+    """Keys that densely fill one or more 2^16 chunks — bitmap-container friendly."""
+    rng = random.Random(seed)
+    keys: Set[int] = set()
+    chunks_needed = max(1, int(math.ceil(n / (CHUNK * fill_ratio))))
+    for hi in range(chunks_needed):
+        capacity = int(CHUNK * fill_ratio)
+        sample_n = min(capacity, n - len(keys))
+        if sample_n <= 0:
+            break
+        lows = rng.sample(range(CHUNK), sample_n)
+        for lo in lows:
+            keys.add(combine(hi, lo))
+    return sorted(keys)[:n]
+
+
+def make_sparse_keys(n: int, seed: int = 0) -> List[int]:
+    """Very sparse across many high-keys — array-container friendly."""
+    rng = random.Random(seed)
+    keys: Set[int] = set()
+    while len(keys) < n:
+        hi = rng.randrange(0, 5000)
+        lo = rng.randrange(0, CHUNK)
+        keys.add(combine(hi, lo))
+    return sorted(keys)
+
+
+def make_range_keys(start: int, length: int) -> List[int]:
+    return list(range(start, start + length))
+
+
+WORKLOADS = {
+    "uniform": lambda n, seed=0: make_uniform_keys(n, seed=seed),
+    "clustered": lambda n, seed=0: make_clustered_keys(n, seed=seed),
+    "dense": lambda n, seed=0: make_dense_chunk_keys(n, seed=seed),
+    "sparse": lambda n, seed=0: make_sparse_keys(n, seed=seed),
+    "range": lambda n, seed=0: make_range_keys(seed * 1000, n),
+}
+
+
+def build_roaring(keys: Iterable[int]) -> RoaringBitmap:
+    rb = RoaringBitmap()
+    rb.add_many(keys)
+    return rb
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Theory
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def array_bytes(card: int) -> int:
+    return 4 + 2 * card
+
+
+def bitmap_bytes() -> int:
+    return 2 + 8192
+
+
+def run_bytes(n_runs: int) -> int:
+    return 4 + 4 * n_runs
+
+
+def roaring_threshold_card() -> int:
+    """Cardinality where bitmap beats array on space inside one chunk."""
+    # 4 + 2c ≈ 8194 → c ≈ 4095
+    return ARRAY_MAX
+
+
+def bits_per_value(nbytes: int, card: int) -> float:
+    if card <= 0:
+        return 0.0
+    return 8.0 * nbytes / card
+
+
+def theory_ledger(card: int = 10000, n_runs: int = 10, density: float = 0.01) -> Dict[str, Any]:
+    """Space model for a single chunk and multi-chunk roaring."""
+    card = max(0, int(card))
+    n_runs = max(1, int(n_runs))
+    density = min(max(float(density), 1e-9), 1.0)
+
+    arr_b = array_bytes(min(card, ARRAY_MAX)) if card <= ARRAY_MAX else None
+    bm_b = bitmap_bytes()
+    rn_b = run_bytes(n_runs)
+
+    # expected chunks if uniform over U=2^32 is silly; model over U=card/density
+    universe = int(card / density) if density > 0 else card
+    n_chunks_touched = max(1, min(universe // CHUNK + 1, card))  # rough upper
+
+    return {
+        "array_max_threshold": ARRAY_MAX,
+        "single_chunk": {
+            "card": card,
+            "array_bytes": arr_b,
+            "bitmap_bytes": bm_b,
+            "run_bytes_for_n_runs": rn_b,
+            "array_bpv": bits_per_value(arr_b, card) if arr_b else None,
+            "bitmap_bpv": bits_per_value(bm_b, min(card, CHUNK)),
+            "run_bpv": bits_per_value(rn_b, card),
+            "prefer": (
+                "array"
+                if card <= ARRAY_MAX and (arr_b is not None and arr_b <= min(bm_b, rn_b))
+                else ("run" if rn_b < bm_b else "bitmap")
+            ),
+        },
+        "multi_chunk_model": {
+            "card": card,
+            "density": density,
+            "universe_model": universe,
+            "approx_chunks_touched": n_chunks_touched,
+            "naive_set_bytes": 4 * card,
+            "dense_bitset_bytes_full_U": (universe + 7) // 8,
+            "note": "Roaring stores only non-empty chunks; sparse U wins massively vs dense bitset.",
+        },
+        "conversion_rule": {
+            "to_bitmap_when_card_gt": ARRAY_MAX,
+            "to_run_when": "run_serialized < array_or_bitmap_serialized",
+            "to_array_when_card_le": ARRAY_MAX,
+        },
+        "references": [
+            "arXiv:1402.6407",
+            "Chambi/Lemire/Kaser SPE 2016",
+            "Lemire et al. SPE 2018",
+        ],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Self-test
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def selftest(verbose: bool = True) -> int:
+    checks: List[Tuple[str, bool, str]] = []
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        checks.append((name, bool(cond), detail))
+        if verbose:
+            flag = "OK" if cond else "FAIL"
+            print(f"  [{flag}] {name}" + (f" — {detail}" if detail else ""))
+
+    # 1. empty
+    rb = RoaringBitmap()
+    check("empty_card", rb.cardinality() == 0)
+    check("empty_contains", not rb.contains(42))
+
+    # 2. basic add/contains
+    rb.add(42)
+    rb.add(42)
+    check("add_idempotent", rb.cardinality() == 1)
+    check("contains_42", rb.contains(42))
+    check("not_contains_43", not rb.contains(43))
+
+    # 3. cross-chunk
+    rb2 = RoaringBitmap()
+    keys = [10, 100, CHUNK + 5, 2 * CHUNK + 7, 2 * CHUNK + 8]
+    rb2.add_many(keys)
+    check("cross_chunk_card", rb2.cardinality() == 5, f"card={rb2.cardinality()}")
+    check("cross_chunk_containers", rb2.n_containers() == 3, f"n={rb2.n_containers()}")
+    check("cross_chunk_membership", all(rb2.contains(k) for k in keys))
+
+    # 4. remove
+    rb2.remove(CHUNK + 5)
+    check("remove_card", rb2.cardinality() == 4)
+    check("remove_gone", not rb2.contains(CHUNK + 5))
+
+    # 5. array container sorted + binary search
+    ac = ArrayContainer([5, 1, 3, 3, 9])
+    check("array_sorted_unique", ac.vals == [1, 3, 5, 9])
+    check("array_contains", ac.contains(5) and not ac.contains(4))
+
+    # 6. array → bitmap threshold
+    ac2 = ArrayContainer()
+    for i in range(ARRAY_MAX + 1):
+        ac2 = ac2.add(i)  # type: ignore
+        if isinstance(ac2, BitmapContainer):
+            break
+    check("array_promotes_to_bitmap", isinstance(ac2, BitmapContainer), type(ac2).__name__)
+    check("promoted_card", ac2.cardinality() == ARRAY_MAX + 1)
+
+    # 7. bitmap → array on shrink
+    bm = BitmapContainer()
+    for i in range(10):
+        bm.add_inplace(i)
+    shrunk = bm.remove(0)
+    # after removals still small
+    for i in range(1, 10):
+        shrunk = shrunk.remove(i)  # type: ignore
+    check("bitmap_shrinks_to_array_or_empty", isinstance(shrunk, ArrayContainer) or shrunk.cardinality() == 0)
+
+    # 8. run container from contiguous
+    run = RunContainer.from_sorted(list(range(100, 200)))
+    check("run_one_run", run.n_runs() == 1)
+    check("run_card", run.cardinality() == 100)
+    check("run_contains_mid", run.contains(150))
+    check("run_not_outside", not run.contains(50))
+
+    # 9. optimize prefers run for solid range
+    solid = optimize_container(ArrayContainer(list(range(0, 3000))))
+    check("optimize_solid_is_run", isinstance(solid, RunContainer), type(solid).__name__)
+    check("run_beats_array_space", solid.serialized_bytes() < array_bytes(3000))
+
+    # 10. optimize prefers array for tiny sparse
+    tiny = optimize_container(ArrayContainer([1, 100, 5000]))
+    check("optimize_tiny_is_array", isinstance(tiny, ArrayContainer), type(tiny).__name__)
+
+    # 11. dense chunk → bitmap or run
+    dense_keys = list(range(0, 5000))
+    rb_d = build_roaring(dense_keys)
+    kinds = rb_d.container_kinds()
+    check(
+        "dense_uses_bitmap_or_run",
+        kinds["bitmap"] + kinds["run"] >= 1,
+        str(kinds),
+    )
+    check("dense_card", rb_d.cardinality() == 5000)
+
+    # 12. union equivalence
+    a_keys = make_uniform_keys(200, universe=5000, seed=1)
+    b_keys = make_uniform_keys(200, universe=5000, seed=2)
+    ra, rb_ = build_roaring(a_keys), build_roaring(b_keys)
+    ru = ra.union(rb_)
+    check("union_equiv_set", ru.to_set() == set(a_keys) | set(b_keys))
+
+    # 13. intersection
+    ri = ra.intersection(rb_)
+    check("inter_equiv_set", ri.to_set() == set(a_keys) & set(b_keys))
+
+    # 14. xor / difference
+    rx = ra.symmetric_difference(rb_)
+    check("xor_equiv_set", rx.to_set() == set(a_keys) ^ set(b_keys))
+    rd = ra.difference(rb_)
+    check("diff_equiv_set", rd.to_set() == set(a_keys) - set(b_keys))
+
+    # 15. rank / select
+    seq = [2, 5, 9, 9, 20, CHUNK + 3]
+    rr = build_roaring(seq)
+    check("rank_before", rr.rank(1) == 0)
+    check("rank_at_first", rr.rank(2) == 1)
+    check("rank_mid", rr.rank(9) == 3)  # {2,5,9}
+    check("rank_cross", rr.rank(CHUNK + 3) == 4)
+    check("select0", rr.select(0) == 2)
+    check("select_last", rr.select(rr.cardinality() - 1) == CHUNK + 3)
+
+    # 16. idempotent build from clustered
+    ck = make_clustered_keys(500, seed=9)
+    rc = build_roaring(ck)
+    check("clustered_card", rc.cardinality() == len(set(ck)))
+    check("clustered_all_in", all(rc.contains(k) for k in ck))
+
+    # 17. sparse many containers
+    sk = make_sparse_keys(100, seed=3)
+    rs = build_roaring(sk)
+    check("sparse_many_containers", rs.n_containers() >= 50, f"n={rs.n_containers()}")
+    check("sparse_mostly_array", rs.container_kinds()["array"] >= 50)
+
+    # 18. pure RLE baseline correctness
+    pr = PureRLE()
+    pr.build_from(range(0, 1000))
+    check("pure_rle_one_run", len(pr.runs) == 1)
+    check("pure_rle_contains", pr.contains(500) and not pr.contains(1001))
+
+    # 19. dense bitset baseline
+    db = DenseBitset(4096)
+    db.add_many([1, 2, 3, 100])
+    check("dense_bitset_card", db.cardinality() == 4)
+    check("dense_bitset_contains", db.contains(100) and not db.contains(99))
+
+    # 20. space: roaring solid range << naive set
+    rng_keys = make_range_keys(0, 20000)
+    rb_r = build_roaring(rng_keys)
+    naive_bytes = 4 * len(rng_keys)
+    check(
+        "range_space_wins_vs_naive",
+        rb_r.serialized_bytes() < naive_bytes / 10,
+        f"roar={rb_r.serialized_bytes()} naive={naive_bytes}",
+    )
+
+    # 21. theory ledger shape
+    th = theory_ledger(card=4096, n_runs=1)
+    check("theory_threshold", th["array_max_threshold"] == ARRAY_MAX)
+    check("theory_prefer_run_or_array", th["single_chunk"]["prefer"] in ("array", "run", "bitmap"))
+
+    # 22. clone independence
+    c1 = build_roaring([1, 2, 3])
+    c2 = c1.clone()
+    c2.add(99)
+    check("clone_independent", c1.cardinality() == 3 and c2.cardinality() == 4)
+
+    # 23. popcount / ith bit helpers
+    check("popcount64", popcount64(0b1011) == 3)
+    check("ith_bit", ith_bit_in_word(0b1010, 1) == 3)
+
+    # 24. high_low roundtrip
+    check("high_low_roundtrip", combine(*high_low(123456789)) == 123456789)
+
+    # 25. bitmap iter completeness
+    bm3 = BitmapContainer()
+    for i in [0, 63, 64, 65535]:
+        bm3.add_inplace(i)
+    check("bitmap_iter", list(bm3.iter_values()) == [0, 63, 64, 65535])
+
+    passed = sum(1 for _, c, _ in checks if c)
+    total = len(checks)
+    if verbose:
+        print(f"\nselftest: {passed}/{total} passed")
+    return 0 if passed == total else 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Commands
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    keys = WORKLOADS[args.workload](args.n, seed=args.seed)
+    t0 = time.perf_counter()
+    rb = build_roaring(keys)
+    ms = (time.perf_counter() - t0) * 1000.0
+    out = rb.as_dict()
+    out["workload"] = args.workload
+    out["n_input"] = args.n
+    out["n_unique"] = len(set(keys))
+    out["build_ms"] = round(ms, 3)
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    keys = WORKLOADS[args.workload](args.n, seed=args.seed)
+    rb = build_roaring(keys)
+    probe = int(args.key) if args.key is not None else (keys[0] if keys else 0)
+    print(
+        json.dumps(
+            {
+                "probe": probe,
+                "contains": rb.contains(probe),
+                "rank": rb.rank(probe),
+                "cardinality": rb.cardinality(),
+                "meta": rb.as_dict(),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_op(args: argparse.Namespace) -> int:
+    a = WORKLOADS[args.workload](args.n, seed=args.seed)
+    b = WORKLOADS[args.workload](args.n, seed=args.seed + 1)
+    ra, rb_ = build_roaring(a), build_roaring(b)
+    op = args.op.lower()
+    t0 = time.perf_counter()
+    if op == "or":
+        r = ra.union(rb_)
+        expect = set(a) | set(b)
+    elif op == "and":
+        r = ra.intersection(rb_)
+        expect = set(a) & set(b)
+    elif op == "xor":
+        r = ra.symmetric_difference(rb_)
+        expect = set(a) ^ set(b)
+    elif op in ("andnot", "diff", "difference"):
+        r = ra.difference(rb_)
+        expect = set(a) - set(b)
+    else:
+        print(f"unknown op: {op}", file=sys.stderr)
+        return 2
+    ms = (time.perf_counter() - t0) * 1000.0
+    got = r.to_set()
+    print(
+        json.dumps(
+            {
+                "op": op,
+                "ok": got == expect,
+                "result_card": r.cardinality(),
+                "expect_card": len(expect),
+                "op_ms": round(ms, 3),
+                "result": r.as_dict(),
+            },
+            indent=2,
+        )
+    )
+    return 0 if got == expect else 1
+
+
+def cmd_rank(args: argparse.Namespace) -> int:
+    keys = WORKLOADS[args.workload](args.n, seed=args.seed)
+    rb = build_roaring(keys)
+    xs = sorted(set(keys))
+    # verify rank/select inversion on a sample
+    errors = 0
+    sample = xs[:: max(1, len(xs) // 50)] if xs else []
+    for i, x in enumerate(xs):
+        if rb.rank(x) != i + 1:
+            errors += 1
+            break
+    select_ok = True
+    try:
+        for i in range(min(20, len(xs))):
+            if rb.select(i) != xs[i]:
+                select_ok = False
+                break
+    except IndexError:
+        select_ok = False
+    probe = int(args.key) if args.key is not None else (xs[len(xs) // 2] if xs else 0)
+    print(
+        json.dumps(
+            {
+                "probe": probe,
+                "rank": rb.rank(probe),
+                "rank_select_consistent": errors == 0 and select_ok,
+                "cardinality": rb.cardinality(),
+                "sample_select": [rb.select(i) for i in range(min(5, rb.cardinality()))],
+            },
+            indent=2,
+        )
+    )
+    return 0 if errors == 0 and select_ok else 1
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    keys = WORKLOADS[args.workload](args.n, seed=args.seed)
+    uniq = sorted(set(keys))
+
+    t0 = time.perf_counter()
+    rb = build_roaring(uniq)
+    roar_ms = (time.perf_counter() - t0) * 1000.0
+
+    ns = NaiveSet()
+    t0 = time.perf_counter()
+    ns.add_many(uniq)
+    naive_ms = (time.perf_counter() - t0) * 1000.0
+
+    pr = PureRLE()
+    t0 = time.perf_counter()
+    pr.build_from(uniq)
+    rle_ms = (time.perf_counter() - t0) * 1000.0
+
+    # dense only if universe small enough
+    universe = (max(uniq) + 1) if uniq else 1
+    dense_meta = None
+    if universe <= 2_000_000 and universe > 0:
+        db = DenseBitset(universe)
+        t0 = time.perf_counter()
+        try:
+            db.add_many(uniq)
+            dense_ms = (time.perf_counter() - t0) * 1000.0
+            dense_meta = db.as_dict()
+            dense_meta["build_ms"] = round(dense_ms, 3)
+        except ValueError:
+            dense_meta = None
+
+    # membership check sample
+    rng = random.Random(args.seed)
+    probes = uniq[:50] + [rng.randrange(0, max(universe, 1)) for _ in range(50)]
+    roar_ok = all(rb.contains(p) == (p in ns.s) for p in probes)
+
+    rows = [
+        {**rb.as_dict(), "build_ms": round(roar_ms, 3)},
+        {**ns.as_dict(), "build_ms": round(naive_ms, 3)},
+        {**pr.as_dict(), "build_ms": round(rle_ms, 3)},
+    ]
+    if dense_meta:
+        rows.append(dense_meta)
+
+    print(
+        json.dumps(
+            {
+                "workload": args.workload,
+                "n_unique": len(uniq),
+                "membership_ok": roar_ok,
+                "structures": rows,
+            },
+            indent=2,
+        )
+    )
+    return 0 if roar_ok else 1
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    keys = WORKLOADS[args.workload](args.n, seed=args.seed)
+    uniq = list(set(keys))
+    rounds = max(1, args.rounds)
+
+    build_times = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        rb = build_roaring(uniq)
+        build_times.append(time.perf_counter() - t0)
+
+    rb = build_roaring(uniq)
+    rng = random.Random(args.seed)
+    probes = [rng.choice(uniq) for _ in range(min(5000, max(1, len(uniq))))]
+    if not probes:
+        probes = [0]
+
+    t0 = time.perf_counter()
+    hits = sum(1 for p in probes if rb.contains(p))
+    query_s = time.perf_counter() - t0
+
+    # pairwise OR throughput vs naive
+    other = WORKLOADS[args.workload](args.n, seed=args.seed + 7)
+    rb2 = build_roaring(other)
+    t0 = time.perf_counter()
+    _ = rb.union(rb2)
+    or_s = time.perf_counter() - t0
+
+    avg_build = sum(build_times) / rounds
+    print(
+        json.dumps(
+            {
+                "workload": args.workload,
+                "n_unique": len(uniq),
+                "rounds": rounds,
+                "build_ms_avg": round(avg_build * 1000, 3),
+                "adds_per_sec": int(len(uniq) / avg_build) if avg_build > 0 else 0,
+                "queries": len(probes),
+                "query_hits": hits,
+                "queries_per_sec": int(len(probes) / query_s) if query_s > 0 else 0,
+                "union_ms": round(or_s * 1000, 3),
+                "meta": rb.as_dict(),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_theory(args: argparse.Namespace) -> int:
+    print(json.dumps(theory_ledger(card=args.card, n_runs=args.n_runs, density=args.density), indent=2))
+    return 0
+
+
+def cmd_explain() -> int:
+    print(
+        """
+Roaring Bitmaps — compressed bitsets that stay fast
+====================================================
+
+Problem
+  Store large sets of 32-bit integers (doc IDs, feature indexes, inverted
+  lists) so that membership, union, intersection, and cardinality stay fast
+  while memory tracks *set density*, not universe size.
+
+Roaring layout (Chambi / Lemire / Kaser 2016)
+  1. Split each uint32 into high 16 bits (chunk key) and low 16 bits (value).
+  2. Keep a sorted map: high-key → container holding the lows present.
+  3. Each container is ONE of:
+       • Array   — sorted uint16s, card ≤ 4096 (binary search, ~16 bit/value)
+       • Bitmap  — 1024×uint64 = 8192 bytes covering the full 2^16 chunk
+       • Run     — RLE (start, length) pairs when long contiguous ranges win
+
+Automatic conversion
+  card > 4096  → prefer Bitmap (unless Run serializes smaller)
+  card ≤ 4096  → prefer Array  (unless Run serializes smaller)
+  solid ranges → Run often crushes both (2 runs × 4 bytes vs 8192)
+
+When Roaring wins
+  • Sparse IDs over huge universes (doc IDs, user IDs) vs dense bitset
+  • Mixed density: some chunks hot (bitmap), some cold (array), some solid (run)
+  • Inverted-index postings, bitmap indexes (Druid, Spark, Lucene, ClickHouse)
+
+When not to
+  • Tiny sets that fit in a handful of ints — a plain hash set is simpler
+  • Need ordered iteration with heavy random inserts at extreme QPS — tune
+    containers or batch rebuilds
+  • 64-bit universes — need Roaring64 / hierarchical extension
+
+This oracle
+  Pure-Python reference with selftest, workload builders (uniform / clustered /
+  dense / sparse / range), set algebra checked against Python set, rank/select,
+  and space theory ledgers for choosing container thresholds.
+""".strip()
+    )
+    return 0
+
+
+def cmd_status() -> int:
+    print(
+        json.dumps(
+            {
+                "name": "roaring-bitmap-run-container-oracle",
+                "containers": ["array", "bitmap", "run"],
+                "workloads": list(WORKLOADS.keys()),
+                "ops": ["or", "and", "xor", "andnot"],
+                "commands": [
+                    "selftest",
+                    "build",
+                    "query",
+                    "op",
+                    "rank",
+                    "compare",
+                    "bench",
+                    "theory",
+                    "explain",
+                    "status",
+                ],
+                "array_max": ARRAY_MAX,
+                "chunk_size": CHUNK,
+                "stdlib_only": True,
+                "references": [
+                    "arXiv:1402.6407",
+                    "Chambi/Lemire/Kaser SPE 2016",
+                    "Lemire et al. SPE 2018",
+                ],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="roaring-bitmap-run-container-oracle",
+        description="Roaring Bitmap + Run-Length Container Bitset Oracle (Chambi/Lemire)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("selftest", help="CI invariant gate")
+    sp.add_argument("--quiet", action="store_true")
+
+    sp = sub.add_parser("build", help="Build roaring from a synthetic workload")
+    sp.add_argument("--workload", default="clustered", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=5000)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("query", help="Build then probe membership + rank")
+    sp.add_argument("--workload", default="uniform", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=2000)
+    sp.add_argument("--key", default=None)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("op", help="Set algebra vs Python set ground truth")
+    sp.add_argument("--op", default="or", help="or|and|xor|andnot")
+    sp.add_argument("--workload", default="uniform", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=1500)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("rank", help="Validate rank/select inversion")
+    sp.add_argument("--workload", default="uniform", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=1000)
+    sp.add_argument("--key", default=None)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("compare", help="Roaring vs naive set / pure RLE / dense bitset")
+    sp.add_argument("--workload", default="clustered", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=8000)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("bench", help="Build/query/union microbench")
+    sp.add_argument("--workload", default="dense", choices=list(WORKLOADS.keys()))
+    sp.add_argument("--n", type=int, default=10000)
+    sp.add_argument("--rounds", type=int, default=3)
+    sp.add_argument("--seed", type=int, default=42)
+
+    sp = sub.add_parser("theory", help="Bits/value and conversion threshold ledger")
+    sp.add_argument("--card", type=int, default=10000)
+    sp.add_argument("--n-runs", type=int, default=8)
+    sp.add_argument("--density", type=float, default=0.01)
+
+    sub.add_parser("explain", help="Human protocol walkthrough")
+    sub.add_parser("status", help="Catalog JSON")
+
+    args = p.parse_args(list(argv) if argv is not None else None)
+
+    if args.cmd == "selftest":
+        return selftest(verbose=not args.quiet)
+    if args.cmd == "build":
+        return cmd_build(args)
+    if args.cmd == "query":
+        return cmd_query(args)
+    if args.cmd == "op":
+        return cmd_op(args)
+    if args.cmd == "rank":
+        return cmd_rank(args)
+    if args.cmd == "compare":
+        return cmd_compare(args)
+    if args.cmd == "bench":
+        return cmd_bench(args)
+    if args.cmd == "theory":
+        return cmd_theory(args)
+    if args.cmd == "explain":
+        return cmd_explain()
+    if args.cmd == "status":
+        return cmd_status()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

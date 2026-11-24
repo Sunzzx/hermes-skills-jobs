@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+import sys, math, random
+
+def softmax(logits):
+    m = max(logits)
+    exp = [math.exp(x - m) for x in logits]
+    s = sum(exp)
+    return [x / s for x in exp]
+
+def sample_categorical(probs):
+    r = random.random()
+    acc = 0.0
+    for i, p in enumerate(probs):
+        acc += p
+        if r <= acc:
+            return i
+    return len(probs) - 1
+
+class SpeculativeEngine:
+    def __init__(self, vocab_size=32):
+        self.vocab_size = vocab_size
+
+    def verify_tokens(self, draft_tokens, draft_probs_list, target_probs_list):
+        accepted = []
+        for i, (tok, q_probs, p_probs) in enumerate(zip(draft_tokens, draft_probs_list, target_probs_list)):
+            q = q_probs[tok]
+            p = p_probs[tok]
+            accept_prob = min(1.0, p / max(q, 1e-12))
+            if random.random() < accept_prob:
+                accepted.append(tok)
+            else:
+                adjusted = [max(0.0, p_probs[j] - draft_probs_list[i][j]) for j in range(self.vocab_size)]
+                s = sum(adjusted)
+                if s > 0:
+                    adjusted = [x / s for x in adjusted]
+                    recovered = sample_categorical(adjusted)
+                else:
+                    recovered = sample_categorical(p_probs)
+                accepted.append(recovered)
+                return accepted, False
+        return accepted, True
+
+def main():
+    engine = SpeculativeEngine(vocab_size=16)
+    draft_tokens = [2, 5, 8, 11]
+    draft_p = [[0.05]*16 for _ in range(4)]
+    target_p = [[0.05]*16 for _ in range(4)]
+    for i, tok in enumerate(draft_tokens):
+        draft_p[i][tok] = 0.8
+        target_p[i][tok] = 0.75
+    accepted, full = engine.verify_tokens(draft_tokens, draft_p, target_p)
+    print(f"✅ Speculative Decoding: {len(accepted)} tokens processed. Accepted={accepted}, Complete={full}")
+
+if __name__ == '__main__':
+    main()
